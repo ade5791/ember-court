@@ -97,7 +97,7 @@ export class WyvernBrain {
     this.ctx = ctx; this.rng = rng; this.colliders = colliders; this.bus = bus; this.actorId = actorId;
     this.x = BOSS.SPAWN[0]; this.z = BOSS.SPAWN[2]; this.y = 0; this.yaw = 0;   // yaw 0 faces -Z (toward... north)
     this.yaw = Math.PI;                                                          // spawn facing +Z (the player bank)
-    this.hp = BOSS.HP; this.posture = 0; this.phase = 1; this.pendingPhase = 0;
+    this.hp = BOSS.HP; this.posture = 0; this.phase = 1; this.pendingPhase = 0; this.forceNext = -1;
     this.stance = BossStance.GROUND_UP;
     this.state = BRAIN_STATE.WAIT; this.f = 0; this.waitF = 60;
     this.verb = -1; this.def = null; this.actionId = 0; this.hitDone = false; this.lastVerb = -1; this.lastRed = -1;
@@ -181,6 +181,8 @@ export class WyvernBrain {
 
   _choose(h, dist) {
     const P = PHASES[this.phase], r = this.rng;
+    // review fixture: one-shot forced ground verb (never set in play; no RNG draw so it cannot skew seeded runs)
+    if (this.forceNext >= 0) { const fv = this.forceNext; this.forceNext = -1; this._startVerb(fv); return; }
     if (this.phase >= 2 && this.lastVerb !== -1 && r.float() < P.air) { this._startTakeoff(); return; }
     // side of the hero relative to boss facing
     const dx = h.x - this.x, dz = h.z - this.z, fwd = dx * this.forwardX() + dz * this.forwardZ();

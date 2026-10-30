@@ -16,7 +16,10 @@ export const HERO_VERBS = Object.freeze({
   LIGHT_3: { clip: 'light_3', stamina: 16, lunge: 0.60, chainTo: null, chain: null, dodgeFrom: 30, dmg: 20, posture: 18 },
   HEAVY: { clip: 'heavy', stamina: 30, lunge: 0.80, chainTo: null, chain: null, dodgeFrom: 50, dmg: 32, posture: 34 },
 });
-export const HERO_DODGE = Object.freeze({ total: 34, travel: 3.0, travelF: [2, 22], stamina: 20, cancelFrom: 28 });
+export const HERO_DODGE = Object.freeze({ total: 34, travel: 3.0, travelF: [2, 22], stamina: 20, cancelFrom: 28, guardRange: 9.0 });
+// Guarded quickstep directions (relative to facing). Clip names match the MotionBricks bake (motion/mb/hero.combat.json).
+export const STEP_DIR = Object.freeze({ NONE: 0, F: 1, B: 2, L: 3, R: 4 });
+export const STEP_CLIP = Object.freeze(['dodge', 'dodge_F', 'dodge_B', 'dodge_L', 'dodge_R']);
 export const HERO_FINISHER_F = 96;          // matches the boss finisher length (WyvernBrain FINISHER_F)
 const HITSTUN_F = 20, GUARDBREAK_F = 50, DEATH_F = 100, ASSIST_RANGE = 4.5;
 const STAMINA_REGEN = 34 / 60, STAMINA_DELAY = 30, BLOCK_REGEN_SCALE = 0.35;
@@ -31,8 +34,13 @@ export function makeHeroCommand() {
 
 export class HeroSim {
   // timing: parsed attack-timing.json; colliders: world Colliders (optional); god: HP never below 1
-  constructor({ timing, colliders = null, god = false }) {
+  constructor({ timing, colliders = null, god = false, dodgeProfile = null }) {
     this.colliders = colliders; this.god = god;
+    // per-direction cumulative travel fractions (one per travel frame) from the MotionBricks root curve; linear fallback
+    const N = HERO_DODGE.travelF[1] - HERO_DODGE.travelF[0] + 1;
+    const lin = Float32Array.from({ length: N }, (_, i) => (i + 1) / N);
+    this.stepProfile = STEP_CLIP.map((c) => (dodgeProfile && dodgeProfile.clips[c] && dodgeProfile.clips[c].profile.length === N)
+      ? Float32Array.from(dodgeProfile.clips[c].profile) : lin);
     this.verbs = {};
     for (const k in HERO_VERBS) {
       const v = { ...HERO_VERBS[k], name: k }, t = timing.verbs[k];
@@ -55,7 +63,7 @@ export class HeroSim {
     this.hp = SIM.HP_PLAYER; this.stamina = SIM.STAMINA_MAX; this.staminaIdle = 0;
     this.state = HERO_STATE.LOCO; this.verb = null; this.actF = 0; this.actionId = 0; this.stateF = 0;
     this.invuln = false; this.dodgeF = -1; this.deflectF = -1; this.blocking = false;
-    this.stepDirX = 0; this.stepDirZ = 1; this.stepToward = 0; this.pushX = 0; this.pushZ = 0;
+    this.stepDirX = 0; this.stepDirZ = 1; this.stepToward = 0; this.pushX = 0; this.pushZ = 0; this.stepKind = STEP_DIR.NONE;
     this.queued = null; this.hitstunLen = HITSTUN_F;
     this.frame = 0; this.hitsTaken = 0; this.damageTaken = 0; this.damageDealt = 0; this.flash = 0;
     this.perfects = 0; this.deflects = 0; this.phantoms = 0; this.finishers = 0;
@@ -115,14 +123,36 @@ export class HeroSim {
     return true;
   }
 
-  _startDodge(cmd) {
+  _startDodge(cmd, targets) {
     if (!this._spend(HERO_DODGE.stamina)) return false;
     this.state = HERO_STATE.DODGE; this.dodgeF = 0; this.actF = 0; this.blocking = false; this.queued = null;
     const l = Math.hypot(cmd.mx, cmd.mz);
-    if (l > 0.1) { this.stepDirX = cmd.mx / l; this.stepDirZ = cmd.mz / l; }
-    else { this.stepDirX = -this.facingX(); this.stepDirZ = -this.facingZ(); }         // no stick: backstep
+    let dx, dz;
+    if (l > 0.1) { dx = cmd.mx / l; dz = cmd.mz / l; }
+    else { dx = -this.facingX(); dz = -this.facingZ(); }         // no stick: backstep
+    // Guarded quickstep: with a foe in range the hero squares up to it and steps in one of four directions
+    // relative to that facing (MotionBricks clips), never turning its back. Otherwise: the roll.
+    const t = targets ? this._nearest(targets, HERO_DODGE.guardRange) : null;
+    if (t) {
+      this.yaw = Math.atan2(-(t.x - this.x), -(t.z - this.z));
+      const fx = this.facingX(), fz = this.facingZ(), rx = Math.cos(this.yaw), rz = -Math.sin(this.yaw);
+      const f = dx * fx + dz * fz, r = dx * rx + dz * rz;
+      if (Math.abs(f) >= Math.abs(r)) { this.stepKind = f > 0 ? STEP_DIR.F : STEP_DIR.B; const g = f > 0 ? 1 : -1; dx = fx * g; dz = fz * g; }
+      else { this.stepKind = r > 0 ? STEP_DIR.R : STEP_DIR.L; const g = r > 0 ? 1 : -1; dx = rx * g; dz = rz * g; }
+    } else this.stepKind = STEP_DIR.NONE;
+    this.stepDirX = dx; this.stepDirZ = dz;
     this._event('dodge');
     return true;
+  }
+
+  _nearest(targets, range) {
+    let best = null, bd = range;
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i]; if (!t || !t.targetable) continue;
+      const d = Math.hypot(t.x - this.x, t.z - this.z) - (t.radius || 0);
+      if (d < bd) { bd = d; best = t; }
+    }
+    return best;
   }
 
   // Called by the game when a finisher is granted (boss stagger / duelist guardbreak). Hero is invulnerable for it.
@@ -160,9 +190,11 @@ export class HeroSim {
         this.dodgeF++; this.actF++;
         const D = HERO_DODGE;
         if (this.dodgeF >= D.travelF[0] && this.dodgeF <= D.travelF[1]) {
-          const s = D.travel / (D.travelF[1] - D.travelF[0] + 1);
+          // travel follows the clip's own root curve (planted feet); the total is exactly D.travel
+          const P = this.stepProfile[this.stepKind], j = this.dodgeF - D.travelF[0];
+          const s = D.travel * (P[j] - (j > 0 ? P[j - 1] : 0));
           mx = this.stepDirX * s; mz = this.stepDirZ * s;
-          this.yaw = wrap(this.yaw + Math.max(-TURN, Math.min(TURN, wrap(Math.atan2(-this.stepDirX, -this.stepDirZ) - this.yaw))));
+          if (this.stepKind === STEP_DIR.NONE) this.yaw = wrap(this.yaw + Math.max(-TURN, Math.min(TURN, wrap(Math.atan2(-this.stepDirX, -this.stepDirZ) - this.yaw))));
         }
         if (this.dodgeF >= D.cancelFrom && (cmd.attack || cmd.heavy)) {
           this.dodgeF = -1; this.state = HERO_STATE.LOCO;
@@ -189,7 +221,7 @@ export class HeroSim {
         if (cmd.attack && v.chainTo) this.queued = v.chainTo;
         if (cmd.heavy) this.queued = 'HEAVY';
         if (cmd.dodge) this.queued = 'DODGE';
-        if (this.queued === 'DODGE' && this.actF >= v.dodgeFrom) { this.state = HERO_STATE.LOCO; this._startDodge(cmd); break; }
+        if (this.queued === 'DODGE' && this.actF >= v.dodgeFrom) { this.state = HERO_STATE.LOCO; this._startDodge(cmd, targets); break; }
         if (this.queued && this.queued !== 'DODGE' && v.chain && this.actF >= v.chain[0] && this.actF <= v.chain[1]) {
           const q = this.queued; this.state = HERO_STATE.LOCO; if (!this._startVerb(q, targets)) this.state = HERO_STATE.LOCO;
           break;
@@ -204,7 +236,7 @@ export class HeroSim {
 
       default: {   // LOCO
         this.actF++;
-        if (cmd.dodge && this._startDodge(cmd)) break;
+        if (cmd.dodge && this._startDodge(cmd, targets)) break;
         if (cmd.heavy && this._startVerb('HEAVY', targets)) break;
         if (cmd.attack && this._startVerb('LIGHT_1', targets)) break;
         this.blocking = cmd.blockHeld;

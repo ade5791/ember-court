@@ -40,6 +40,19 @@ void main(){
   #include <colorspace_fragment>
 }`;
 
+// fire breath: additive flame sprites (hot core -> orange -> deep red) + normal-blended smoke, fixed pools
+const FLAME_N = 320, SMOKE_N = 64, FLAME_LIFE = 0.55, SMOKE_LIFE = 1.4;
+const FLAME_FS = `
+varying vec4 vColor;
+void main(){
+  vec2 d = gl_PointCoord - 0.5; float r = dot(d, d) * 4.0;
+  if (r > 1.0 || vColor.a <= 0.0) discard;
+  float k = (1.0 - r); k *= k;
+  gl_FragColor = vec4(vColor.rgb * vColor.a * k, 1.0);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}`;
+
 export class FxPool {
   static id = 'fx';
   static deps = ['world'];
@@ -57,10 +70,10 @@ export class FxPool {
     this.dropsPerSplash = Math.max(4, Math.floor(C.dropsPerSplash * k));
     this.group = new THREE.Group(); this.group.name = 'fx';
     scene.add(this.group);
-    this._initSparks(); this._initSprites(); this._initStreaks(); this._initAuras();
+    this._initSparks(); this._initSprites(); this._initStreaks(); this._initAuras(); this._initFlame();
     this.ghostOwners = [];               // { meshes:[{src, ghosts:[...]}], next, life:Float32Array, tint }
-    this.stats = { sparks: 0, blood: 0, drops: 0, streaks: 0, ghosts: 0, auras: 0, stains: 0, ripples: 0 };
-    this.maxSeen = { sparkBursts: 0, bloodBursts: 0, splashes: 0, streaks: 0, ghostsPerActor: 0, auras: 0 };
+    this.stats = { sparks: 0, blood: 0, drops: 0, streaks: 0, ghosts: 0, auras: 0, stains: 0, ripples: 0, flame: 0 };
+    this.maxSeen = { sparkBursts: 0, bloodBursts: 0, splashes: 0, streaks: 0, ghostsPerActor: 0, auras: 0, flame: 0 };
     const bus = ctx && ctx.get ? ctx.get('bus') : null;
     this.bus = bus;
     if (bus) {
@@ -396,6 +409,114 @@ export class FxPool {
     if (maxPer > this.maxSeen.ghostsPerActor) this.maxSeen.ghostsPerActor = maxPer;
   }
 
+  // ---------- fire breath: flame cone + embers + smoke (two Points objects, ring-allocated, no per-frame alloc) ----------
+  _initFlame() {
+    const mk = (n, fs, additive, name, order) => {
+      const pos = new Float32Array(n * 3), col = new Float32Array(n * 4), size = new Float32Array(n);
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+      g.setAttribute('aColor', new THREE.BufferAttribute(col, 4).setUsage(THREE.DynamicDrawUsage));
+      g.setAttribute('aSize', new THREE.BufferAttribute(size, 1).setUsage(THREE.DynamicDrawUsage));
+      g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 64);
+      const m = new THREE.ShaderMaterial({ vertexShader: SPRITE_VS, fragmentShader: fs, transparent: true, depthWrite: false,
+        blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending, uniforms: { uScale: this.spriteMat.uniforms.uScale } });
+      const p = new THREE.Points(g, m); p.frustumCulled = false; p.name = name; p.renderOrder = order; p.visible = false;
+      this.group.add(p);
+      return { p, pos, col, size, vel: new Float32Array(n * 3), life: new Float32Array(n), max: new Float32Array(n).fill(1), n, next: 0 };
+    };
+    this.flame = mk(FLAME_N, FLAME_FS, true, 'fx_flame', 12);
+    this.smoke = mk(SMOKE_N, SPRITE_FS, false, 'fx_smoke', 6);
+    this.flameAcc = 0; this.smokeAcc = 0; this.breathHeat = 0;
+    this.flameJet = new Uint8Array(FLAME_N);   // 1 = breath stream particle (low drag, widening), 0 = pool lick
+  }
+
+  // Emit breath this frame: origin (mouth), unit dir, cone half-angle, speed, rate (particles/s). dt = presentation dt.
+  breath(origin, dx, dy, dz, dt, { half = 0.22, speed = 10, rate = 220, size = 1 } = {}) {
+    if (dt <= 0) return;
+    const F = this.flame, r = this.rng;
+    this.breathHeat = 1;
+    this.flameAcc += rate * dt;
+    // orthonormal basis around dir (no allocation)
+    let ux = -dz, uy = 0, uz = dx; let ul = Math.hypot(ux, uz); if (ul < 1e-4) { ux = 1; uz = 0; ul = 1; } ux /= ul; uz /= ul;
+    const vx = dy * uz - dz * uy, vy = dz * ux - dx * uz, vz = dx * uy - dy * ux;
+    while (this.flameAcc >= 1) {
+      this.flameAcc -= 1;
+      const i = F.next; F.next = (F.next + 1) % F.n; const o = i * 3;
+      const a = r.float() * Math.PI * 2, s = Math.tan(half) * Math.sqrt(r.float()), sp = speed * r.range(0.75, 1.15);
+      let ex = dx + (ux * Math.cos(a) + vx * Math.sin(a)) * s, ey = dy + (uy * Math.cos(a) + vy * Math.sin(a)) * s, ez = dz + (uz * Math.cos(a) + vz * Math.sin(a)) * s;
+      const l = Math.hypot(ex, ey, ez) || 1;
+      F.pos[o] = origin.x + r.range(-0.1, 0.1); F.pos[o + 1] = origin.y + r.range(-0.1, 0.1); F.pos[o + 2] = origin.z + r.range(-0.1, 0.1);
+      F.vel[o] = ex / l * sp; F.vel[o + 1] = ey / l * sp; F.vel[o + 2] = ez / l * sp;
+      const life = FLAME_LIFE * r.range(0.7, 1.0); F.life[i] = life; F.max[i] = life;
+      F.size[i] = r.range(0.16, 0.28) * size; this.flameJet[i] = 1;
+    }
+    // embers at the mouth (velocity-stretched spark lines, shared spark pool)
+    if (r.float() < dt * 8) { _ex.set(dx * 0.6, dy * 0.6 + 0.3, dz * 0.6); this.burstSparks(origin, _ex, 0.45); }
+  }
+
+  // Low licking flames over a burning pool (called per frame per live pool, rate scales with remaining life).
+  poolFire(x, y, z, radius, dt, k = 1) {
+    if (dt <= 0 || this.reducedMotion && k < 0.5) return;
+    const F = this.flame, S = this.smoke, r = this.rng;
+    this.smokeAcc += 5 * k * dt;
+    let n = r.float() < 22 * k * dt ? 1 : 0;
+    while (n-- > 0) {
+      const i = F.next; F.next = (F.next + 1) % F.n; const o = i * 3;
+      const a = r.float() * Math.PI * 2, d = Math.sqrt(r.float()) * radius * 0.85;
+      F.pos[o] = x + Math.cos(a) * d; F.pos[o + 1] = y + 0.05; F.pos[o + 2] = z + Math.sin(a) * d;
+      F.vel[o] = r.range(-0.2, 0.2); F.vel[o + 1] = r.range(1.2, 2.4); F.vel[o + 2] = r.range(-0.2, 0.2);
+      const life = 0.55 * r.range(0.6, 1.0); F.life[i] = life; F.max[i] = life; F.size[i] = r.range(0.25, 0.5); this.flameJet[i] = 0;
+    }
+    while (this.smokeAcc >= 1) {
+      this.smokeAcc -= 1;
+      const i = S.next; S.next = (S.next + 1) % S.n; const o = i * 3;
+      const a = r.float() * Math.PI * 2, d = Math.sqrt(r.float()) * radius * 0.7;
+      S.pos[o] = x + Math.cos(a) * d; S.pos[o + 1] = y + 0.4; S.pos[o + 2] = z + Math.sin(a) * d;
+      S.vel[o] = r.range(-0.15, 0.15); S.vel[o + 1] = r.range(0.6, 1.1); S.vel[o + 2] = r.range(-0.15, 0.15);
+      const life = SMOKE_LIFE * r.range(0.7, 1.0); S.life[i] = life; S.max[i] = life; S.size[i] = r.range(0.8, 1.4);
+    }
+  }
+
+  _updateFlame(dt) {
+    const F = this.flame, S = this.smoke;
+    let nf = 0;
+    const dJet = Math.exp(-1.1 * dt), dLick = Math.exp(-2.8 * dt);   // time-based drag (frame-rate independent)
+    for (let i = 0; i < F.n; i++) {
+      const o = i * 3, o4 = i * 4;
+      if (F.life[i] <= 0) { F.col[o4 + 3] = 0; continue; }
+      F.life[i] -= dt;
+      const jet = this.flameJet[i], dr = jet ? dJet : dLick, ag = 1 - Math.max(0, F.life[i] / F.max[i]);
+      F.vel[o] *= dr; F.vel[o + 2] *= dr; F.vel[o + 1] = F.vel[o + 1] * dr + (jet ? (ag > 0.45 ? 3.0 : 0.4) : 2.2) * dt;   // drag + late buoyancy
+      F.pos[o] += F.vel[o] * dt; F.pos[o + 1] += F.vel[o + 1] * dt; F.pos[o + 2] += F.vel[o + 2] * dt;
+      if (F.pos[o + 1] < 0.25) {                     // flame hits the ford: spreads flat, licks upward
+        F.pos[o + 1] = 0.25; const sp = Math.hypot(F.vel[o], F.vel[o + 2]);
+        F.vel[o + 1] = Math.max(F.vel[o + 1], 0.8); if (sp > 4) { F.vel[o] *= 1.15; F.vel[o + 2] *= 1.15; }
+      }
+      const t = Math.max(0, F.life[i] / F.max[i]), age = 1 - t;
+      // white-yellow core -> orange -> deep red, HDR so the grade and bloom read it as a light source
+      F.col[o4] = 1.5 - 0.6 * age; F.col[o4 + 1] = Math.max(0.05, 0.7 - 1.1 * age); F.col[o4 + 2] = Math.max(0.0, 0.16 - 0.5 * age);
+      F.col[o4 + 3] = Math.min(1, t * 2.0) * Math.min(1, age * 6 + 0.35) * 0.55;
+      F.size[i] = F.size[i] + dt * (jet ? 2.6 : 1.2);  // jet widens down the cone, licks billow gently
+      if (F.life[i] <= 0) { F.col[o4 + 3] = 0; F.size[i] = 0; } else nf++;
+    }
+    let ns = 0;
+    for (let i = 0; i < S.n; i++) {
+      const o = i * 3, o4 = i * 4;
+      if (S.life[i] <= 0) { S.col[o4 + 3] = 0; continue; }
+      S.life[i] -= dt;
+      S.pos[o] += S.vel[o] * dt; S.pos[o + 1] += S.vel[o + 1] * dt; S.pos[o + 2] += S.vel[o + 2] * dt;
+      const t = Math.max(0, S.life[i] / S.max[i]);
+      S.col[o4] = 0.09; S.col[o4 + 1] = 0.07; S.col[o4 + 2] = 0.065; S.col[o4 + 3] = Math.min(1, (1 - t) * 3) * t * 0.45;
+      S.size[i] += dt * 0.9;
+      if (S.life[i] > 0) ns++;
+    }
+    this.breathHeat = Math.max(0, this.breathHeat - dt * 4);
+    this.stats.flame = nf; if (nf > this.maxSeen.flame) this.maxSeen.flame = nf;
+    F.p.visible = nf > 0; S.p.visible = ns > 0;
+    if (nf > 0) { const a = F.p.geometry.attributes; a.position.needsUpdate = true; a.aColor.needsUpdate = true; a.aSize.needsUpdate = true; }
+    if (ns > 0) { const a = S.p.geometry.attributes; a.position.needsUpdate = true; a.aColor.needsUpdate = true; a.aSize.needsUpdate = true; }
+  }
+
   // ---------- event routing ----------
   onContact(p) {
     if (p.outcome === Outcome.HIT || p.outcome === Outcome.GUARDBREAK) {
@@ -419,6 +540,13 @@ export class FxPool {
   update(dt) {
     if (dt <= 0) return;
     this._updateSparks(dt); this._updateSprites(dt); this._updateStreaks(dt); this._updateAuras(dt); this._updateGhosts(dt);
+    this._updateFlame(dt);
+  }
+
+  // Clear every live flame/smoke particle (retry / restart).
+  clearFire() {
+    for (const P of [this.flame, this.smoke]) { P.life.fill(0); P.col.fill(0); P.p.visible = false; }
+    this.flameAcc = this.smokeAcc = 0; this.breathHeat = 0;
   }
 
   // Make every pooled object visible for one compileAsync pass (three compiles only traverseVisible), then restore.
@@ -437,7 +565,7 @@ export class FxPool {
       this.bus.off('world/footstep', this._l.step); this.bus.off('fx/request', this._l.req);
     }
     const geos = new Set(this._auraGeos), mats = new Set();
-    for (const m of [this.sparkMesh, this.sprites, this.streakMesh]) { geos.add(m.geometry); mats.add(m.material); }
+    for (const m of [this.sparkMesh, this.sprites, this.streakMesh, this.flame.p, this.smoke.p]) { geos.add(m.geometry); mats.add(m.material); }
     for (const a of this.auras) { mats.add(a.rm); mats.add(a.dm); }
     for (const o of this.ghostOwners) for (const set of o.ghosts) for (const e of set) { mats.add(e.mat); if (e.skel.boneTexture) e.skel.boneTexture.dispose(); }
     geos.forEach((g) => g.dispose()); mats.forEach((m) => m.dispose());
@@ -447,3 +575,4 @@ export class FxPool {
 }
 
 function noop() {}
+const _ex = new THREE.Vector3();

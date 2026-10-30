@@ -12,13 +12,15 @@ import { Rng } from '../core/Rng.js';
 import { EventBus, EVENT_IDS } from '../core/EventBus.js';
 import { Loop } from '../core/Loop.js';
 import { World } from '../world/World.js';
-import { CameraDirector } from '../camera/CameraDirector.js';
+import { CameraDirector, CINE, CINE_NAMES } from '../camera/CameraDirector.js';
+import { BossVerb, ActorKind } from '../shared/enums.js';
 import { FxPool, TELEGRAPH } from '../fx/FxPool.js';
 import { Input } from '../player/Input.js';
 import { TouchOverlay } from '../ui/TouchOverlay.js';
 import { Hud } from '../ui/Hud.js';
 import { GameSim, GameState, HERO_STATE, DUEL_STATE, BRAIN_STATE, ART, WAVES, GAME_STATE_NAMES } from './GameSim.js';
-import { HERO_DODGE, HERO_FINISHER_F } from './HeroSim.js';
+import { HERO_DODGE, HERO_FINISHER_F, STEP_DIR, STEP_CLIP } from './HeroSim.js';
+import { buildQuickstep, quickstepClipTime } from '../shared/quickstep.js';
 import { DUELIST } from './DuelistSim.js';
 
 const ROOT = new URL('../../', import.meta.url).href;      // site root (works under a GitHub Pages sub-path)
@@ -26,7 +28,9 @@ const qs = new URLSearchParams(location.search);
 const quality = resolveQuality(qs.get('q') || (matchMedia('(pointer: coarse)').matches ? 'medium' : 'high'));
 const seed = Number(qs.get('seed') || SIM.SEED_DEFAULT) >>> 0;
 const reducedMotion = qs.get('rm') === '1' || matchMedia('(prefers-reduced-motion: reduce)').matches;
-const useBot = qs.get('bot') === '1';
+// ?rec=1 recording mode: autopilot with full tactics, no cursor / credit / debug chrome, auto-start, letterboxed cine
+const recMode = qs.get('rec') === '1';
+const useBot = qs.get('bot') === '1' || recMode;
 const HERO_ID = 1, BOSS_ID = 100, MAX_DUELISTS = 3;
 const t0 = performance.now();
 const progress = (p) => { const b = document.querySelector('#load .pb i'); if (b) b.style.width = Math.round(p * 100) + '%'; };
@@ -68,13 +72,17 @@ progress(0.35);
 
 // ------------------------------------------------------------------ actors
 const loader = new GLTFLoader();
-const [heroGltf, enemyGltf, bossGltf, bossManifest, timing] = await Promise.all([
+const [heroGltf, enemyGltf, bossGltf, bossManifest, timing, heroCombat, heroLunge] = await Promise.all([
   loader.loadAsync(ROOT + 'characters/hero/out/character.glb'),
   loader.loadAsync(ROOT + 'characters/enemy/out/character.glb'),
   loader.loadAsync(ROOT + 'characters/boss/wyvern.glb'),
   fetch(ROOT + 'characters/boss/wyvern.manifest.json').then((r) => r.json()),
   fetch(ROOT + 'assets/attack-timing.json').then((r) => r.json()),
+  fetch(ROOT + 'motion/mb/hero.combat.json').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+  fetch(ROOT + 'motion/mb/hero.lunge.json').then((r) => (r.ok ? r.json() : null)).catch(() => null),
 ]);
+// MotionBricks guarded quickstep (NVIDIA MotionBricks bake): sim travel curve + clip-time map from one root curve
+const QUICKSTEP = buildQuickstep(heroCombat, HERO_DODGE.travelF[1] - HERO_DODGE.travelF[0] + 1);
 progress(0.8);
 
 function prepModel(model) {
@@ -130,7 +138,38 @@ pinHips(heroGltf); pinHips(enemyGltf);
 const hero = { root: new THREE.Group(), pivot: new THREE.Group(), model: heroGltf.scene, fallback: 'idle' };
 hero.pivot.rotation.y = Math.PI; hero.root.add(hero.pivot); hero.pivot.add(hero.model); scene.add(hero.root);
 const heroBones = prepModel(hero.model);
-makeActions(hero, heroGltf.animations); markLoops(hero);
+// baked quickstep clips -> AnimationClips on the hero skeleton. Every track must resolve to a real bone, else the
+// clip is dropped (and the sim falls back to the roll) rather than shipping a silent no-op clip.
+const mbClips = [];
+if (heroCombat) {
+  const bn = {}; heroGltf.scene.traverse((o) => { if (o.isBone) bn[o.name] = o; });
+  for (const name in QUICKSTEP.clips) {
+    const c = heroCombat.clips[name], F = c.frames, fps = c.fps || 60;
+    const times = Float32Array.from({ length: F }, (_, i) => i / fps), tracks = [];
+    let bad = 0;
+    for (const b in c.tracks) { if (!bn[b]) bad++; tracks.push(new THREE.QuaternionKeyframeTrack(b + '.quaternion', times, c.tracks[b])); }
+    if (c.hipsPos) tracks.push(new THREE.VectorKeyframeTrack('Hips.position', times, c.hipsPos));
+    if (bad || !bn.Hips) { console.warn('quickstep clip dropped (unresolved tracks):', name, bad); delete QUICKSTEP.clips[name]; continue; }
+    mbClips.push(new THREE.AnimationClip(name, (F - 1) / fps, tracks));
+  }
+}
+// MotionBricks lunge footwork (zero-slide bake): LEG bones only, layered under the authored swing upper body.
+// Display-only - the sim still owns travel (HeroSim lunge), so fixed-seed runs are unchanged.
+const LUNGE_BONES = ['LeftUpLeg', 'LeftLeg', 'LeftFoot', 'LeftToeBase', 'RightUpLeg', 'RightLeg', 'RightFoot', 'RightToeBase'];
+const LUNGE_FOR = { LIGHT_1: 'lunge_s', LIGHT_2: 'lunge_s', LIGHT_3: 'lunge_m', HEAVY: 'lunge_h' };
+const lungeOk = {};
+if (heroLunge && heroLunge.clips) {
+  const bn = {}; heroGltf.scene.traverse((o) => { if (o.isBone) bn[o.name] = o; });
+  for (const name of ['lunge_s', 'lunge_m', 'lunge_h']) {
+    const c = heroLunge.clips[name]; if (!c) continue;
+    const fps = c.fps || 60, times = Float32Array.from({ length: c.frames }, (_, i) => i / fps), tracks = [];
+    let bad = 0;
+    for (const b of LUNGE_BONES) { if (!bn[b] || !c.tracks[b]) { bad++; continue; } tracks.push(new THREE.QuaternionKeyframeTrack(b + '.quaternion', times, c.tracks[b])); }
+    if (bad) { console.warn('lunge clip dropped (unresolved tracks):', name, bad); continue; }
+    mbClips.push(new THREE.AnimationClip(name, (c.frames - 1) / fps, tracks)); lungeOk[name] = (c.frames - 1) / fps;
+  }
+}
+makeActions(hero, heroGltf.animations.concat(mbClips)); markLoops(hero);
 const heroSword = addSword(heroBones.RightHand, { position: [-0.3366, 7.6967, -1.1561], quaternion: [0.00031, 0.23882, 0.6183, 0.74878], scale: 100 });
 // locomotion stride lengths from the manifest (natural speed x duration) -> phase-locked feet
 const STRIDE_WALK = 1.377 * 1.067, STRIDE_RUN = 4.632 * 0.667;
@@ -214,7 +253,7 @@ touch.init(ctx, tq === null ? { sink: input } : { sink: input, visible: tq === '
 systems.set('touch', touch);
 
 // ------------------------------------------------------------------ simulation
-const sim = new GameSim({ seed, timing, colliders, bus, god: qs.get('god') === '1', startAt: qs.get('start') || 'title' });
+const sim = new GameSim({ seed, timing, colliders, bus, god: qs.get('god') === '1', startAt: qs.get('start') || 'title', dodgeProfile: QUICKSTEP });
 const H = sim.hero;
 const prev = { hx: H.x, hz: H.z, hyaw: H.yaw, bx: 0, by: 0, bz: 0, byaw: 0 };
 const dPrev = []; for (let i = 0; i < MAX_DUELISTS; i++) dPrev.push({ x: 0, z: 0, yaw: 0 });
@@ -253,7 +292,7 @@ sim.onTelegraph = (v, art, lead) => {
 };
 sim.onDuelistTelegraph = (d) => { const s = slotFor(d); if (s) fx.telegraph(s.actorId, TELEGRAPH.NORMAL, d.verbs[d.verb].startup, s.root, 1.1); };
 bus.on('action/end', (p) => { if (p.actorId === BOSS_ID) fx.clearTelegraph(BOSS_ID); });
-bus.on('boss/phase', () => { cam.onBossPhase(); hud.banner('THE WYVERN RAGES', '', 1.8); });
+bus.on('boss/phase', (p) => { if (!p.intro) { cam.onBossPhase(); hud.banner('THE WYVERN RAGES', '', 1.8); } });
 
 function slotFor(d) { for (const s of slots) if (s.bound === d) return s; return null; }
 function bindSlots() {
@@ -272,7 +311,7 @@ sim.onState = (s) => {
   if (s === GameState.INTRO) hud.banner('THE CRIMSON FORD', 'cross the river', 2.4);
   else if (s === GameState.WAVE) hud.banner('WAVE ' + (sim.wave + 1), WAVES[sim.wave].name.toUpperCase(), 2.0);
   else if (s === GameState.WAVE_CLEAR) hud.banner('CLEARED', sim.wave + 1 < WAVES.length ? 'more come' : 'something stirs in the gorge', 2.0);
-  else if (s === GameState.BOSS) { hud.banner('FORD WYVERN', 'guardian of the crossing', 2.6); fx.clearTelegraph(BOSS_ID); }
+  else if (s === GameState.BOSS) { hud.banner('FORD WYVERN', 'guardian of the crossing', 2.6); fx.clearTelegraph(BOSS_ID); cam.cine(CINE.INTRO); }
   else if (s === GameState.VICTORY) { hud.setStats('victory', statsView()); }
   else if (s === GameState.DEFEAT) { hud.setStats('defeat', statsView()); }
   syncScreen();
@@ -300,6 +339,14 @@ function botCommand(c) {
   if (sim.bossActive && sim.brain.state !== BRAIN_STATE.DEAD) { tx = sim.brain.x; tz = sim.brain.z; td = Math.hypot(tx - H.x, tz - H.z); has = true; reach = 2.6; }
   if (!has) return;
   const dx = tx - H.x, dz = tz - H.z, l = Math.hypot(dx, dz) || 1;
+  // rec tactics: never stand in a burning pool - walk out radially (only in ?rec=1; qa bot stays byte-identical)
+  if (recMode && sim.bossActive && sim.frame + 1 !== bot.at) {
+    for (const p of sim.brain.pools) {
+      if (p.left <= 0) continue;
+      const px = H.x - p.x, pz = H.z - p.z, pd = Math.hypot(px, pz);
+      if (pd < p.r + 0.6) { c.mx = px / (pd || 1); c.mz = pz / (pd || 1); c.speed = SIM.RUN_SPEED; return; }
+    }
+  }
   if (sim.frame + 1 === bot.at) {
     if (bot.kind === 1) c.blockPress = true;
     else { c.dodge = true; if (bot.kind === 3) { c.mx = dx / l; c.mz = dz / l; } else { c.mx = -dz / l; c.mz = dx / l; } }
@@ -344,8 +391,27 @@ const footSlide = { worst: 0, samples: 0 };
 
 function poseHero(alpha, presentDt) {
   const st = H.state;
-  if (st === HERO_STATE.ACTION) { pose(hero, 1, H.verbs[H.verb].clip, 1, H.verbClipTime(H.actF)); return; }
-  if (st === HERO_STATE.DODGE) { pose(hero, 1, 'dodge', 1, (H.actF / HERO_DODGE.total) * hero.dur.dodge * 0.8); return; }
+  if (st === HERO_STATE.ACTION) {
+    const v = H.verbs[H.verb], ln = LUNGE_FOR[H.verb], ld = ln && lungeOk[ln];
+    if (ld) {
+      // footwork covers the sim lunge window (startup+active) and settles through early recovery
+      const lf = v.startup + v.active, span = lf * 1.5, u = Math.min(1, (H.actF + alpha) / span);
+      const w = H.actF < span ? 1.6 : Math.max(0, 1.6 * (1 - (H.actF - span) / 12));
+      pose(hero, 2, v.clip, 1, H.verbClipTime(H.actF), ln, w, u * ld);
+      return;
+    }
+    pose(hero, 1, v.clip, 1, H.verbClipTime(H.actF)); return;
+  }
+  if (st === HERO_STATE.DODGE) {
+    const qn = H.stepKind !== STEP_DIR.NONE ? STEP_CLIP[H.stepKind] : null, qi = qn && QUICKSTEP.clips[qn];
+    if (qi) {
+      // guarded quickstep: clip time follows the sim frame through the same root curve the sim travels on
+      const d = H.dodgeF >= 0 ? H.dodgeF : HERO_DODGE.total;
+      pose(hero, 1, qn, 1, quickstepClipTime(qi, d + alpha, HERO_DODGE.travelF[0], HERO_DODGE.travelF[1], HERO_DODGE.total));
+      return;
+    }
+    pose(hero, 1, 'dodge', 1, (H.actF / HERO_DODGE.total) * hero.dur.dodge * 0.8); return;
+  }
   if (st === HERO_STATE.HITSTUN) { pose(hero, 1, 'hit', 1, Math.min(H.actF, 40) / 60); return; }
   if (st === HERO_STATE.DEAD) { pose(hero, 1, 'death', 1, Math.min(H.actF / 60, hero.dur.death - 0.01)); return; }
   if (st === HERO_STATE.FINISHER) { pose(hero, 1, 'heavy', 1, (H.actF / HERO_FINISHER_F) * hero.dur.heavy); return; }
@@ -396,7 +462,58 @@ function poseBoss(alpha) {
   orbMesh.visible = B.orb.active;
   if (B.orb.active) { orbMesh.position.set(B.orb.x, B.orb.y, B.orb.z); orbMat.color.setHex(B.orb.reflected ? 0x8fd0ff : 0xffb04a); }
   if (B.verb === 7 && B.state === BRAIN_STATE.ACTION && (B.f % 6) === 0) fx.afterimage(BOSS_ID, false, 0.6);
+  breathFx(B);
 }
+
+// Fire breath: flame cone from the jaw while the breath verb is live (window padded so the flame leads and trails
+// the damage frames), plus licking flame and smoke over every burning pool. Presentation only.
+// [first frame, last frame, aim distance ahead of body (= pool.ahead + 0.8), cone half-angle]
+const BREATH_WIN = { [BossVerb.W_HAZE]: [53, 88, 3.8, 0.30], [BossVerb.W_SKY_HAZE]: [15, 40, 4.0, 0.5] };
+const _mouth = new THREE.Vector3(), _aim = new THREE.Vector3();
+let breathOn = 0;
+function breathFx(B) {
+  const dt = presentDtNow;
+  const w = B.state === BRAIN_STATE.ACTION && BREATH_WIN[B.verb];
+  if (w && B.f >= w[0] && B.f <= w[1]) {
+    HEAD.getWorldPosition(_mouth);
+    // aim at the ground ahead of the body (where the pool lands), from the jaw
+    const fx_ = B.forwardX(), fz_ = B.forwardZ();
+    _aim.set(B.x + fx_ * w[2], colliders.terrainY(B.z + fz_ * w[2]) + 0.3, B.z + fz_ * w[2]).sub(_mouth);
+    _mouth.x += fx_ * 0.9; _mouth.z += fz_ * 0.9;
+    const l = _aim.length() || 1;
+    const ramp = Math.min(1, (B.f - w[0]) / 6) * Math.min(1, (w[1] - B.f) / 6 + 0.2);
+    fx.breath(_mouth, _aim.x / l, _aim.y / l, _aim.z / l, dt, { half: w[3] * 0.7, speed: 13 + l * 0.9, rate: 480 * ramp, size: B.airborne ? 1.4 : 1.1 });
+    if (!breathOn && dt > 0) cam.impact('light');
+    breathOn = 1;
+  } else breathOn = 0;
+  for (let i = 0; i < 3; i++) {
+    const p = B.pools[i];
+    if (p.left > 0) fx.poolFire(p.x, colliders.terrainY(p.z) + 0.2, p.z, p.r * Math.min(1, p.left / 30), dt, Math.min(1, p.left / 60));
+  }
+}
+let presentDtNow = 0;
+
+let wasFinisher = false;
+// cinematic letterbox: two DOM bars (no extra render pass), height follows the cine blend weight
+const lbStyle = document.createElement('style');
+lbStyle.textContent = '.ec-lb{position:fixed;left:0;right:0;height:11vh;background:#000;z-index:5;pointer-events:none;transform:scaleY(0);will-change:transform}' +
+  '.ec-lb.t{top:0;transform-origin:top}.ec-lb.b{bottom:0;transform-origin:bottom}' +
+  (recMode ? 'body,canvas{cursor:none!important}.ec-credit,.ec-fps,#stats{display:none!important}' : '');
+document.head.appendChild(lbStyle);
+const lbTop = document.createElement('div'), lbBot = document.createElement('div');
+lbTop.className = 'ec-lb t'; lbBot.className = 'ec-lb b'; document.body.append(lbTop, lbBot);
+let lbLast = -1;
+function letterbox(w) {
+  const k = Math.round(w * 100) / 100;
+  if (k === lbLast) return; lbLast = k;
+  lbTop.style.transform = lbBot.style.transform = 'scaleY(' + k + ')';
+}
+bus.on('boss/phase', (p) => { if (!p.intro) cam.cine(CINE.PHASE); });
+bus.on('actor/death', (p) => {
+  if (p.kind !== ActorKind.WYVERN) return;
+  cam.cine(CINE.DEATH); loop.dilate(0.4, 70, true);
+  hud.banner('THE FORD IS YOURS', 'the wyvern falls', 3.0);
+});
 
 let lockOn = false;
 function chooseCamTarget() {
@@ -421,6 +538,7 @@ function update(realDt, alpha, presentDt, noRender = false) {
   input.consumeLook(_look);
   if (!loop.paused) cam.addLook(_look.x, _look.y);
 
+  presentDtNow = presentDt;
   hero.root.position.set(prev.hx + (H.x - prev.hx) * alpha, colliders.terrainY(H.z), prev.hz + (H.z - prev.hz) * alpha);
   hero.root.rotation.y = lerpAngle(prev.hyaw, H.yaw, alpha);
   poseHero(alpha, presentDt);
@@ -435,6 +553,15 @@ function update(realDt, alpha, presentDt, noRender = false) {
 
   camHero.position.copy(hero.root.position); camHero.yaw = H.yaw;
   chooseCamTarget();
+  // cinematic subject: the wyvern's body-to-head midpoint (tracks the landing, the roar and the fall)
+  if (sim.bossActive) {
+    HEAD.getWorldPosition(_a); cam.cineFocus.copy(boss.root.position).lerp(_a, 0.5); cam.cineFocus.y = Math.max(1.4, cam.cineFocus.y);
+    if (cam.cineKind === CINE.FINISHER) cam.cineFocus.copy(boss.root.position);
+  }
+  const fin = H.state === HERO_STATE.FINISHER && sim.bossActive;
+  if (fin && !wasFinisher) cam.cine(CINE.FINISHER);
+  wasFinisher = fin;
+  letterbox(cam.cineActive ? cam.cineW : 0);
   cam.update(presentDt);
   camera.getWorldDirection(_dir); camYaw = Math.atan2(-_dir.x, -_dir.z);
   placeFill();
@@ -447,10 +574,10 @@ function update(realDt, alpha, presentDt, noRender = false) {
 const credit = 'Boss model: ' + bossManifest.provenance.attribution.replace(/CC-BY-(\d)\.(\d)/g, 'CC BY $1.$2') + '. Three.js (MIT).';
 const hud = new Hud().init({
   credit, touch: touch.visible,
-  onStart: () => { input.releaseAll(); sim.start(); },
-  onRetry: () => { input.releaseAll(); input.clearBuffer(); sim.retry(); },
-  onRestart: () => { input.releaseAll(); input.clearBuffer(); setPaused(false); sim.reset('title'); sim.start(); },
-  onResume: () => setPaused(false),
+  onStart: () => { input.releaseAll(); sim.start(); resetPresentation(); },
+  onRetry: () => { input.releaseAll(); input.clearBuffer(); sim.retry(); resetPresentation(); },
+  onRestart: () => { input.releaseAll(); input.clearBuffer(); setPaused(false); sim.reset('title'); sim.start(); resetPresentation(); },
+  onResume: () => { setPaused(false); captureMouse(); },
 });
 systems.set('hud', hud);
 let touchWanted = touch.visible;
@@ -476,6 +603,31 @@ const onVisPause = () => { if (document.visibilityState === 'hidden') setPaused(
 document.addEventListener('visibilitychange', onVisPause);
 const onLockLost = () => { if (!document.pointerLockElement && hud._screen === '' && !useBot && input.device === 1 /* KBM */) setPaused(true); };
 document.addEventListener('pointerlockchange', onLockLost);
+
+// Retry / restart / start: the sim was rebuilt, so every presentation-side memory of the old run goes too.
+// Without this the camera keeps the dead run's orbit yaw, shake, push-in and slow-mo, whips across the arena
+// toward the respawned hero, and mouse look stays dead because the end screen released pointer lock.
+function resetPresentation() {
+  loop.clearDilation(); loop.accumulator = 0;
+  prev.hx = H.x; prev.hz = H.z; prev.hyaw = H.yaw;
+  const B = sim.brain; prev.bx = B.x; prev.by = B.y; prev.bz = B.z; prev.byaw = B.yaw;
+  loco.lastX = H.x; loco.lastZ = H.z; loco.phase = 0;
+  fx.streakEnd(HERO_ID); streak.hero = false; fx.clearTelegraph(BOSS_ID); fx.clearFire(); wasFinisher = false; breathOn = 0; letterbox(0);
+  for (let i = 0; i < slots.length; i++) { if (slots[i].actorId >= 0) { fx.streakEnd(slots[i].actorId); fx.clearTelegraph(slots[i].actorId); } streak.d[i] = false; }
+  bindSlots(); boss.root.visible = sim.bossActive;
+  input.consumeLook(_look);                       // drop look delta accumulated on the end screen
+  cam.reset(H.yaw); camHero.position.set(H.x, colliders.terrainY(H.z), H.z); camHero.yaw = H.yaw;
+  chooseCamTarget(); cam.update(1 / 60);          // snap frame: right shot, framing yaw, no blend
+  camResets++;
+  captureMouse();
+}
+let camResets = 0;
+// re-take pointer lock inside the click that closed the screen (a user gesture), so look works immediately
+function captureMouse() {
+  if (useBot || touch.visible || qs.get('lock') === '0') return;
+  const el = renderer.domElement;
+  if (document.pointerLockElement !== el && el.requestPointerLock) { const r = el.requestPointerLock(); if (r && r.catch) r.catch(() => {}); }
+}
 
 let hudFrame = 0;
 function lateUpdate(dt) {
@@ -514,6 +666,7 @@ const loop = new Loop({ fixedUpdate, update, lateUpdate, reducedMotion });
   for (const s of slots) s.root.visible = true; boss.root.visible = true;
   fx.prewarmBegin();
   for (const m of poolMeshes) m.visible = true; orbMesh.visible = true;
+  lbTop.style.transform = 'scaleY(0)';
   renderer.setRenderTarget(null);
   await renderer.compileAsync(scene, camera, scene);
   renderer.shadowMap.needsUpdate = true;
@@ -543,6 +696,7 @@ function onResize() {
 }
 addEventListener('resize', onResize);
 loop.start();
+if (recMode) setTimeout(() => { if (sim.state === GameState.TITLE) { sim.start(); resetPresentation(); } }, Number(qs.get('recDelay') || 2500));
 
 window.__ember = {
   ready: true, seed, quality: quality.name, loadMs, credit, bot: useBot,
@@ -550,12 +704,28 @@ window.__ember = {
     return { frame: loop.simFrame, simFrame: sim.frame, state: GAME_STATE_NAMES[sim.state], wave: sim.wave, paused: loop.paused,
       screen: hud._screen, hash: sim.hash(), heroHp: H.hp, heroState: H.state, stamina: H.stamina, bossHp: sim.brain.hp,
       duelists: sim.duelists.map((d) => ({ hp: d.hp, alive: d.alive })), stats: { ...sim.stats }, run: { ...runStats },
-      backDot: H.maxBackwardDot, camMin: cam.minClearance, programs: { start: progStart, now: renderer.info.programs.length },
+      backDot: H.maxBackwardDot, camMin: cam.minClearance, camResets, quickstep: Object.keys(QUICKSTEP.clips),
+      cam: { shot: cam.shot, trauma: cam.trauma, push: cam.push, phantom: cam.phantom, orbitYaw: cam.orbitYaw, heroYaw: H.yaw, timeScale: loop.timeScale,
+        dist: Math.hypot(camera.position.x - H.x, camera.position.z - H.z) },
+      cine: { kind: CINE_NAMES[cam.cineKind], w: cam.cineW, log: cam.cineLog.slice() }, fx: fx.counts(), rec: recMode, lunge: Object.keys(lungeOk),
+      step: { kind: H.stepKind, dodgeF: H.dodgeF, clip: hero.on.length ? hero.on[0].getClip().name : '' }, programs: { start: progStart, now: renderer.info.programs.length },
       dropped: loop.droppedSteps, touch: touch.visible, hud: { hp: hud.el.hpI.style.transform, boss: hud.el.boss.style.display } };
+  },
+  // camera framing probe (QA): hero chest in NDC + camera forward bearing, read straight off the rendered camera
+  camProbe() {
+    const v = new THREE.Vector3(H.x, colliders.terrainY(H.z) + 1.2, H.z).project(camera), f = new THREE.Vector3();
+    camera.getWorldDirection(f);
+    return { nx: v.x, ny: v.y, nz: v.z, yaw: Math.atan2(f.x, f.z), fov: camera.fov, boom: cam.cur.boom, pulledIn: cam.pulledIn, dist: camera.position.distanceTo(new THREE.Vector3(H.x, camera.position.y, H.z)), shot: cam.shot, trauma: cam.trauma, timeScale: loop.timeScale, state: GAME_STATE_NAMES[sim.state], cine: cam.cineActive ? cam.cineW : 0 };
   },
   frames() { const n = Math.min(ftN, ft.length); return Array.from(ft.subarray(0, n)); },
   resetFrames() { ftN = 0; lastNow = 0; },
   layout: () => touch.layoutReport(),
+  // Recorder lockstep: stop RAF, then each advance(n) runs n exact 1/60 s frames (sim + render), so captured
+  // footage is a true 60 fps regardless of how slow the capture itself is.
+  lockstep() { loop.stop(); return true; },
+  forceBossVerb(name) { const v = BossVerb[name]; if (v === undefined) return false; sim.brain.forceNext = v; return true; },
+  advance(n = 1) { for (let i = 0; i < n; i++) { loop.advance(1 / 60); } return { state: GAME_STATE_NAMES[sim.state], frame: sim.frame, cine: CINE_NAMES[cam.cineKind] }; },
+  begin() { if (sim.state === GameState.TITLE) { input.releaseAll(); sim.start(); resetPresentation(); } return GAME_STATE_NAMES[sim.state]; },
   pump(n) { const p = loop.paused; loop.paused = false; for (let i = 0; i < n; i++) loop.step(); loop.paused = p; update(0, 1, 0); return sim.frame; },
   dispose() {
     loop.dispose(); removeEventListener('resize', onResize);

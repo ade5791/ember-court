@@ -19,9 +19,9 @@ const HERO_SPAWN = [0, 9, 0];
 const BOSS_ID = 100, HERO_ID = 1;
 
 export class GameSim {
-  constructor({ seed = SIM.SEED_DEFAULT, timing, colliders = null, bus = null, god = false, startAt = 'title' }) {
+  constructor({ seed = SIM.SEED_DEFAULT, timing, colliders = null, bus = null, god = false, startAt = 'title', dodgeProfile = null }) {
     this.seed = seed >>> 0; this.timing = timing; this.colliders = colliders; this.bus = bus; this.god = god;
-    this.hero = new HeroSim({ timing, colliders, god });
+    this.hero = new HeroSim({ timing, colliders, god, dodgeProfile });
     this.hero.id = HERO_ID;
     this.hero.contactSink = (R) => { if (this.onHeroContact) this.onHeroContact(R); };
     this.hero.hitSink = (t, dealt, v) => { if (this.onHeroHit) this.onHeroHit(t, dealt, v); };
