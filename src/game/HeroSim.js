@@ -1,0 +1,301 @@
+// HeroSim - player hero simulation for the full game (owner: game). No THREE, no DOM, no Math.random.
+// Fixed 60 Hz. Reads a per-step command built from the input layer (or the QA bot), owns position, yaw,
+// stamina, HP and the verb state machine. Field names match what WyvernBrain / DuelistSim read on a hero
+// (x, z, y, yaw, radius, invuln, dodgeF, deflectF, blocking, stepDirX/Z, stepToward, pushX/Z, id).
+// Verb frame data comes from assets/attack-timing.json (same table the controls page plays).
+import { SIM } from '../shared/constants.js';
+import { Outcome } from '../shared/enums.js';
+
+export const HERO_STATE = Object.freeze({ LOCO: 0, ACTION: 1, DODGE: 2, HITSTUN: 3, DEAD: 4, FINISHER: 5 });
+export const HERO_STATE_NAMES = Object.freeze(['LOCO', 'ACTION', 'DODGE', 'HITSTUN', 'DEAD', 'FINISHER']);
+
+// gameplay numbers per verb (frame data comes from the timing table)
+export const HERO_VERBS = Object.freeze({
+  LIGHT_1: { clip: 'light_1', stamina: 12, lunge: 0.35, chainTo: 'LIGHT_2', chain: [16, 30], dodgeFrom: 20, dmg: 14, posture: 12 },
+  LIGHT_2: { clip: 'light_2', stamina: 12, lunge: 0.35, chainTo: 'LIGHT_3', chain: [15, 31], dodgeFrom: 19, dmg: 14, posture: 12 },
+  LIGHT_3: { clip: 'light_3', stamina: 16, lunge: 0.60, chainTo: null, chain: null, dodgeFrom: 30, dmg: 20, posture: 18 },
+  HEAVY: { clip: 'heavy', stamina: 30, lunge: 0.80, chainTo: null, chain: null, dodgeFrom: 50, dmg: 32, posture: 34 },
+});
+export const HERO_DODGE = Object.freeze({ total: 34, travel: 3.0, travelF: [2, 22], stamina: 20, cancelFrom: 28 });
+export const HERO_FINISHER_F = 96;          // matches the boss finisher length (WyvernBrain FINISHER_F)
+const HITSTUN_F = 20, GUARDBREAK_F = 50, DEATH_F = 100, ASSIST_RANGE = 4.5;
+const STAMINA_REGEN = 34 / 60, STAMINA_DELAY = 30, BLOCK_REGEN_SCALE = 0.35;
+const TURN = SIM.TURN_RATE / 60;
+const TAU = Math.PI * 2;
+function wrap(a) { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI; }
+
+// Command filled each fixed step by the game (input layer or bot). Reused, never reallocated.
+export function makeHeroCommand() {
+  return { mx: 0, mz: 0, speed: 0, attack: false, heavy: false, dodge: false, blockHeld: false, blockPress: false };
+}
+
+export class HeroSim {
+  // timing: parsed attack-timing.json; colliders: world Colliders (optional); god: HP never below 1
+  constructor({ timing, colliders = null, god = false }) {
+    this.colliders = colliders; this.god = god;
+    this.verbs = {};
+    for (const k in HERO_VERBS) {
+      const v = { ...HERO_VERBS[k], name: k }, t = timing.verbs[k];
+      v.phases = t.phases.map((p) => ({ ...p })); let f = 0;
+      for (const p of v.phases) { p.start = f; f += p.specF; }
+      v.total = f; v.startup = v.phases[0].specF; v.active = v.phases[1].specF;
+      v.reach = t.contactDistM || 1.35;
+      this.verbs[k] = v;
+    }
+    this.id = 1; this.radius = SIM.CAPSULE_RADIUS;
+    this.contactSink = null;     // (rec) => void, presentation hook after the hero applied an incoming contact
+    this.hitSink = null;         // (targetKind, target, dmg, info) => void, presentation hook for outgoing hits
+    this._hitIds = new Int32Array(8); this._hitN = 0;
+    this.reset(0, 9, 0);
+  }
+
+  reset(x, z, yaw) {
+    this.x = x; this.z = z; this.y = 0; this.yaw = yaw; this.prevX = x; this.prevZ = z; this.prevYaw = yaw;
+    this.speed = 0; this.vx = 0; this.vz = 0;
+    this.hp = SIM.HP_PLAYER; this.stamina = SIM.STAMINA_MAX; this.staminaIdle = 0;
+    this.state = HERO_STATE.LOCO; this.verb = null; this.actF = 0; this.actionId = 0; this.stateF = 0;
+    this.invuln = false; this.dodgeF = -1; this.deflectF = -1; this.blocking = false;
+    this.stepDirX = 0; this.stepDirZ = 1; this.stepToward = 0; this.pushX = 0; this.pushZ = 0;
+    this.queued = null; this.hitstunLen = HITSTUN_F;
+    this.frame = 0; this.hitsTaken = 0; this.damageTaken = 0; this.damageDealt = 0; this.flash = 0;
+    this.perfects = 0; this.deflects = 0; this.phantoms = 0; this.finishers = 0;
+    this.lastEvent = ''; this.lastEventFrame = -999; this.lastStaminaFail = -999;
+    this.maxBackwardDot = 1;
+    this._hitN = 0;
+  }
+
+  get alive() { return this.state !== HERO_STATE.DEAD; }
+  facingX() { return -Math.sin(this.yaw); }
+  facingZ() { return -Math.cos(this.yaw); }
+
+  // Frame index inside the current verb and its phase name ('STARTUP' | 'ACTIVE' | 'RECOVERY' | 'DONE').
+  phase() {
+    if (this.state !== HERO_STATE.ACTION) return null;
+    const v = this.verbs[this.verb];
+    for (const p of v.phases) if (this.actF < p.start + p.specF) return p.phase;
+    return 'DONE';
+  }
+  // Clip time (s) of the current verb at fractional frame f (piecewise warp, spec frames -> clip frames).
+  verbClipTime(f) {
+    const v = this.verbs[this.verb];
+    for (let i = 0; i < v.phases.length; i++) {
+      const p = v.phases[i];
+      if (f < p.start + p.specF || i === v.phases.length - 1) {
+        const played = p.playedF || p.specF, u = Math.min(1, Math.max(0, (f - p.start) / played));
+        return (p.clipF[0] + (p.clipF[1] - p.clipF[0]) * u) / 60;
+      }
+    }
+    return 0;
+  }
+
+  _event(name) { this.lastEvent = name; this.lastEventFrame = this.frame; }
+
+  _spend(cost) {
+    if (this.stamina < cost * 0.5) { this.lastStaminaFail = this.frame; return false; }   // allow going slightly negative-free
+    this.stamina = Math.max(0, this.stamina - cost); this.staminaIdle = 0; return true;
+  }
+
+  // nearest live target inside the assist range, for attack snap-turn
+  _assistYaw(targets) {
+    let best = null, bd = ASSIST_RANGE;
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i]; if (!t || !t.targetable) continue;
+      const d = Math.hypot(t.x - this.x, t.z - this.z) - (t.radius || 0);
+      if (d < bd) { bd = d; best = t; }
+    }
+    return best ? Math.atan2(-(best.x - this.x), -(best.z - this.z)) : null;
+  }
+
+  _startVerb(name, targets) {
+    const v = this.verbs[name];
+    if (!this._spend(v.stamina)) return false;
+    this.state = HERO_STATE.ACTION; this.verb = name; this.actF = 0; this.actionId++; this._hitN = 0;
+    this.queued = null; this.blocking = false;
+    const ay = this._assistYaw(targets); if (ay !== null) this.yaw = ay;
+    return true;
+  }
+
+  _startDodge(cmd) {
+    if (!this._spend(HERO_DODGE.stamina)) return false;
+    this.state = HERO_STATE.DODGE; this.dodgeF = 0; this.actF = 0; this.blocking = false; this.queued = null;
+    const l = Math.hypot(cmd.mx, cmd.mz);
+    if (l > 0.1) { this.stepDirX = cmd.mx / l; this.stepDirZ = cmd.mz / l; }
+    else { this.stepDirX = -this.facingX(); this.stepDirZ = -this.facingZ(); }         // no stick: backstep
+    this._event('dodge');
+    return true;
+  }
+
+  // Called by the game when a finisher is granted (boss stagger / duelist guardbreak). Hero is invulnerable for it.
+  startFinisher(target) {
+    if (this.state === HERO_STATE.DEAD) return false;
+    this.state = HERO_STATE.FINISHER; this.actF = 0; this.invuln = true; this.blocking = false; this.queued = null;
+    if (target) this.yaw = Math.atan2(-(target.x - this.x), -(target.z - this.z));
+    this.finishers++; this._event('finisher');
+    return true;
+  }
+
+  // One fixed step. cmd: makeHeroCommand(); targets: [{ x, z, radius, targetable, id, onHeroHit(hero, verbDef, part) }]
+  step(cmd, targets) {
+    this.frame++;
+    this.prevX = this.x; this.prevZ = this.z; this.prevYaw = this.yaw;
+    if (this.deflectF >= 0 && ++this.deflectF > 20) this.deflectF = -1;
+    if (cmd.blockPress) this.deflectF = 0;
+    if (this.flash > 0) this.flash--;
+    let mx = 0, mz = 0;                       // planar displacement this step (metres)
+
+    switch (this.state) {
+      case HERO_STATE.DEAD: this.actF++; this.speed = 0; break;
+
+      case HERO_STATE.FINISHER:
+        this.actF++;
+        if (this.actF >= HERO_FINISHER_F) { this.state = HERO_STATE.LOCO; this.invuln = false; }
+        break;
+
+      case HERO_STATE.HITSTUN:
+        this.actF++;
+        if (this.actF >= this.hitstunLen) { this.state = HERO_STATE.LOCO; this.actF = 0; }
+        break;
+
+      case HERO_STATE.DODGE: {
+        this.dodgeF++; this.actF++;
+        const D = HERO_DODGE;
+        if (this.dodgeF >= D.travelF[0] && this.dodgeF <= D.travelF[1]) {
+          const s = D.travel / (D.travelF[1] - D.travelF[0] + 1);
+          mx = this.stepDirX * s; mz = this.stepDirZ * s;
+          this.yaw = wrap(this.yaw + Math.max(-TURN, Math.min(TURN, wrap(Math.atan2(-this.stepDirX, -this.stepDirZ) - this.yaw))));
+        }
+        if (this.dodgeF >= D.cancelFrom && (cmd.attack || cmd.heavy)) {
+          this.dodgeF = -1; this.state = HERO_STATE.LOCO;
+          this._startVerb(cmd.heavy ? 'HEAVY' : 'LIGHT_1', targets);
+        } else if (this.dodgeF >= D.total) { this.dodgeF = -1; this.state = HERO_STATE.LOCO; this.actF = 0; }
+        break;
+      }
+
+      case HERO_STATE.ACTION: {
+        const v = this.verbs[this.verb];
+        this.actF++;
+        // lunge during startup->active, scaled down when a target is already inside reach
+        const lungeF = v.startup + v.active;
+        if (this.actF <= lungeF) {
+          let near = Infinity;
+          for (let i = 0; i < targets.length; i++) { const t = targets[i]; if (t && t.targetable) near = Math.min(near, Math.hypot(t.x - this.x, t.z - this.z) - (t.radius || 0)); }
+          const k = near < v.reach * 0.8 ? 0.25 : 1;
+          mx = this.facingX() * v.lunge * k / lungeF; mz = this.facingZ() * v.lunge * k / lungeF;
+        }
+        // contact: ACTIVE window, reach + target radius, inside a 70 degree half-cone, once per (actionId, target)
+        const ph = this.phase();
+        if (ph === 'ACTIVE') this._resolveSwing(v, targets);
+        // buffered follow-ups
+        if (cmd.attack && v.chainTo) this.queued = v.chainTo;
+        if (cmd.heavy) this.queued = 'HEAVY';
+        if (cmd.dodge) this.queued = 'DODGE';
+        if (this.queued === 'DODGE' && this.actF >= v.dodgeFrom) { this.state = HERO_STATE.LOCO; this._startDodge(cmd); break; }
+        if (this.queued && this.queued !== 'DODGE' && v.chain && this.actF >= v.chain[0] && this.actF <= v.chain[1]) {
+          const q = this.queued; this.state = HERO_STATE.LOCO; if (!this._startVerb(q, targets)) this.state = HERO_STATE.LOCO;
+          break;
+        }
+        if (this.actF >= v.total) {
+          this.state = HERO_STATE.LOCO; this.actF = 0;
+          if (this.queued === 'HEAVY') this._startVerb('HEAVY', targets);
+          this.queued = null;
+        }
+        break;
+      }
+
+      default: {   // LOCO
+        this.actF++;
+        if (cmd.dodge && this._startDodge(cmd)) break;
+        if (cmd.heavy && this._startVerb('HEAVY', targets)) break;
+        if (cmd.attack && this._startVerb('LIGHT_1', targets)) break;
+        this.blocking = cmd.blockHeld;
+        const want = this.blocking ? Math.min(cmd.speed, SIM.WALK_SPEED) : cmd.speed;
+        const l = Math.hypot(cmd.mx, cmd.mz);
+        const dirX = l > 1e-4 ? cmd.mx / l : 0, dirZ = l > 1e-4 ? cmd.mz / l : 0;
+        // speed ramps with ACCEL/DECEL; facing always turns toward travel, so the hero never runs backwards
+        const target = l > 1e-4 ? want : 0;
+        const rate = (target > this.speed ? SIM.ACCEL : SIM.DECEL) / 60;
+        this.speed += Math.max(-rate, Math.min(rate, target - this.speed));
+        if (l > 1e-4) {
+          const wantYaw = Math.atan2(-dirX, -dirZ), d = wrap(wantYaw - this.yaw);
+          this.yaw = wrap(this.yaw + Math.max(-TURN, Math.min(TURN, d)));
+          // move along facing once mostly turned (no backwards travel while the turn completes)
+          const fx = this.facingX(), fz = this.facingZ();
+          const dot = fx * dirX + fz * dirZ;
+          const s = this.speed / 60 * Math.max(0, dot);
+          mx = fx * s; mz = fz * s;
+        } else {
+          mx = this.facingX() * this.speed / 60; mz = this.facingZ() * this.speed / 60;
+        }
+      }
+    }
+
+    // stamina regen (slower while blocking, none while acting)
+    if (this.state === HERO_STATE.LOCO || this.state === HERO_STATE.HITSTUN) {
+      if (++this.staminaIdle > STAMINA_DELAY) this.stamina = Math.min(SIM.STAMINA_MAX, this.stamina + STAMINA_REGEN * (this.blocking ? BLOCK_REGEN_SCALE : 1));
+    } else this.staminaIdle = 0;
+
+    // integrate + collide
+    this.x += mx + this.pushX; this.z += mz + this.pushZ; this.pushX = 0; this.pushZ = 0;
+    if (this.colliders) { const r = this.colliders.resolveCapsule(this.x, this.z, this.radius, 0.0, SIM.ACTOR_HEIGHT); this.x = r.x; this.z = r.z; }
+    const lim = SIM.ARENA_HALF - this.radius;
+    this.x = Math.max(-lim, Math.min(lim, this.x)); this.z = Math.max(-lim, Math.min(lim, this.z));
+    this.vx = (this.x - this.prevX) * 60; this.vz = (this.z - this.prevZ) * 60;
+    if (this.state !== HERO_STATE.LOCO) this.speed = Math.hypot(this.vx, this.vz);
+    else {
+      // backwards-running metric: self-driven travel (push excluded) against facing, while actually moving
+      const sp = Math.hypot(mx, mz) * 60;
+      if (sp > 0.5) { const dot = (mx * this.facingX() + mz * this.facingZ()) * 60 / sp; if (dot < this.maxBackwardDot) this.maxBackwardDot = dot; }
+    }
+  }
+
+  _resolveSwing(v, targets) {
+    const fx = this.facingX(), fz = this.facingZ();
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i]; if (!t || !t.targetable) continue;
+      let seen = false;
+      for (let k = 0; k < this._hitN; k++) if (this._hitIds[k] === t.id) { seen = true; break; }
+      if (seen) continue;
+      const dx = t.x - this.x, dz = t.z - this.z, d = Math.hypot(dx, dz);
+      if (d > v.reach + (t.radius || 0) + this.radius) continue;
+      if (d > 0.3 && (dx * fx + dz * fz) / d < 0.34) continue;      // 70 degree half-cone
+      if (this._hitN < this._hitIds.length) this._hitIds[this._hitN++] = t.id;
+      const dealt = t.onHeroHit ? t.onHeroHit(this, v, this.actionId) : 0;
+      if (dealt > 0) this.damageDealt += dealt;
+      if (this.hitSink) this.hitSink(t, dealt, v);
+    }
+  }
+
+  // Incoming contact record (WyvernBrain / DuelistSim rec shape). Applied exactly once by the attacker.
+  applyContact(R) {
+    if (this.state === HERO_STATE.DEAD) return;
+    const O = Outcome;
+    if (R.outcome === O.HIT) {
+      this.hp -= R.damage; this.damageTaken += R.damage; this.hitsTaken++; this.flash = 12;
+      if (this.god && this.hp < 1) this.hp = 1;
+      if (this.hp <= 0) { this.hp = 0; this.state = HERO_STATE.DEAD; this.actF = 0; this.blocking = false; this.dodgeF = -1; this._event('death'); }
+      else if (R.damage >= 8) { this.state = HERO_STATE.HITSTUN; this.actF = 0; this.hitstunLen = HITSTUN_F; this.blocking = false; this.queued = null; this._event('hit'); }
+      else this._event('chip');
+    } else if (R.outcome === O.BLOCKED) {
+      this.hp = Math.max(this.god ? 1 : 0, this.hp - (R.damage || 0));
+      this.stamina -= (R.posture || 0) * 0.5; this.staminaIdle = 0;
+      if (this.stamina <= 0) { this.stamina = 0; this.state = HERO_STATE.HITSTUN; this.actF = 0; this.hitstunLen = GUARDBREAK_F; this.blocking = false; this._event('guardbreak'); }
+      else this._event('block');
+    } else if (R.outcome === O.PARRIED) {
+      if (R.perfect) { this.perfects++; this._event('perfect'); this.stamina = Math.min(SIM.STAMINA_MAX, this.stamina + 15); }
+      else { this.deflects++; this._event('deflect'); }
+    } else if (R.outcome === O.WHIFF_IFRAME && R.effect && R.effect !== 'none') {
+      this.phantoms++; this._event(R.effect);
+    }
+    if (R.effect === 'slip' || R.effect === 'behind') { this.x = R.tx; this.z = R.tz; this.prevX = this.x; this.prevZ = this.z; }
+    if (this.contactSink) this.contactSink(R, this);
+  }
+
+  hash() {
+    let x = 2166136261 >>> 0;
+    const q = (v) => { x = Math.imul(x ^ (Math.round(v * 1000) | 0), 16777619) >>> 0; };
+    q(this.x); q(this.z); q(this.yaw); q(this.hp); q(this.stamina); q(this.state); q(this.actF);
+    return x >>> 0;
+  }
+}
+
+export const DEATH_HOLD_F = DEATH_F;

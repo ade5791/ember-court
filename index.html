@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><link rel="icon" href="data:,">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0d0806">
+<title>Ember Court - The Crimson Ford</title>
+<meta name="description" content="A third-person sword duel in a red maple river gorge. Deflect, phantom-step, and face the Ford Wyvern. Runs in the browser on Three.js.">
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0d0806;overscroll-behavior:none;touch-action:none;-webkit-user-select:none;user-select:none}
+  canvas{display:block;width:100vw;height:100vh}
+  #load{position:fixed;inset:0;z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;
+    background:radial-gradient(ellipse at 50% 60%,#3a120a 0%,#0d0806 70%);color:#ffdcb8;font:600 15px/1.2 system-ui,sans-serif;letter-spacing:.32em;transition:opacity .7s}
+  #load h1{margin:0;font:700 clamp(28px,7vw,56px)/1 Georgia,serif;letter-spacing:.18em;color:#ffe7cf;text-shadow:0 0 24px #c43a1a}
+  #load .pb{width:min(320px,60vw);height:3px;background:rgba(255,210,170,.15)}
+  #load .pb i{display:block;height:100%;width:0;background:linear-gradient(90deg,#c43a1a,#ffb04a);transition:width .25s}
+  #load .err{max-width:80vw;color:#ff9a7a;font:13px/1.5 system-ui,sans-serif;letter-spacing:0;text-align:center;white-space:pre-wrap}
+</style>
+<script type="importmap">{"imports":{"three":"./vendor/three/build/three.module.js","three/addons/":"./vendor/three/examples/jsm/"}}</script>
+</head>
+<body>
+<div id="load"><h1>EMBER COURT</h1><div>LOADING THE FORD</div><div class="pb"><i></i></div></div>
+<script>
+  addEventListener('error', function (e) { var l = document.getElementById('load'); if (l) { var d = document.createElement('div'); d.className = 'err'; d.textContent = 'Failed to start: ' + (e.message || e.error); l.appendChild(d); } });
+  addEventListener('unhandledrejection', function (e) { var l = document.getElementById('load'); if (l) { var d = document.createElement('div'); d.className = 'err'; d.textContent = 'Failed to start: ' + (e.reason && e.reason.message || e.reason); l.appendChild(d); } });
+</script>
+<script type="module" src="./src/game/main.js"></script>
+</body>
+</html>

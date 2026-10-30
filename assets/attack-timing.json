@@ -1,0 +1,339 @@
+{
+ "fps": 60,
+ "note": "piecewise time-warp of each clip onto COMBAT_SPEC phases; hitbox follows spec frames, not clip",
+ "verbs": {
+  "LIGHT_1": {
+   "clip": "light_1",
+   "phases": [
+    {
+     "phase": "STARTUP",
+     "specF": 10,
+     "clipF": [
+      23,
+      35
+     ],
+     "rate": 1.2
+    },
+    {
+     "phase": "ACTIVE",
+     "specF": 5,
+     "clipF": [
+      35,
+      39
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "RECOVERY",
+     "specF": 18,
+     "clipF": [
+      39,
+      48
+     ],
+     "rate": 0.8,
+     "playedF": 11,
+     "idleBlendF": 8
+    }
+   ],
+   "contactDistM": 1.35
+  },
+  "LIGHT_2": {
+   "clip": "light_2",
+   "phases": [
+    {
+     "phase": "STARTUP",
+     "specF": 9,
+     "clipF": [
+      69,
+      78
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "ACTIVE",
+     "specF": 5,
+     "clipF": [
+      78,
+      82
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "RECOVERY",
+     "specF": 20,
+     "clipF": [
+      82,
+      92
+     ],
+     "rate": 0.8,
+     "playedF": 12,
+     "idleBlendF": 8
+    }
+   ],
+   "contactDistM": 1.35
+  },
+  "LIGHT_3": {
+   "clip": "light_3",
+   "phases": [
+    {
+     "phase": "STARTUP",
+     "specF": 14,
+     "clipF": [
+      76,
+      90
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "ACTIVE",
+     "specF": 6,
+     "clipF": [
+      90,
+      95
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "RECOVERY",
+     "specF": 28,
+     "clipF": [
+      95,
+      116
+     ],
+     "rate": 0.8,
+     "playedF": 26,
+     "idleBlendF": 8
+    }
+   ],
+   "contactDistM": 1.55
+  },
+  "HEAVY": {
+   "clip": "heavy",
+   "phases": [
+    {
+     "phase": "STARTUP",
+     "specF": 26,
+     "clipF": [
+      44,
+      70
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "ACTIVE",
+     "specF": 7,
+     "clipF": [
+      70,
+      76
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "RECOVERY",
+     "specF": 32,
+     "clipF": [
+      76,
+      92
+     ],
+     "rate": 0.8,
+     "playedF": 20,
+     "idleBlendF": 12
+    }
+   ],
+   "contactDistM": 1.35
+  },
+  "E_SLASH": {
+   "clip": "e_slash",
+   "phases": [
+    {
+     "phase": "STARTUP",
+     "specF": 22,
+     "clipF": [
+      38,
+      78
+     ],
+     "rate": 1.818
+    },
+    {
+     "phase": "ACTIVE",
+     "specF": 5,
+     "clipF": [
+      78,
+      82
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "RECOVERY",
+     "specF": 30,
+     "clipF": [
+      82,
+      97
+     ],
+     "rate": 0.8,
+     "playedF": 19,
+     "idleBlendF": 11
+    }
+   ],
+   "contactDistM": 1.4
+  },
+  "E_THRUST": {
+   "clip": "e_thrust",
+   "phases": [
+    {
+     "phase": "STARTUP",
+     "specF": 28,
+     "clipF": [
+      7,
+      35
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "ACTIVE",
+     "specF": 6,
+     "clipF": [
+      35,
+      40
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "RECOVERY",
+     "specF": 34,
+     "clipF": [
+      40,
+      64
+     ],
+     "rate": 0.8,
+     "playedF": 30,
+     "idleBlendF": 8
+    }
+   ],
+   "contactDistM": 1.75
+  },
+  "E_COMBO": {
+   "clip": "e_combo",
+   "phases": [
+    {
+     "phase": "STARTUP",
+     "specF": 20,
+     "clipF": [
+      7,
+      38
+     ],
+     "rate": 1.55
+    },
+    {
+     "phase": "ACTIVE_A",
+     "specF": 5,
+     "clipF": [
+      38,
+      42
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "GAP",
+     "specF": 14,
+     "clipF": [
+      42,
+      72
+     ],
+     "rate": 2.143
+    },
+    {
+     "phase": "ACTIVE_B",
+     "specF": 5,
+     "clipF": [
+      72,
+      76
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "RECOVERY",
+     "specF": 36,
+     "clipF": [
+      76,
+      132
+     ],
+     "rate": 1.556,
+     "playedF": 36,
+     "idleBlendF": 8
+    }
+   ],
+   "contactDistM": 1.4
+  },
+  "C_CHARGED": {
+   "clip": "c_charged",
+   "phases": [
+    {
+     "phase": "STARTUP",
+     "specF": 40,
+     "clipF": [
+      51,
+      92
+     ],
+     "rate": 1.025
+    },
+    {
+     "phase": "ACTIVE",
+     "specF": 8,
+     "clipF": [
+      92,
+      99
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "RECOVERY",
+     "specF": 40,
+     "clipF": [
+      99,
+      112
+     ],
+     "rate": 0.8,
+     "playedF": 16,
+     "idleBlendF": 24
+    }
+   ],
+   "contactDistM": 1.5
+  },
+  "C_SLAM": {
+   "clip": "c_slam",
+   "phases": [
+    {
+     "phase": "STARTUP",
+     "specF": 46,
+     "clipF": [
+      50,
+      96
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "ACTIVE",
+     "specF": 6,
+     "clipF": [
+      96,
+      101
+     ],
+     "rate": 1.0
+    },
+    {
+     "phase": "RECOVERY",
+     "specF": 50,
+     "clipF": [
+      101,
+      126
+     ],
+     "rate": 0.8,
+     "playedF": 31,
+     "idleBlendF": 19
+    }
+   ],
+   "contactDistM": 1.05
+  }
+ }
+}

@@ -1,0 +1,769 @@
+{
+ "space": "game (three.js Y-up, metres, north = -Z)",
+ "source": "Blender 5.2 headless, tools/court/build_ford.py",
+ "ground": {
+  "y": 0.0,
+  "playable": {
+   "minX": -16.0,
+   "maxX": 16.0,
+   "minZ": -16.0,
+   "maxZ": 16.0
+  },
+  "heightProfile": {
+   "axis": "abs(z)",
+   "points": [
+    [
+     0.0,
+     0.0
+    ],
+    [
+     6.0,
+     0.0
+    ],
+    [
+     6.2,
+     0.0095
+    ],
+    [
+     6.4,
+     0.0344
+    ],
+    [
+     6.6,
+     0.0696
+    ],
+    [
+     6.8,
+     0.11
+    ],
+    [
+     7.0,
+     0.1504
+    ],
+    [
+     7.2,
+     0.1856
+    ],
+    [
+     7.4,
+     0.2105
+    ],
+    [
+     7.6,
+     0.22
+    ],
+    [
+     17.0,
+     0.22
+    ]
+   ],
+   "interp": "linear"
+  }
+ },
+ "arena": {
+  "half": 16.0,
+  "size": 32.0,
+  "flightCeiling": 11.0,
+  "bossSpawn": [
+   0.0,
+   0.22,
+   -9.0
+  ],
+  "bossScale": 3.0,
+  "hoverMinY": 4.65,
+  "playerSpawn": [
+   0.0,
+   0.33999999999999997,
+   12.0
+  ]
+ },
+ "ford": {
+  "waterTop": 0.18,
+  "riverHalfZ": 7.0,
+  "bedHalfZ": 5.5,
+  "flowDir": [
+   1.0,
+   0.0,
+   0.0
+  ],
+  "wadeSpeedMul": 0.85,
+  "surfaces": {
+   "abs(z)<6.7": "WATER",
+   "abs(z)>=6.7": "SAND",
+   "steps": "MOSS_STONE",
+   "walkway": "WOOD_PLANK"
+  },
+  "lightSlots": [
+   [
+    -12.0,
+    1.54,
+    12.0
+   ],
+   [
+    12.0,
+    1.54,
+    12.0
+   ],
+   [
+    -12.0,
+    1.54,
+    -12.0
+   ],
+   [
+    12.0,
+    1.54,
+    -12.0
+   ]
+  ],
+  "trees": [
+   {
+    "name": "maple_00",
+    "pos": [
+     -14.6,
+     0.22,
+     14.4
+    ],
+    "height": 5.52,
+    "canopyRadius": 2.75,
+    "seed": 978848532
+   },
+   {
+    "name": "maple_01",
+    "pos": [
+     -8.8,
+     0.22,
+     15.0
+    ],
+    "height": 6.01,
+    "canopyRadius": 2.8,
+    "seed": 759825468
+   },
+   {
+    "name": "maple_02",
+    "pos": [
+     3.8,
+     0.22,
+     15.2
+    ],
+    "height": 5.29,
+    "canopyRadius": 2.54,
+    "seed": 334358763
+   },
+   {
+    "name": "maple_03",
+    "pos": [
+     10.6,
+     0.22,
+     14.8
+    ],
+    "height": 5.24,
+    "canopyRadius": 2.29,
+    "seed": 824981257
+   },
+   {
+    "name": "maple_04",
+    "pos": [
+     14.7,
+     0.22,
+     10.2
+    ],
+    "height": 5.32,
+    "canopyRadius": 2.83,
+    "seed": 325072208
+   },
+   {
+    "name": "maple_05",
+    "pos": [
+     -14.8,
+     0.22,
+     9.4
+    ],
+    "height": 5.35,
+    "canopyRadius": 2.64,
+    "seed": 363566907
+   },
+   {
+    "name": "maple_06",
+    "pos": [
+     -14.6,
+     0.22,
+     -9.9
+    ],
+    "height": 5.75,
+    "canopyRadius": 2.76,
+    "seed": 406748513
+   },
+   {
+    "name": "maple_07",
+    "pos": [
+     -13.4,
+     0.22,
+     -14.7
+    ],
+    "height": 5.93,
+    "canopyRadius": 2.53,
+    "seed": 417654150
+   },
+   {
+    "name": "maple_08",
+    "pos": [
+     -8.0,
+     0.22,
+     -15.0
+    ],
+    "height": 4.94,
+    "canopyRadius": 2.52,
+    "seed": 312637980
+   },
+   {
+    "name": "maple_09",
+    "pos": [
+     6.6,
+     0.22,
+     -14.2
+    ],
+    "height": 5.2,
+    "canopyRadius": 2.93,
+    "seed": 230390853
+   },
+   {
+    "name": "maple_10",
+    "pos": [
+     13.0,
+     0.22,
+     -14.6
+    ],
+    "height": 5.79,
+    "canopyRadius": 2.72,
+    "seed": 930402490
+   },
+   {
+    "name": "maple_11",
+    "pos": [
+     14.8,
+     0.22,
+     -10.4
+    ],
+    "height": 5.24,
+    "canopyRadius": 2.3,
+    "seed": 1061416747
+   }
+  ],
+  "prayerCloths": [
+   "prayer_cloth_0",
+   "prayer_cloth_1",
+   "prayer_cloth_2",
+   "prayer_cloth_3"
+  ],
+  "bossRim": {
+   "impl": "boss material fresnel rim (onBeforeCompile), not a scene light",
+   "dirFrom": [
+    -0.35,
+    0.55,
+    -0.76
+   ],
+   "color": [
+    0.78,
+    0.86,
+    1.0
+   ],
+   "intensity": 2.2,
+   "power": 2.5
+  }
+ },
+ "stage": "ford-32m",
+ "colliders": [
+  {
+   "name": "COL_boulder_0",
+   "kind": "cyl",
+   "center": [
+    -11.5,
+    0.3013,
+    3.6
+   ],
+   "surface": "ROCK",
+   "radius": 1.242,
+   "halfHeight": 0.4613
+  },
+  {
+   "name": "COL_boulder_1",
+   "kind": "cyl",
+   "center": [
+    12.4,
+    0.35,
+    -5.4
+   ],
+   "surface": "ROCK",
+   "radius": 1.334,
+   "halfHeight": 0.51
+  },
+  {
+   "name": "COL_boulder_2",
+   "kind": "cyl",
+   "center": [
+    6.6,
+    0.44,
+    12.4
+   ],
+   "surface": "ROCK",
+   "radius": 0.874,
+   "halfHeight": 0.38
+  },
+  {
+   "name": "COL_boulder_3",
+   "kind": "cyl",
+   "center": [
+    -8.6,
+    0.4888,
+    -11.4
+   ],
+   "surface": "ROCK",
+   "radius": 1.058,
+   "halfHeight": 0.4288
+  },
+  {
+   "name": "COL_boulder_4",
+   "kind": "cyl",
+   "center": [
+    -4.4,
+    0.1875,
+    -2.2
+   ],
+   "surface": "ROCK",
+   "radius": 0.782,
+   "halfHeight": 0.3475
+  },
+  {
+   "name": "COL_gate_chunk",
+   "kind": "obb",
+   "center": [
+    6.1,
+    0.41,
+    -13.7
+   ],
+   "surface": "MOSS_STONE",
+   "halfExtents": [
+    0.82,
+    0.41,
+    0.57
+   ],
+   "yaw": 0.35
+  },
+  {
+   "name": "COL_gate_post_e",
+   "kind": "obb",
+   "center": [
+    2.0,
+    1.71,
+    -16.3
+   ],
+   "surface": "MOSS_STONE",
+   "halfExtents": [
+    0.5,
+    1.71,
+    0.55
+   ],
+   "yaw": 0.0
+  },
+  {
+   "name": "COL_gate_post_w",
+   "kind": "obb",
+   "center": [
+    -2.0,
+    2.51,
+    -16.3
+   ],
+   "surface": "MOSS_STONE",
+   "halfExtents": [
+    0.5,
+    2.51,
+    0.55
+   ],
+   "yaw": 0.0
+  },
+  {
+   "name": "COL_lantern_0",
+   "kind": "cyl",
+   "center": [
+    -12.0,
+    1.12,
+    12.0
+   ],
+   "surface": "STONE_LANTERN",
+   "radius": 0.35,
+   "halfHeight": 0.9
+  },
+  {
+   "name": "COL_lantern_1",
+   "kind": "cyl",
+   "center": [
+    12.0,
+    1.12,
+    12.0
+   ],
+   "surface": "STONE_LANTERN",
+   "radius": 0.35,
+   "halfHeight": 0.9
+  },
+  {
+   "name": "COL_lantern_2",
+   "kind": "cyl",
+   "center": [
+    -12.0,
+    1.12,
+    -12.0
+   ],
+   "surface": "STONE_LANTERN",
+   "radius": 0.35,
+   "halfHeight": 0.9
+  },
+  {
+   "name": "COL_lantern_3",
+   "kind": "cyl",
+   "center": [
+    12.0,
+    1.12,
+    -12.0
+   ],
+   "surface": "STONE_LANTERN",
+   "radius": 0.35,
+   "halfHeight": 0.9
+  },
+  {
+   "name": "COL_maple_00",
+   "kind": "cyl",
+   "center": [
+    -14.6,
+    1.72,
+    14.4
+   ],
+   "surface": "WOOD_BARK",
+   "radius": 0.3005,
+   "halfHeight": 1.5
+  },
+  {
+   "name": "COL_maple_01",
+   "kind": "cyl",
+   "center": [
+    -8.8,
+    1.72,
+    15.0
+   ],
+   "surface": "WOOD_BARK",
+   "radius": 0.3491,
+   "halfHeight": 1.5
+  },
+  {
+   "name": "COL_maple_02",
+   "kind": "cyl",
+   "center": [
+    3.8,
+    1.72,
+    15.2
+   ],
+   "surface": "WOOD_BARK",
+   "radius": 0.2963,
+   "halfHeight": 1.5
+  },
+  {
+   "name": "COL_maple_03",
+   "kind": "cyl",
+   "center": [
+    10.6,
+    1.72,
+    14.8
+   ],
+   "surface": "WOOD_BARK",
+   "radius": 0.3315,
+   "halfHeight": 1.5
+  },
+  {
+   "name": "COL_maple_04",
+   "kind": "cyl",
+   "center": [
+    14.7,
+    1.72,
+    10.2
+   ],
+   "surface": "WOOD_BARK",
+   "radius": 0.3616,
+   "halfHeight": 1.5
+  },
+  {
+   "name": "COL_maple_05",
+   "kind": "cyl",
+   "center": [
+    -14.8,
+    1.72,
+    9.4
+   ],
+   "surface": "WOOD_BARK",
+   "radius": 0.3413,
+   "halfHeight": 1.5
+  },
+  {
+   "name": "COL_maple_06",
+   "kind": "cyl",
+   "center": [
+    -14.6,
+    1.72,
+    -9.9
+   ],
+   "surface": "WOOD_BARK",
+   "radius": 0.3583,
+   "halfHeight": 1.5
+  },
+  {
+   "name": "COL_maple_07",
+   "kind": "cyl",
+   "center": [
+    -13.4,
+    1.72,
+    -14.7
+   ],
+   "surface": "WOOD_BARK",
+   "radius": 0.3128,
+   "halfHeight": 1.5
+  },
+  {
+   "name": "COL_maple_08",
+   "kind": "cyl",
+   "center": [
+    -8.0,
+    1.72,
+    -15.0
+   ],
+   "surface": "WOOD_BARK",
+   "radius": 0.3583,
+   "halfHeight": 1.5
+  },
+  {
+   "name": "COL_maple_09",
+   "kind": "cyl",
+   "center": [
+    6.6,
+    1.72,
+    -14.2
+   ],
+   "surface": "WOOD_BARK",
+   "radius": 0.3385,
+   "halfHeight": 1.5
+  },
+  {
+   "name": "COL_maple_10",
+   "kind": "cyl",
+   "center": [
+    13.0,
+    1.72,
+    -14.6
+   ],
+   "surface": "WOOD_BARK",
+   "radius": 0.3417,
+   "halfHeight": 1.5
+  },
+  {
+   "name": "COL_maple_11",
+   "kind": "cyl",
+   "center": [
+    14.8,
+    1.72,
+    -10.4
+   ],
+   "surface": "WOOD_BARK",
+   "radius": 0.3404,
+   "halfHeight": 1.5
+  },
+  {
+   "name": "COL_stele_cap",
+   "kind": "obb",
+   "center": [
+    3.17,
+    0.32,
+    -1.27
+   ],
+   "surface": "ROCK",
+   "halfExtents": [
+    0.65,
+    0.32,
+    0.55
+   ],
+   "yaw": -0.7
+  },
+  {
+   "name": "COL_stele_slab",
+   "kind": "obb",
+   "center": [
+    6.3418,
+    0.68,
+    -3.1872
+   ],
+   "surface": "ROCK",
+   "halfExtents": [
+    1.75,
+    0.68,
+    0.5
+   ],
+   "yaw": 0.3
+  },
+  {
+   "name": "COL_stele_stump",
+   "kind": "cyl",
+   "center": [
+    4.67,
+    0.55,
+    -2.67
+   ],
+   "surface": "ROCK",
+   "radius": 0.62,
+   "halfHeight": 0.55
+  },
+  {
+   "name": "COL_step_0",
+   "kind": "obb",
+   "center": [
+    0.0,
+    0.21,
+    -14.55
+   ],
+   "surface": "MOSS_STONE",
+   "halfExtents": [
+    4.5,
+    0.21,
+    1.55
+   ],
+   "yaw": 0.0,
+   "walkTop": 0.42
+  },
+  {
+   "name": "COL_step_1",
+   "kind": "obb",
+   "center": [
+    0.0,
+    0.31,
+    -15.0
+   ],
+   "surface": "MOSS_STONE",
+   "halfExtents": [
+    3.7,
+    0.31,
+    1.1
+   ],
+   "yaw": 0.0,
+   "walkTop": 0.62
+  },
+  {
+   "name": "COL_step_2",
+   "kind": "obb",
+   "center": [
+    0.0,
+    0.41,
+    -15.45
+   ],
+   "surface": "MOSS_STONE",
+   "halfExtents": [
+    2.9,
+    0.41,
+    0.65
+   ],
+   "yaw": 0.0,
+   "walkTop": 0.82
+  },
+  {
+   "name": "COL_walkway",
+   "kind": "obb",
+   "center": [
+    0.0,
+    0.16,
+    11.0
+   ],
+   "surface": "WOOD_PLANK",
+   "halfExtents": [
+    1.1,
+    0.16,
+    4.6
+   ],
+   "yaw": 0.0,
+   "walkTop": 0.34
+  },
+  {
+   "name": "COL_wall_E",
+   "kind": "obb",
+   "center": [
+    16.3,
+    0.56,
+    -0.0
+   ],
+   "surface": "STONE_WALL",
+   "halfExtents": [
+    0.3,
+    0.56,
+    16.0
+   ],
+   "yaw": 0.0
+  },
+  {
+   "name": "COL_wall_N_e",
+   "kind": "obb",
+   "center": [
+    9.05,
+    0.56,
+    -16.3
+   ],
+   "surface": "STONE_WALL",
+   "halfExtents": [
+    7.55,
+    0.56,
+    0.3
+   ],
+   "yaw": 0.0
+  },
+  {
+   "name": "COL_wall_N_w",
+   "kind": "obb",
+   "center": [
+    -9.05,
+    0.56,
+    -16.3
+   ],
+   "surface": "STONE_WALL",
+   "halfExtents": [
+    7.55,
+    0.56,
+    0.3
+   ],
+   "yaw": 0.0
+  },
+  {
+   "name": "COL_wall_S",
+   "kind": "obb",
+   "center": [
+    0.0,
+    0.56,
+    16.3
+   ],
+   "surface": "STONE_WALL",
+   "halfExtents": [
+    16.6,
+    0.56,
+    0.3
+   ],
+   "yaw": 0.0
+  },
+  {
+   "name": "COL_wall_W",
+   "kind": "obb",
+   "center": [
+    -16.3,
+    0.56,
+    -0.0
+   ],
+   "surface": "STONE_WALL",
+   "halfExtents": [
+    0.3,
+    0.56,
+    16.0
+   ],
+   "yaw": 0.0
+  }
+ ]
+}

@@ -1,0 +1,173 @@
+{
+ "file": "characters/boss/wyvern.glb",
+ "bytes": 7850472,
+ "sha256": "e2992bc248ea6cd7031e64a525451a948d917e79c79567eca8a6d138e772db9a",
+ "provenance": {
+  "kind": "imported 3D (Sketchfab)",
+  "title": "wyvern by protofactor on reallusion",
+  "author": "Timmy tuff knuckles (https://sketchfab.com/PIXELTHEFASTEST)",
+  "license": "CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)",
+  "source": "https://sketchfab.com/3d-models/wyvern-by-protofactor-on-reallusion-a55894fffeb84424a820c172bd6574b5",
+  "attribution": "\"wyvern by protofactor on reallusion\" by Timmy tuff knuckles (https://sketchfab.com/PIXELTHEFASTEST), licensed CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/). Clips renamed and pruned for Ember Court.",
+  "modifiedBy": "Ember Court tools/boss/build-boss.mjs"
+ },
+ "skins": 1,
+ "joints": 88,
+ "tris": 3976,
+ "facing": "+Z (glTF); runtime pivot.rotation.y = PI per ARCHITECTURE.md",
+ "rootMotion": "none: every clip measured in place (root joint XZ travel 0.000); controller owns root XZ, yaw and flight height",
+ "channels": 6384,
+ "unresolved": 0,
+ "clips": [
+  {
+   "state": "bite",
+   "vendor": "2LegsBite",
+   "duration": 0.833,
+   "loop": false
+  },
+  {
+   "state": "hit",
+   "vendor": "2LegsGetHit",
+   "duration": 0.833,
+   "loop": false
+  },
+  {
+   "state": "takeoff",
+   "vendor": "2LegsGoToAir",
+   "duration": 1.133,
+   "loop": false
+  },
+  {
+   "state": "idle",
+   "vendor": "2LegsIdle",
+   "duration": 2,
+   "loop": true
+  },
+  {
+   "state": "land",
+   "vendor": "2LegsLanding",
+   "duration": 0.9,
+   "loop": false
+  },
+  {
+   "state": "haze_breath",
+   "vendor": "2LegsSpreadFireAttack",
+   "duration": 2.433,
+   "loop": false
+  },
+  {
+   "state": "death",
+   "vendor": "2LegsDeath",
+   "duration": 1.567,
+   "loop": false
+  },
+  {
+   "state": "tail_l",
+   "vendor": "2LegsTailAttackLeft",
+   "duration": 1.7,
+   "loop": false
+  },
+  {
+   "state": "tail_r",
+   "vendor": "2LegsTailAttackRight",
+   "duration": 1.667,
+   "loop": false
+  },
+  {
+   "state": "spit",
+   "vendor": "2LegsThrowFireBall",
+   "duration": 0.833,
+   "loop": false
+  },
+  {
+   "state": "walk_up",
+   "vendor": "2LegsWalk",
+   "duration": 1,
+   "loop": true
+  },
+  {
+   "state": "bite_low",
+   "vendor": "4LegsBite",
+   "duration": 1,
+   "loop": false
+  },
+  {
+   "state": "idle_low",
+   "vendor": "4LegsIdle",
+   "duration": 2,
+   "loop": true
+  },
+  {
+   "state": "walk",
+   "vendor": "4LegsWalk",
+   "duration": 1,
+   "loop": true
+  },
+  {
+   "state": "charge_bite",
+   "vendor": "4LegsWalkBite",
+   "duration": 1,
+   "loop": false
+  },
+  {
+   "state": "fall_loop",
+   "vendor": "FallLoop",
+   "duration": 0.833,
+   "loop": true
+  },
+  {
+   "state": "crash",
+   "vendor": "FallLoopToDeathHitTheGround",
+   "duration": 1.167,
+   "loop": false
+  },
+  {
+   "state": "fly",
+   "vendor": "FlyNormalLoop",
+   "duration": 0.8,
+   "loop": true
+  },
+  {
+   "state": "air_fall",
+   "vendor": "FlyNormalToFall",
+   "duration": 0.667,
+   "loop": false
+  },
+  {
+   "state": "hover_hit",
+   "vendor": "flyStationaryGetHit",
+   "duration": 0.8,
+   "loop": false
+  },
+  {
+   "state": "hover",
+   "vendor": "flyStationaryLoop",
+   "duration": 0.8,
+   "loop": true
+  },
+  {
+   "state": "hover_haze",
+   "vendor": "flyStationarySpreadFire",
+   "duration": 2.467,
+   "loop": false
+  },
+  {
+   "state": "glide",
+   "vendor": "glideNormal",
+   "duration": 2,
+   "loop": true
+  },
+  {
+   "state": "swoop",
+   "vendor": "swoopClawsAttack",
+   "duration": 1,
+   "loop": false
+  },
+  {
+   "state": "swoop_loop",
+   "vendor": "swooplLoop",
+   "duration": 1.167,
+   "loop": true
+  }
+ ]
+}
