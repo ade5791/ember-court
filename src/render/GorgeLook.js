@@ -38,6 +38,10 @@ export const GORGE_LOOK = Object.freeze({
     M_wall: [0.58, 0.59, 0.63],
     ford_plank: [0.55, 0.56, 0.62],     // the warm saturated walkway was the loudest colour after the maples
     blk_pagoda: [0.45, 0.42, 0.45],
+    // BlenderKit CC0 scans (assets/blenderkit): baked albedo is daylight-bright; bring into the overcast gorge range
+    'Japanese Stone Lantern_Baked': [0.55, 0.55, 0.60],
+    rock_07: [0.85, 0.95, 1.15],     // scan is warm brown; cool it toward the pale ford_rock boulders
+    rock_09: [0.85, 0.95, 1.15],
   },
   // wet sheen: roughness multiplier for surfaces near the water (only where an ORM exists the map still drives detail)
   // ford_leaf > 1: a glossy leaf mixes white sheen into the red and reads pink/salmon

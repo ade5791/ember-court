@@ -19,13 +19,17 @@ export const SHOT_NAMES = Object.freeze(['EXPLORE', 'DUEL', 'BOSS_GROUND', 'BOSS
 const BASE = [
   { boom: 4.6, height: 1.75, fov: 55, pitch: -0.06, blend: 1.5, side: 0.0 },
   { boom: 4.3, height: 1.65, fov: 55, pitch: -0.10, blend: 0.9, side: 0.45 },   // STABLE v2: same lens as explore
-  { boom: 7.5, height: 2.4, fov: 55, pitch: -0.10, blend: 0.6, side: 0.9 },
+  { boom: 7.5, height: 2.4, fov: 55, pitch: -0.10, blend: 0.6, side: 0.9 },   // C13 bias: view the hero->boss line obliquely so the hero never stacks on the body
   { boom: 9.5, height: 2.8, fov: 58, pitch: 0.0, blend: 0.8, side: 0.6 },
 ];
 
 export const CAMERA_LIMITS = Object.freeze({
   margin: 0.25, wallTop: 1.12, innerClamp: 15.75, outerClamp: 20.65, ceiling: 10.75, pitchMaxAir: 0.70,
+  cineClamp: 14.6,       // authored shots stay inside the walls: the maple canopy outside them buried the intro
 });
+// C13 boss occlusion: when the wyvern's body sits on the camera->hero line, swing the orbit (and lift) so the hero
+// stays readable. Decided from the UN-swung pose, so the decision cannot oscillate with its own correction.
+export const OCCLUSION = Object.freeze({ radius: 2.3, swing: 0.75, lift: 1.4, lag: 0.30, heroY: 1.1 });
 
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _pivot = new THREE.Vector3(), _desired = new THREE.Vector3();
 const _look = new THREE.Vector3(), _toT = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
@@ -44,7 +48,7 @@ export const CINE = Object.freeze({ NONE: 0, INTRO: 1, PHASE: 2, FINISHER: 3, DE
 export const CINE_NAMES = Object.freeze(['NONE', 'INTRO', 'PHASE', 'FINISHER', 'DEATH']);
 const CINE_SHOT = [
   null,
-  { dur: 5.0, inT: 0.6, outT: 1.2, d0: 15.5, d1: 11.5, h0: 5.0, h1: 2.4, orbit: 1.15, lookY: 0.2, fov: 0 },     // INTRO: sweeping orbit as it lands
+  { dur: 5.0, inT: 0.6, outT: 1.2, d0: 13.0, d1: 10.5, h0: 5.0, h1: 2.6, orbit: 1.15, lookY: 0.2, fov: 0 },     // INTRO: sweeping orbit as it lands
   { dur: 1.9, inT: 0.35, outT: 0.8, d0: 9.5, d1: 7.8, h0: 0.7, h1: 0.5, orbit: 0.25, lookY: 0.4, fov: 0 },     // PHASE: low push on the roar
   { dur: 1.6, inT: 0.2, outT: 0.6, d0: 5.2, d1: 4.6, h0: 0.55, h1: 0.9, orbit: 0.55, lookY: -0.6, fov: 0 },    // FINISHER: low side arc
   { dur: 4.0, inT: 0.6, outT: 1.2, d0: 9.0, d1: 15.0, h0: 2.2, h1: 5.5, orbit: 0.5, lookY: -0.4, fov: 4 },     // DEATH: slow pull-back
@@ -82,6 +86,8 @@ export class CameraDirector extends BaseCameraRig {
     this.cineKind = CINE.NONE; this.cineT = 0; this.cineW = 0; this.cineYaw0 = 0; this.cineCount = 0;
     this.cineFocus = new THREE.Vector3();   // owner (main) writes the subject point each frame
     this.cineLog = [0, 0, 0, 0, 0];
+    this.occluder = { position: new THREE.Vector3(), active: false };   // owner (main) writes the boss body centre
+    this.occYaw = 0; this.occSign = 0; this.occFrames = 0; this._cw = 0;
     const bus = ctx && ctx.get ? ctx.get('bus') : null;
     this.bus = bus;
     if (bus) {
@@ -196,7 +202,7 @@ export class CameraDirector extends BaseCameraRig {
     if (this.target && this.shot !== SHOT.EXPLORE) {
       // frame hero and target: camera behind the hero on the hero->target line, offset to the side (thirds)
       _toT.subVectors(_tgtS, _pivot);
-      yaw = Math.atan2(-_toT.x, -_toT.z);
+      yaw = Math.atan2(-_toT.x, -_toT.z) + (BASE[this.shot].bias || 0);
       const flat = Math.hypot(_toT.x, _toT.z);
       pitch = c.pitch + clamp(Math.atan2(_toT.y, Math.max(1, flat)) * 0.6, -0.2, this.shot === SHOT.BOSS_AIR ? CAMERA_LIMITS.pitchMaxAir : 0.35);
       this.orbitYaw += (yaw - this.orbitYaw - Math.round((yaw - this.orbitYaw) / (2 * Math.PI)) * 2 * Math.PI) * smoothingAlpha(this.shot === SHOT.DUEL ? S.yawLagDuel : S.yawLagBoss, dt);
@@ -212,6 +218,16 @@ export class CameraDirector extends BaseCameraRig {
     }
     const boom = c.boom - this.push * this.pushDist;
     const cp = Math.cos(pitch), sp = Math.sin(pitch);
+    // C13: occlusion test on the un-swung pose, then a smoothed swing + lift toward the clear side
+    let occT = 0;
+    if (this.occluder.active && this.occAvoid !== false && this.shot !== SHOT.EXPLORE && this.cineKind === CINE.NONE) {
+      const s = this._occSide(_pivot, yaw, boom, cp, sp, c.side);
+      if (s !== 0) { if (this.occSign === 0) this.occSign = s; occT = this.occSign * OCCLUSION.swing; }
+    }
+    if (occT === 0 && Math.abs(this.occYaw) < 0.02) this.occSign = 0;
+    this.occYaw += (occT - this.occYaw) * smoothingAlpha(OCCLUSION.lag, dt);
+    yaw += this.occYaw;
+    _pivot.y += OCCLUSION.lift * Math.min(1, Math.abs(this.occYaw) / OCCLUSION.swing);
     // forward (camera looks along) = (-sin yaw, ., -cos yaw); camera sits behind the pivot
     const fx = -Math.sin(yaw), fz = -Math.cos(yaw), rx = Math.cos(yaw), rz = -Math.sin(yaw);
     _desired.set(_pivot.x - fx * boom * cp + rx * c.side, _pivot.y - sp * boom, _pivot.z - fz * boom * cp + rz * c.side);
@@ -235,7 +251,9 @@ export class CameraDirector extends BaseCameraRig {
         if (this.shot === SHOT.EXPLORE) this.orbitYaw = Math.atan2(_look.x - _desired.x, _look.z - _desired.z) + Math.PI;
       }
     }
+    this._cw = cw;
     this._resolveClearance(_pivot, _desired);
+    if (this.occluder.active && cw === 0 && this._segOcc(this.occluder.position, _desired.x, _desired.y, _desired.z, this.hero.position) !== 0) this.occFrames++;
 
     // FOV kick (6 f in/out envelope), deflect push-in FOV, phantom FOV +4
     let fov = c.fov;
@@ -281,9 +299,25 @@ export class CameraDirector extends BaseCameraRig {
     this._clampLimits(desired);
   }
 
+  // C13 helpers. _segOcc: nonzero when the occluder sphere cuts the camera->hero-chest segment (value = swing side).
+  _segOcc(O, cx, cy, cz, hp) {
+    const hx = hp.x, hy = hp.y + OCCLUSION.heroY, hz = hp.z;
+    const dx = hx - cx, dy = hy - cy, dz = hz - cz, dd = dx * dx + dy * dy + dz * dz || 1;
+    const t = clamp(((O.x - cx) * dx + (O.y - cy) * dy + (O.z - cz) * dz) / dd, 0, 1);
+    if (t > 0.97) return 0;                                   // body beyond the hero: not an occluder
+    const px = cx + dx * t - O.x, py = cy + dy * t - O.y, pz = cz + dz * t - O.z;
+    if (px * px + py * py + pz * pz > OCCLUSION.radius * OCCLUSION.radius) return 0;
+    return (dx * (O.z - cz) - dz * (O.x - cx)) > 0 ? -1 : 1;   // swing away from the side the body is on
+  }
+  _occSide(pivot, yaw, boom, cp, sp, side) {
+    const fx = -Math.sin(yaw), fz = -Math.cos(yaw), rx = Math.cos(yaw), rz = -Math.sin(yaw);
+    return this._segOcc(this.occluder.position, pivot.x - fx * boom * cp + rx * side, pivot.y - sp * boom, pivot.z - fz * boom * cp + rz * side, this.hero.position);
+  }
+
   _clampLimits(p) {
     const L = CAMERA_LIMITS;
-    const lim = p.y < L.wallTop + L.margin ? L.innerClamp : L.outerClamp;
+    let lim = p.y < L.wallTop + L.margin ? L.innerClamp : L.outerClamp;
+    if (this._cw > 0) lim += (Math.min(lim, L.cineClamp) - lim) * Math.min(1, this._cw * 1.5);
     p.x = clamp(p.x, -lim, lim); p.z = clamp(p.z, -lim, lim);
     if (p.y > L.ceiling) p.y = L.ceiling;
   }
@@ -292,7 +326,7 @@ export class CameraDirector extends BaseCameraRig {
   // next update onto whatever shot the new situation calls for.
   reset(heroYaw = 0) {
     this.trauma = 0; this.kick = 0; this.kickT = 0; this.push = 0; this.pushT = 0; this.pushDist = 0;
-    this.phantom = 0; this.phantomT = 0; this.pulledIn = 0;
+    this.phantom = 0; this.phantomT = 0; this.pulledIn = 0; this.occYaw = 0; this.occSign = 0; this._cw = 0;
     this.cineKind = CINE.NONE; this.cineT = 0; this.cineW = 0;
     this.orbitYaw = heroYaw; this.orbitPitch = 0;
     this.target = null; this.lockOn = false; this.shot = this.prevShot = SHOT.EXPLORE;
@@ -300,7 +334,7 @@ export class CameraDirector extends BaseCameraRig {
   }
 
   snap() { this.initialized = false; this.blendT = 1; const B = BASE[this.shot]; Object.assign(this.cur, { boom: B.boom, height: B.height, fov: B.fov, pitch: B.pitch, side: B.side }); }
-  resetStats() { this.minClearance = Infinity; }
+  resetStats() { this.minClearance = Infinity; this.occFrames = 0; }
 
   dispose() {
     if (this.bus) { this.bus.off('combat/contact', this._onContact); this.bus.off('combat/parry', this._onParry); this.bus.off('boss/phase', this._onPhase); }

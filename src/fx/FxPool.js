@@ -70,7 +70,7 @@ export class FxPool {
     this.dropsPerSplash = Math.max(4, Math.floor(C.dropsPerSplash * k));
     this.group = new THREE.Group(); this.group.name = 'fx';
     scene.add(this.group);
-    this._initSparks(); this._initSprites(); this._initStreaks(); this._initAuras(); this._initFlame();
+    this._initSparks(); this._initSprites(); this._initStreaks(); this._initAuras(); this._initShock(); this._initFlame();
     this.ghostOwners = [];               // { meshes:[{src, ghosts:[...]}], next, life:Float32Array, tint }
     this.stats = { sparks: 0, blood: 0, drops: 0, streaks: 0, ghosts: 0, auras: 0, stains: 0, ripples: 0, flame: 0 };
     this.maxSeen = { sparkBursts: 0, bloodBursts: 0, splashes: 0, streaks: 0, ghostsPerActor: 0, auras: 0, flame: 0 };
@@ -330,6 +330,35 @@ export class FxPool {
 
   clearTelegraph(actorId) { for (const a of this.auras) if (a.owner === actorId) { a.owner = -1; a.g.visible = false; } }
 
+  // ---------- impact shockwaves: expanding additive ground ring + core disc (4 slots, round-robin) ----------
+  _initShock() {
+    this.shocks = [];
+    const ringG = new THREE.RingGeometry(0.86, 1.0, 64, 1); ringG.rotateX(-Math.PI / 2);
+    this._auraGeos.push(ringG);
+    for (let i = 0; i < 4; i++) {
+      const m = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0 });
+      const r = new THREE.Mesh(ringG, m); r.name = 'fx_shock_' + i; r.visible = false; r.renderOrder = 9;
+      this.group.add(r); this.shocks.push({ r, m, t: -1, life: 0.45, rad: 3, k: 1 });
+    }
+    this.shockNext = 0;
+  }
+  // pos on the ground, radius = final radius (m), color hex, k = brightness
+  shockwave(x, y, z, radius = 3, color = 0xffa040, k = 1, life = 0.45) {
+    const s = this.shocks[this.shockNext]; this.shockNext = (this.shockNext + 1) % this.shocks.length;
+    s.t = 0; s.life = life; s.rad = radius; s.k = this.reducedMotion ? k * 0.5 : k;
+    s.r.position.set(x, y, z); s.m.color.setHex(color); s.r.visible = true; s.r.scale.setScalar(0.2);
+  }
+  _updateShock(dt) {
+    for (const s of this.shocks) {
+      if (s.t < 0) continue;
+      s.t += dt; const u = s.t / s.life;
+      if (u >= 1) { s.t = -1; s.r.visible = false; continue; }
+      const e = 1 - (1 - u) * (1 - u) * (1 - u);          // ease-out: fast burst, slow settle
+      s.r.scale.setScalar(0.2 + s.rad * e);
+      s.m.opacity = 1.6 * s.k * (1 - u) * (1 - u);
+    }
+  }
+
   _updateAuras(dt) {
     let n = 0;
     for (const a of this.auras) {
@@ -539,7 +568,7 @@ export class FxPool {
   // dt = presentation dt (Loop passes dt * presentScale)
   update(dt) {
     if (dt <= 0) return;
-    this._updateSparks(dt); this._updateSprites(dt); this._updateStreaks(dt); this._updateAuras(dt); this._updateGhosts(dt);
+    this._updateSparks(dt); this._updateSprites(dt); this._updateStreaks(dt); this._updateAuras(dt); this._updateShock(dt); this._updateGhosts(dt);
     this._updateFlame(dt);
   }
 
@@ -547,6 +576,7 @@ export class FxPool {
   clearFire() {
     for (const P of [this.flame, this.smoke]) { P.life.fill(0); P.col.fill(0); P.p.visible = false; }
     this.flameAcc = this.smokeAcc = 0; this.breathHeat = 0;
+    for (const s of this.shocks) { s.t = -1; s.r.visible = false; }
   }
 
   // Make every pooled object visible for one compileAsync pass (three compiles only traverseVisible), then restore.
@@ -567,6 +597,7 @@ export class FxPool {
     const geos = new Set(this._auraGeos), mats = new Set();
     for (const m of [this.sparkMesh, this.sprites, this.streakMesh, this.flame.p, this.smoke.p]) { geos.add(m.geometry); mats.add(m.material); }
     for (const a of this.auras) { mats.add(a.rm); mats.add(a.dm); }
+    for (const s of this.shocks || []) mats.add(s.m);
     for (const o of this.ghostOwners) for (const set of o.ghosts) for (const e of set) { mats.add(e.mat); if (e.skel.boneTexture) e.skel.boneTexture.dispose(); }
     geos.forEach((g) => g.dispose()); mats.forEach((m) => m.dispose());
     this.scene.remove(this.group);

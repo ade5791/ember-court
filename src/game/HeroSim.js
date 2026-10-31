@@ -23,13 +23,19 @@ export const STEP_CLIP = Object.freeze(['dodge', 'dodge_F', 'dodge_B', 'dodge_L'
 export const HERO_FINISHER_F = 96;          // matches the boss finisher length (WyvernBrain FINISHER_F)
 const HITSTUN_F = 20, GUARDBREAK_F = 50, DEATH_F = 100, ASSIST_RANGE = 4.5;
 const STAMINA_REGEN = 34 / 60, STAMINA_DELAY = 30, BLOCK_REGEN_SCALE = 0.35;
+// Charged heavy: holding heavy freezes the swing at the top of its wind-up (CHARGE_HOLD_F frames before ACTIVE)
+// for up to CHARGE_MAX_F frames. Charge level 0..1 (counted after CHARGE_MIN_F so a tap stays a plain heavy)
+// scales damage x1..1.7, posture x1..1.9 and lunge x1..1.5. Releasing (or reaching max) fires the swing.
+export const HERO_CHARGE = Object.freeze({ HOLD_F: 8, MIN_F: 8, MAX_F: 54, DMG: 0.7, POSTURE: 0.9, LUNGE: 0.5 });
+// Health regen: after REGEN_DELAY frames without taking damage, HP refills at REGEN_PER_S (never while dead).
+export const HERO_REGEN = Object.freeze({ DELAY_F: 300, PER_S: 4 });
 const TURN = SIM.TURN_RATE / 60;
 const TAU = Math.PI * 2;
 function wrap(a) { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI; }
 
 // Command filled each fixed step by the game (input layer or bot). Reused, never reallocated.
 export function makeHeroCommand() {
-  return { mx: 0, mz: 0, speed: 0, attack: false, heavy: false, dodge: false, blockHeld: false, blockPress: false };
+  return { mx: 0, mz: 0, speed: 0, attack: false, heavy: false, heavyHeld: false, dodge: false, blockHeld: false, blockPress: false };
 }
 
 export class HeroSim {
@@ -50,6 +56,7 @@ export class HeroSim {
       v.reach = t.contactDistM || 1.35;
       this.verbs[k] = v;
     }
+    this._charged = { ...this.verbs.HEAVY };   // scratch verb record for a charged release (no per-hit allocation)
     this.id = 1; this.radius = SIM.CAPSULE_RADIUS;
     this.contactSink = null;     // (rec) => void, presentation hook after the hero applied an incoming contact
     this.hitSink = null;         // (targetKind, target, dmg, info) => void, presentation hook for outgoing hits
@@ -70,7 +77,12 @@ export class HeroSim {
     this.lastEvent = ''; this.lastEventFrame = -999; this.lastStaminaFail = -999;
     this.maxBackwardDot = 1;
     this._hitN = 0;
+    this.charging = false; this.chargeF = 0; this.chargeLvl = 0; this.chargedHits = 0;
+    this.hpIdle = 0; this.hpRegained = 0;
   }
+
+  // charge level of the current (or last) heavy, 0..1
+  _chargeLevel() { return Math.max(0, Math.min(1, (this.chargeF - HERO_CHARGE.MIN_F) / (HERO_CHARGE.MAX_F - HERO_CHARGE.MIN_F))); }
 
   get alive() { return this.state !== HERO_STATE.DEAD; }
   facingX() { return -Math.sin(this.yaw); }
@@ -119,6 +131,7 @@ export class HeroSim {
     if (!this._spend(v.stamina)) return false;
     this.state = HERO_STATE.ACTION; this.verb = name; this.actF = 0; this.actionId++; this._hitN = 0;
     this.queued = null; this.blocking = false;
+    this.charging = name === 'HEAVY'; this.chargeF = 0; this.chargeLvl = 0;
     const ay = this._assistYaw(targets); if (ay !== null) this.yaw = ay;
     return true;
   }
@@ -205,13 +218,26 @@ export class HeroSim {
 
       case HERO_STATE.ACTION: {
         const v = this.verbs[this.verb];
+        // charged heavy: hold at the top of the wind-up while the button is held (tracks the target, no lunge)
+        if (this.charging) {
+          const holdAt = v.startup - HERO_CHARGE.HOLD_F;
+          if (this.actF >= holdAt && cmd.heavyHeld && this.chargeF < HERO_CHARGE.MAX_F) {
+            this.chargeF++; this.chargeLvl = this._chargeLevel();
+            if (this.chargeF === HERO_CHARGE.MAX_F) this._event('charged');
+            const ay = this._assistYaw(targets);
+            if (ay !== null) this.yaw = wrap(this.yaw + Math.max(-TURN * 0.5, Math.min(TURN * 0.5, wrap(ay - this.yaw))));
+            if (cmd.dodge) { this.charging = false; this.state = HERO_STATE.LOCO; this._startDodge(cmd, targets); }
+            break;
+          }
+          if (this.actF >= holdAt) { this.charging = false; if (this.chargeLvl > 0) this._event('release'); }
+        }
         this.actF++;
         // lunge during startup->active, scaled down when a target is already inside reach
         const lungeF = v.startup + v.active;
         if (this.actF <= lungeF) {
           let near = Infinity;
           for (let i = 0; i < targets.length; i++) { const t = targets[i]; if (t && t.targetable) near = Math.min(near, Math.hypot(t.x - this.x, t.z - this.z) - (t.radius || 0)); }
-          const k = near < v.reach * 0.8 ? 0.25 : 1;
+          const k = (near < v.reach * 0.8 ? 0.25 : 1) * (this.verb === 'HEAVY' ? 1 + HERO_CHARGE.LUNGE * this.chargeLvl : 1);
           mx = this.facingX() * v.lunge * k / lungeF; mz = this.facingZ() * v.lunge * k / lungeF;
         }
         // contact: ACTIVE window, reach + target radius, inside a 70 degree half-cone, once per (actionId, target)
@@ -227,7 +253,7 @@ export class HeroSim {
           break;
         }
         if (this.actF >= v.total) {
-          this.state = HERO_STATE.LOCO; this.actF = 0;
+          this.state = HERO_STATE.LOCO; this.actF = 0; this.chargeLvl = 0;
           if (this.queued === 'HEAVY') this._startVerb('HEAVY', targets);
           this.queued = null;
         }
@@ -265,6 +291,12 @@ export class HeroSim {
     if (this.state === HERO_STATE.LOCO || this.state === HERO_STATE.HITSTUN) {
       if (++this.staminaIdle > STAMINA_DELAY) this.stamina = Math.min(SIM.STAMINA_MAX, this.stamina + STAMINA_REGEN * (this.blocking ? BLOCK_REGEN_SCALE : 1));
     } else this.staminaIdle = 0;
+    // health regen after a quiet spell (any damage taken resets hpIdle in the contact path)
+    if (this.state !== HERO_STATE.DEAD && ++this.hpIdle > HERO_REGEN.DELAY_F && this.hp < SIM.HP_PLAYER) {
+      const before = this.hp;
+      this.hp = Math.min(SIM.HP_PLAYER, this.hp + HERO_REGEN.PER_S / 60);
+      this.hpRegained += this.hp - before;
+    }
 
     // integrate + collide
     this.x += mx + this.pushX; this.z += mz + this.pushZ; this.pushX = 0; this.pushZ = 0;
@@ -281,6 +313,11 @@ export class HeroSim {
   }
 
   _resolveSwing(v, targets) {
+    if (v.name === 'HEAVY' && this.chargeLvl > 0) {
+      const c = this._charged, L = this.chargeLvl;
+      c.dmg = Math.round(v.dmg * (1 + HERO_CHARGE.DMG * L)); c.posture = Math.round(v.posture * (1 + HERO_CHARGE.POSTURE * L));
+      c.charge = L; v = c;
+    }
     const fx = this.facingX(), fz = this.facingZ();
     for (let i = 0; i < targets.length; i++) {
       const t = targets[i]; if (!t || !t.targetable) continue;
@@ -292,7 +329,7 @@ export class HeroSim {
       if (d > 0.3 && (dx * fx + dz * fz) / d < 0.34) continue;      // 70 degree half-cone
       if (this._hitN < this._hitIds.length) this._hitIds[this._hitN++] = t.id;
       const dealt = t.onHeroHit ? t.onHeroHit(this, v, this.actionId) : 0;
-      if (dealt > 0) this.damageDealt += dealt;
+      if (dealt > 0) { this.damageDealt += dealt; if (v.charge) this.chargedHits++; }
       if (this.hitSink) this.hitSink(t, dealt, v);
     }
   }
@@ -301,6 +338,8 @@ export class HeroSim {
   applyContact(R) {
     if (this.state === HERO_STATE.DEAD) return;
     const O = Outcome;
+    if ((R.outcome === O.HIT || R.outcome === O.BLOCKED) && R.damage > 0) this.hpIdle = 0;
+    if (R.outcome === O.HIT && R.damage >= 8) this.charging = false;
     if (R.outcome === O.HIT) {
       this.hp -= R.damage; this.damageTaken += R.damage; this.hitsTaken++; this.flash = 12;
       if (this.god && this.hp < 1) this.hp = 1;

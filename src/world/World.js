@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { Colliders } from './Colliders.js';
 import { Water } from './Water.js';
+import { addBlenderKitProps } from './BlenderKitProps.js';
 
 export const WORLD_ASSETS = Object.freeze({
   glb: '/assets/court-blockout.v3.glb',
@@ -81,7 +82,15 @@ export class World {
       L.position.set(p[0], p[1], p[2]); L.castShadow = false; L.name = 'lantern_slot_' + this.lights.length;
       scene.add(L); this.lights.push(L);
     }
+    // BlenderKit CC0 set dressing (presentation only; ?bk=0 disables for A/B)
+    this.props = null;
+    if (opts.blenderKit !== false) {
+      this.props = await addBlenderKitProps({ scene, root: this.root, doc, colliders: this.colliders, base, anisotropy: this.anisotropy, rocks: opts.bkRocks === true });
+      if (this.disposed) { this.props.dispose(); this.props = null; return this; }
+      for (const m of this.props.materials) matSet.add(m);
+    }
     this.stats = { meshes: 0, textures: texSet.size, materials: matSet.size, colliders: this.colliders.count,
+      props: this.props ? this.props.stats : null,
       anisotropy: this.anisotropy, maxAnisotropy: maxAniso, lights: this.lights.length };
     this.root.traverse((o) => { if (o.isMesh) this.stats.meshes++; });
     return this;
@@ -96,6 +105,7 @@ export class World {
     this.disposed = true;
     if (this.root) { this.scene.remove(this.root); disposeTree(this.root); }
     if (this.water) this.water.dispose();
+    if (this.props) { this.props.dispose(); this.props = null; }
     for (const L of this.lights || []) { this.scene.remove(L); L.dispose(); }
     this.lights = [];
   }

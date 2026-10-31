@@ -160,6 +160,16 @@ export class TouchOverlay {
     // Any real touch anywhere reveals the overlay (e.g. a touch laptop that reports a fine pointer).
     this._onAnyTouch = (e) => { if (e.pointerType === 'touch' && !this.visible) this.setVisible(true); };
     window.addEventListener('pointerdown', this._onAnyTouch, true);
+    // Page-zoom guard. iOS Safari ignores user-scalable=no and touch-action for pinch, and still double-tap zooms
+    // when two quick taps land on adjacent buttons. Block the gesture/dblclick/multi-touch paths at the document
+    // (passive:false so preventDefault sticks). Headless Chromium never zooms, so this is the real-device fix.
+    this._noZoom = (e) => { if (e.cancelable) e.preventDefault(); };
+    this._noPinch = (e) => { if (e.touches && e.touches.length > 1 && e.cancelable) e.preventDefault(); };
+    this._lastTouchEnd = 0;
+    this._noDblTap = (e) => { const t = e.timeStamp; if (t - this._lastTouchEnd < 350 && e.cancelable) e.preventDefault(); this._lastTouchEnd = t; };
+    for (const ev of ['gesturestart', 'gesturechange', 'gestureend', 'dblclick']) document.addEventListener(ev, this._noZoom, { passive: false });
+    document.addEventListener('touchmove', this._noPinch, { passive: false });
+    document.addEventListener('touchend', this._noDblTap, { passive: false });
   }
 
   setVisible(v) {
@@ -327,6 +337,8 @@ export class TouchOverlay {
     this._releaseAll();
     window.removeEventListener('resize', this._onResize);
     window.removeEventListener('pointerdown', this._onAnyTouch, true);
+    for (const ev of ['gesturestart', 'gesturechange', 'gestureend', 'dblclick']) document.removeEventListener(ev, this._noZoom);
+    document.removeEventListener('touchmove', this._noPinch); document.removeEventListener('touchend', this._noDblTap);
     if (this.root) {
       for (const el of this._btnEls) {
         el.removeEventListener('pointerdown', this._onBtnDown); el.removeEventListener('pointerup', this._onBtnUp);

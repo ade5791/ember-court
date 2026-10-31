@@ -17,17 +17,17 @@ export const BRAIN_STATE_NAMES = Object.freeze(['WAIT', 'PREROLL', 'ACTION', 'HO
 // shape: 'front' (planar reach + half-angle cone), 'tail' (side half-plane within reach), 'cone' (breath),
 // 'ring' (radius around root), 'swoop' (radius around root while diving), 'orb' (projectile), 'none'
 export const VERBS = Object.freeze({
-  [BossVerb.W_BITE]: { name: 'W_BITE', clip: 'bite', stance: BossStance.GROUND_UP, pre: 0, active: [39, 50], total: 50, shape: 'front', reach: 3.0, half: 0.6, art: ART.NORMAL, dmg: 22, posture: 30 },
-  [BossVerb.W_LUNGE]: { name: 'W_LUNGE', clip: 'bite_low', stance: BossStance.GROUND_LOW, pre: 0, active: [30, 38], total: 60, shape: 'front', reach: 4.1, half: 0.5, art: ART.NORMAL, dmg: 26, posture: 34, clipActive: [3, 8] },
-  [BossVerb.W_CHARGE]: { name: 'W_CHARGE', clip: 'charge_bite', stance: BossStance.GROUND_LOW, pre: 0, active: [33, 40], total: 60, shape: 'front', reach: 3.4, half: 0.55, art: ART.RED, dmg: 34, posture: 0, travel: 6.0, travelSpeed: 6.0 },
-  [BossVerb.W_TAIL_L]: { name: 'W_TAIL_L', clip: 'tail_l', stance: BossStance.GROUND_UP, pre: 24, active: [17, 38], total: 102, shape: 'tail', side: -1, reach: 4.2, art: ART.RED, dmg: 30, posture: 0 },
-  [BossVerb.W_TAIL_R]: { name: 'W_TAIL_R', clip: 'tail_r', stance: BossStance.GROUND_UP, pre: 24, active: [17, 38], total: 100, shape: 'tail', side: 1, reach: 4.2, art: ART.RED, dmg: 30, posture: 0 },
+  [BossVerb.W_BITE]: { name: 'W_BITE', clip: 'bite', stance: BossStance.GROUND_UP, pre: 0, active: [39, 50], total: 50, shape: 'front', reach: 3.8, half: 0.6, art: ART.NORMAL, dmg: 22, posture: 30 },
+  [BossVerb.W_LUNGE]: { name: 'W_LUNGE', clip: 'bite_low', stance: BossStance.GROUND_LOW, pre: 0, active: [30, 38], total: 60, shape: 'front', reach: 4.9, half: 0.5, art: ART.NORMAL, dmg: 26, posture: 34, clipActive: [3, 8] },
+  [BossVerb.W_CHARGE]: { name: 'W_CHARGE', clip: 'charge_bite', stance: BossStance.GROUND_LOW, pre: 0, active: [33, 40], total: 60, shape: 'front', reach: 4.2, half: 0.55, art: ART.RED, dmg: 34, posture: 0, travel: 6.0, travelSpeed: 6.0 },
+  [BossVerb.W_TAIL_L]: { name: 'W_TAIL_L', clip: 'tail_l', stance: BossStance.GROUND_UP, pre: 24, active: [17, 38], total: 102, shape: 'tail', side: -1, reach: 5.0, art: ART.RED, dmg: 30, posture: 0 },
+  [BossVerb.W_TAIL_R]: { name: 'W_TAIL_R', clip: 'tail_r', stance: BossStance.GROUND_UP, pre: 24, active: [17, 38], total: 100, shape: 'tail', side: 1, reach: 5.0, art: ART.RED, dmg: 30, posture: 0 },
   [BossVerb.W_SPIT]: { name: 'W_SPIT', clip: 'spit', stance: BossStance.GROUND_UP, pre: 0, active: [23, 23], total: 50, shape: 'orb', art: ART.NORMAL, dmg: 18, posture: 20 },
-  [BossVerb.W_HAZE]: { name: 'W_HAZE', clip: 'haze_breath', stance: BossStance.GROUND_UP, pre: 0, active: [59, 82], total: 146, shape: 'cone', reach: 6.0, half: 20 * Math.PI / 180, art: ART.RED, dmg: 6, posture: 0, pool: { r: 2.2, ahead: 3.0, frames: 240 } },
+  [BossVerb.W_HAZE]: { name: 'W_HAZE', clip: 'haze_breath', stance: BossStance.GROUND_UP, pre: 0, active: [59, 82], total: 146, shape: 'cone', reach: 6.8, half: 20 * Math.PI / 180, art: ART.RED, dmg: 6, posture: 0, pool: { r: 2.2, ahead: 3.8, frames: 240 } },
   [BossVerb.W_SWOOP]: { name: 'W_SWOOP', clip: 'swoop', stance: BossStance.AIR, pre: 30, active: [25, 32], total: 60, shape: 'swoop', reach: 1.9, art: ART.BLUE, dmg: 32, posture: 0 },
   [BossVerb.W_SKY_HAZE]: { name: 'W_SKY_HAZE', clip: 'hover_haze', stance: BossStance.AIR, pre: 0, active: [21, 32], total: 148, shape: 'none', art: ART.RED, dmg: 6, posture: 0, pool: { r: 3.5, ahead: 4.0, frames: 240, from: 32 } },
-  [BossVerb.W_LAND]: { name: 'W_LAND', clip: 'land', stance: BossStance.AIR, pre: 0, active: [23, 26], total: 54, shape: 'ring', reach: 2.5 + SIM.CAPSULE_RADIUS, art: ART.NORMAL, dmg: 0, posture: 30 },
-  [BossVerb.W_ROAR]: { name: 'W_ROAR', clip: 'hit', stance: -1, pre: 0, active: [20, 20], total: 83, shape: 'push', reach: 3.0, art: ART.NORMAL, dmg: 0, posture: 0, clipRate: 0.6 },
+  [BossVerb.W_LAND]: { name: 'W_LAND', clip: 'land', stance: BossStance.AIR, pre: 0, active: [23, 26], total: 54, shape: 'ring', reach: 3.3 + SIM.CAPSULE_RADIUS, art: ART.NORMAL, dmg: 0, posture: 30 },
+  [BossVerb.W_ROAR]: { name: 'W_ROAR', clip: 'hit', stance: -1, pre: 0, active: [20, 20], total: 83, shape: 'push', reach: 3.8, art: ART.NORMAL, dmg: 0, posture: 0, clipRate: 0.6 },
 });
 export const RED_VERBS = Object.freeze([BossVerb.W_CHARGE, BossVerb.W_TAIL_L, BossVerb.W_TAIL_R, BossVerb.W_HAZE, BossVerb.W_SKY_HAZE]);
 
@@ -172,7 +172,7 @@ export class WyvernBrain {
     this._turnToward(h.x, h.z, TURN_RATE);
     const low = this.stance === BossStance.GROUND_LOW;
     let moving = false;
-    if (dist > 4.0) { const s = WALK_SPEED / 60 / dist; this.x += dx * s; this.z += dz * s; moving = true; }
+    if (dist > 4.8) { const s = WALK_SPEED / 60 / dist; this.x += dx * s; this.z += dz * s; moving = true; }
     this.anim.clip = moving ? (low ? 'walk' : 'walk_up') : (low ? 'idle_low' : 'idle');
     this.anim.time = (this.f % (moving ? 60 : 120)) / 60; this.anim.loop = true;
     if (this.pendingPhase) { this._startRoar(); return; }
@@ -189,9 +189,9 @@ export class WyvernBrain {
     const right = dx * Math.cos(this.yaw) - dz * Math.sin(this.yaw);
     const cands = this._cands; cands.length = 0;
     const add = (v, w) => { if (RED_VERBS.indexOf(v) >= 0 && v === this.lastRed) return; if (v === BossVerb.W_CHARGE && this.lastVerb === BossVerb.W_SPIT) return; cands.push(v, w); };
-    if (fwd < 0.3 * dist && dist < 4.2) add(right > 0 ? BossVerb.W_TAIL_R : BossVerb.W_TAIL_L, 6);
-    if (dist <= 3.4) { add(BossVerb.W_BITE, 5); add(BossVerb.W_LUNGE, 2); }
-    else if (dist <= 5.0) { add(BossVerb.W_LUNGE, 5); add(BossVerb.W_BITE, 1); if (this.phase >= 2) add(BossVerb.W_HAZE, 3); }
+    if (fwd < 0.3 * dist && dist < 5.0) add(right > 0 ? BossVerb.W_TAIL_R : BossVerb.W_TAIL_L, 6);
+    if (dist <= 4.2) { add(BossVerb.W_BITE, 5); add(BossVerb.W_LUNGE, 2); }
+    else if (dist <= 5.8) { add(BossVerb.W_LUNGE, 5); add(BossVerb.W_BITE, 1); if (this.phase >= 2) add(BossVerb.W_HAZE, 3); }
     else { add(BossVerb.W_SPIT, 4); add(BossVerb.W_CHARGE, 3); if (this.phase >= 2) add(BossVerb.W_HAZE, 2); }
     if (cands.length === 0) add(BossVerb.W_SPIT, 1);
     if (cands.length === 0) add(BossVerb.W_BITE, 1);
@@ -303,7 +303,7 @@ export class WyvernBrain {
     let inside = false;
     switch (d.shape) {
       case 'front': inside = dist <= d.reach + hr && fwd > 0 && Math.acos(Math.min(1, fwd / Math.max(1e-6, dist))) <= d.half + Math.atan2(hr, Math.max(dist, 0.5)); break;
-      case 'tail': inside = dist <= d.reach + hr && right * d.side >= -0.6 && fwd <= 1.2; break;
+      case 'tail': inside = dist <= d.reach + hr && right * d.side >= -0.6 && fwd <= 1.6; break;
       case 'cone': inside = dist <= d.reach && fwd > 0 && Math.acos(Math.min(1, fwd / Math.max(1e-6, dist))) <= d.half; break;
       case 'ring': inside = dist <= d.reach; break;
       case 'swoop': inside = dist <= d.reach + hr && this.y < 2.0; break;
@@ -493,7 +493,7 @@ export class WyvernBrain {
   // Available while staggered (head within 3.0 m) or inside the backstab window within 2.2 m.
   canFinish(h) {
     if (this.finisherF >= 0 || this.state === BRAIN_STATE.DEAD) return false;
-    const hx = this.x + this.forwardX() * 2.6, hz = this.z + this.forwardZ() * 2.6;   // head point at scale 3
+    const hx = this.x + this.forwardX() * 2.9, hz = this.z + this.forwardZ() * 2.9;   // head point at scale 3
     if (this.state === BRAIN_STATE.STAGGER && this.stance !== BossStance.AIR) return Math.hypot(h.x - hx, h.z - hz) <= DEFENCE.FINISHER_RANGE;
     if (this.simFrame <= this.backstabUntil) return Math.hypot(h.x - this.x, h.z - this.z) <= 2.2 + BOSS.BODY_RADIUS;
     return false;

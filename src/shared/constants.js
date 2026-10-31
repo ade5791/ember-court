@@ -30,7 +30,7 @@ export const BOSS = Object.freeze({
   POSTURE_MAX: 300,
   HOVER_Y: 4.65,           // min root height in hover clips: hover_haze body dips 4.58 m at scale 3
   FLIGHT_CEILING: 11.0,    // camera and boss both clamp below this
-  BODY_RADIUS: 1.4,        // ground hurt/push capsule (pelvis-centred)
+  BODY_RADIUS: 2.2,        // ground hurt/push capsule (pelvis-centred). v2.4: hull bones measured 1.65-1.74 m p90 at scale 3
   BODY_HALF_SEGMENT: 1.6,
   HEAD_RADIUS: 0.55,       // head hurt sphere, follows bone 'wivern_ Head'
   COLOR_SCALE: 2.0,        // albedo lift: measured boss-only mean luminance 11.1 -> 23.1 (of 255)
