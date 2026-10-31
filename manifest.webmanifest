@@ -1,0 +1,10 @@
+{
+  "name": "Ember Court - The Crimson Ford",
+  "short_name": "Ember Court",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#0d0806",
+  "theme_color": "#0d0806"
+}

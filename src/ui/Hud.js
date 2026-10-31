@@ -33,6 +33,7 @@ const CSS = `
 .ec-btn2{pointer-events:auto;min-width:220px;min-height:52px;margin:6px;padding:12px 26px;font:inherit;font-size:16px;letter-spacing:.3em;color:#ffe6c8;
   background:rgba(120,24,10,.55);border:1px solid rgba(255,200,150,.55);cursor:pointer}
 .ec-btn2:hover,.ec-btn2:focus-visible{background:rgba(170,40,16,.75);outline:none}
+.ec-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:6px}.ec-slot{display:contents}
 .ec-keys{margin-top:26px;font-size:14px;line-height:1.9;letter-spacing:.1em;opacity:.92;max-width:600px;padding:10px 16px;background:rgba(10,4,2,.55);border-radius:6px}
 .ec-stats{margin:4px 0 22px;font-size:14px;line-height:1.9;letter-spacing:.14em}
 .ec-credit{position:absolute;bottom:calc(env(safe-area-inset-bottom,0px) + 10px);left:0;right:0;font-size:12px;opacity:.8;letter-spacing:.04em;text-shadow:0 1px 2px #000}
@@ -61,7 +62,7 @@ export class Hud {
       <div class="ec-cue" data-ec="cue"></div>
       <div class="ec-prompt" data-ec="prompt"></div>
       <div class="ec-screen" data-ec="title"><h1>EMBER COURT</h1><h3>THE CRIMSON FORD</h3>
-        <button class="ec-btn2" data-ec="start">BEGIN</button>
+        <div class="ec-row"><button class="ec-btn2" data-ec="start">BEGIN</button><span class="ec-slot" data-ec="slot-fs"></span></div>
         <div class="ec-keys">${touch ? 'Left thumb moves. Tap ATK, hold HVY. BLK at the right moment deflects. DGE through red and blue strikes.'
           : 'WASD move &nbsp; Shift walk &nbsp; Mouse look<br>J / Left click attack &nbsp; K / Right click heavy<br>L or Q block - tap as a strike lands to deflect<br>Space dodge - through red and blue strikes &nbsp; Esc pause'}</div>
         <div class="ec-credit"></div></div>
@@ -89,6 +90,9 @@ export class Hud {
     this._dmgNext = 0;
     return this;
   }
+
+  // named DOM slot another ui system may place its control into (e.g. 'fs' beside BEGIN)
+  slot(name) { return this.root.querySelector('[data-ec="slot-' + name + '"]'); }
 
   showLoading(p) { /* the loader overlay is owned by index.html (#load) */ const b = document.querySelector('#load .pb i'); if (b) b.style.width = Math.round(p * 100) + '%'; }
   hideLoading() { const l = document.getElementById('load'); if (l) { l.style.opacity = '0'; setTimeout(() => l.remove(), 700); } }

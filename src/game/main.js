@@ -956,7 +956,7 @@ function update(realDt, alpha, presentDt, noRender = false) {
 }
 
 // ------------------------------------------------------------------ HUD, pause, screens
-const credit = 'Boss model: ' + bossManifest.provenance.attribution.replace(/CC-BY-(\d)\.(\d)/g, 'CC BY $1.$2') + '. Three.js (MIT).';
+const credit = 'Boss model: ' + bossManifest.provenance.attribution.replace(/CC-BY-(\d)\.(\d)/g, 'CC BY $1.$2').replace(/\.+\s*$/, '') + '. Three.js (MIT).';
 // Fullscreen: corner button + F key always; BEGIN (a user gesture) also enters it unless ?fs=0. Hidden while recording.
 const fullscreen = new Fullscreen().init({ visible: !recMode });
 const FS_ON_BEGIN = !recMode && qs.get('fs') !== '0';
@@ -968,12 +968,14 @@ const hud = new Hud().init({
   onResume: () => { setPaused(false); captureMouse(); },
 });
 systems.set('hud', hud);
+fullscreen.mountMenu(hud.slot('fs'));
 let touchWanted = touch.visible;
 touch.onVisibility = () => { if (hud._screen === '') touchWanted = touch.visible; };
 function syncScreen() {
   const s = sim.state;
   const scr = s === GameState.TITLE ? 'title' : s === GameState.VICTORY ? 'victory' : s === GameState.DEFEAT ? 'defeat' : loop && loop.paused ? 'pause' : '';
   hud.screen(scr);
+  fullscreen.setMenu(scr === 'title');
   if (scr && touch.visible) touch.setVisible(false); else if (!scr && touchWanted && !touch.visible) touch.setVisible(true);
   if (scr && document.pointerLockElement) document.exitPointerLock();
 }
@@ -1114,7 +1116,7 @@ window.__ember = {
         dist: Math.hypot(camera.position.x - H.x, camera.position.z - H.z), occFrames: cam.occFrames, occYaw: cam.occYaw, occOn: cam.occluder.active },
       cine: { kind: CINE_NAMES[cam.cineKind], w: cam.cineW, log: cam.cineLog.slice() }, fx: fx.counts(), rec: recMode, lunge: Object.keys(lungeOk),
       step: { kind: H.stepKind, dodgeF: H.dodgeF, clip: hero.on.length ? hero.on[0].getClip().name : '' }, programs: { start: progStart, now: renderer.info.programs.length },
-      dropped: loop.droppedSteps, touch: touch.visible, fs: { supported: fullscreen.supported, active: fullscreen.active, requests: fullscreen.requests }, hud: { hp: hud.el.hpI.style.transform, boss: hud.el.boss.style.display } };
+      dropped: loop.droppedSteps, touch: touch.visible, fs: { supported: fullscreen.supported, mode: fullscreen.mode, active: fullscreen.active, requests: fullscreen.requests }, hud: { hp: hud.el.hpI.style.transform, boss: hud.el.boss.style.display } };
   },
   // camera framing probe (QA): hero chest in NDC + camera forward bearing, read straight off the rendered camera
   camProbe() {
