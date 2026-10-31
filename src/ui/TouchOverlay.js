@@ -1,5 +1,5 @@
 // TouchOverlay (owner: ui). On-screen controls for touch: floating left analog stick, right-side camera
-// drag, and six action buttons (Attack, Heavy, Block, Dodge, Lock, Pause).
+// drag, and seven action buttons (Attack, Heavy, Block, Dodge, Roll, Lock, Pause).
 //
 // It writes into the input layer through a duck-typed sink obtained at runtime (ctx.get('input')):
 //   sink.press(action, source) / sink.release(action, source) / sink.setTouchStick(x, y, active)
@@ -21,6 +21,7 @@ const BUTTONS = [
   { action: A.HEAVY, key: 'heavy', label: 'Heavy', size: 'l', hint: 'hold' },
   { action: A.BLOCK, key: 'block', label: 'Block', size: 'l', hint: 'hold' },
   { action: A.DODGE, key: 'dodge', label: 'Dodge', size: 'l' },
+  { action: A.ROLL, key: 'roll', label: 'Roll', size: 'l' },
   { action: A.LOCK, key: 'lock', label: 'Lock', size: 'm' },
   { action: A.PAUSE, key: 'pause', label: 'Pause', size: 's' },
 ];
@@ -66,6 +67,7 @@ const CSS = `
 .ec-btn.heavy{right:calc(var(--sar) + 168px);bottom:calc(var(--sab) + 60px)}
 .ec-btn.block{right:calc(var(--sar) + 62px);bottom:calc(var(--sab) + 196px)}
 .ec-btn.dodge{right:calc(var(--sar) + 156px);bottom:calc(var(--sab) + 164px)}
+.ec-btn.roll{right:calc(var(--sar) + 160px);bottom:calc(var(--sab) + 262px)}
 .ec-btn.lock{right:calc(var(--sar) + 62px);bottom:calc(var(--sab) + 288px)}
 .ec-btn.pause{right:calc(var(--sar) + 36px);bottom:auto;top:calc(var(--sat) + 12px);transform:translate(50%,0)}
 .ec-btn.pause.held{transform:translate(50%,0) scale(.92)}
@@ -74,6 +76,7 @@ const CSS = `
   .ec-btn.heavy{right:calc(var(--sar) + 176px);bottom:calc(var(--sab) + 50px)}
   .ec-btn.block{right:calc(var(--sar) + 64px);bottom:calc(var(--sab) + 180px)}
   .ec-btn.dodge{right:calc(var(--sar) + 160px);bottom:calc(var(--sab) + 148px)}
+  .ec-btn.roll{right:calc(var(--sar) + 166px);bottom:calc(var(--sab) + 236px)}
   .ec-btn.lock{right:calc(var(--sar) + 260px);bottom:calc(var(--sab) + 112px)}
   .ec-zone.stick{width:40%}.ec-zone.look{width:60%}
 }

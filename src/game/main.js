@@ -430,7 +430,7 @@ function botCommand(c) {
 }
 function fillCommand() {
   const c = sim.cmd;
-  c.mx = 0; c.mz = 0; c.speed = 0; c.attack = false; c.heavy = false; c.heavyHeld = false; c.dodge = false; c.blockHeld = false; c.blockPress = false;
+  c.mx = 0; c.mz = 0; c.speed = 0; c.attack = false; c.heavy = false; c.heavyHeld = false; c.dodge = false; c.roll = false; c.blockHeld = false; c.blockPress = false;
   if (useBot) { botCommand(c); return; }
   input.moveIntent(camYaw, _move);
   const mag = input.moveMagnitude;
@@ -440,6 +440,7 @@ function fillCommand() {
   if (b === A.ATTACK && input.consumeBuffered(A.ATTACK)) c.attack = true;
   else if (b === A.HEAVY && input.consumeBuffered(A.HEAVY)) c.heavy = true;
   else if (b === A.DODGE && input.consumeBuffered(A.DODGE)) c.dodge = true;
+  else if (b === A.ROLL && input.consumeBuffered(A.ROLL)) c.roll = true;
   else if (b === A.BLOCK && input.consumeBuffered(A.BLOCK)) c.blockPress = true;
   c.blockHeld = input.isHeld(A.BLOCK);
   c.heavyHeld = input.isHeld(A.HEAVY);            // charge: the swing holds at the top of its wind-up while held
@@ -1028,7 +1029,7 @@ function lateUpdate(dt) {
   if (input.consumeEdge(A.PAUSE)) setPaused(!loop.paused);
   if (input.consumeEdge(A.LOCK)) { lockOn = !lockOn; touch.setToggle && touch.setToggle(A.LOCK, lockOn); }
   // title: attack/dodge/enter starts the run from any device
-  if (sim.state === GameState.TITLE && (input.consumeBuffered(A.ATTACK) || input.consumeBuffered(A.DODGE))) { input.clearBuffer(); sim.start(); }
+  if (sim.state === GameState.TITLE && (input.consumeBuffered(A.ATTACK) || input.consumeBuffered(A.DODGE) || input.consumeBuffered(A.ROLL))) { input.clearBuffer(); sim.start(); }
   const B = sim.brain;
   const S = sim.state;
   const alive = sim.duelists.reduce((n, d) => n + (d.alive ? 1 : 0), 0);
@@ -1042,6 +1043,7 @@ function lateUpdate(dt) {
   hudFrame = loop.simFrame;
   touch.update && touch.update();
   touch.setAvailable(A.DODGE, H.stamina >= 1);
+  touch.setAvailable(A.ROLL, H.stamina >= 1);
   touch.setAvailable(A.HEAVY, H.stamina >= 1);
   input.lateUpdate(dt);
 }

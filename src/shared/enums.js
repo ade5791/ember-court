@@ -17,11 +17,11 @@ export const Outcome = e(['HIT', 'BLOCKED', 'PARRIED', 'WHIFF_IFRAME', 'GUARDBRE
 export const FxKind = e(['SPARK', 'BLOOD_DUST', 'PARRY_FLASH', 'EMBER_BURST', 'DUST_PUFF', 'TELEGRAPH_GLINT']);
 
 // Input layer (player owns the state, ui touch overlay writes into it by duck-typed sink).
-export const InputAction = e(['ATTACK', 'HEAVY', 'BLOCK', 'DODGE', 'LOCK', 'PAUSE']);
-export const INPUT_ACTION_NAMES = Object.freeze(['attack', 'heavy', 'block', 'dodge', 'lock', 'pause']);
-export const INPUT_ACTION_COUNT = 6;
+export const InputAction = e(['ATTACK', 'HEAVY', 'BLOCK', 'DODGE', 'LOCK', 'PAUSE', 'ROLL']);   // ROLL appended (v2.9.2): indices stay stable
+export const INPUT_ACTION_NAMES = Object.freeze(['attack', 'heavy', 'block', 'dodge', 'lock', 'pause', 'roll']);
+export const INPUT_ACTION_COUNT = 7;
 // Bit flags so a hold from two devices at once is released only when both let go.
 export const InputSource = Object.freeze({ KBM: 1, TOUCH: 2, PAD: 4 });
 export const INPUT_DEVICE_NAMES = Object.freeze({ 1: 'kbm', 2: 'touch', 4: 'pad' });
 // Actions that go through the 10 f combat buffer (newest press wins). LOCK and PAUSE are immediate edges.
-export const BUFFERED_ACTIONS = Object.freeze([0, 1, 2, 3]);
+export const BUFFERED_ACTIONS = Object.freeze([0, 1, 2, 3, 6]);

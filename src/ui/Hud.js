@@ -63,8 +63,8 @@ export class Hud {
       <div class="ec-prompt" data-ec="prompt"></div>
       <div class="ec-screen" data-ec="title"><h1>EMBER COURT</h1><h3>THE CRIMSON FORD</h3>
         <div class="ec-row"><button class="ec-btn2" data-ec="start">BEGIN</button><span class="ec-slot" data-ec="slot-fs"></span></div>
-        <div class="ec-keys">${touch ? 'Left thumb moves. Tap ATK, hold HVY. BLK at the right moment deflects. DGE through red and blue strikes.'
-          : 'WASD move &nbsp; Shift walk &nbsp; Mouse look<br>J / Left click attack &nbsp; K / Right click heavy<br>L or Q block - tap as a strike lands to deflect<br>Space dodge - through red and blue strikes &nbsp; Esc pause'}</div>
+        <div class="ec-keys">${touch ? 'Left thumb moves. Tap ATK, hold HVY. BLK at the right moment deflects. DGE through red and blue strikes, ROLL to roll clear.'
+          : 'WASD move &nbsp; Shift walk &nbsp; Mouse look<br>J / Left click attack &nbsp; K / Right click heavy<br>L or Q block - tap as a strike lands to deflect<br>Space dodge - through red and blue strikes &nbsp; C roll &nbsp; Esc pause'}</div>
         <div class="ec-credit"></div></div>
       <div class="ec-screen" data-ec="pause"><h1 style="font-size:clamp(30px,6vw,64px)">PAUSED</h1><h3>&nbsp;</h3>
         <button class="ec-btn2" data-ec="resume">RESUME</button><button class="ec-btn2" data-ec="quit">RESTART</button></div>

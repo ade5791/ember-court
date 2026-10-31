@@ -38,7 +38,7 @@ function wrap(a) { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math
 
 // Command filled each fixed step by the game (input layer or bot). Reused, never reallocated.
 export function makeHeroCommand() {
-  return { mx: 0, mz: 0, speed: 0, attack: false, heavy: false, heavyHeld: false, dodge: false, blockHeld: false, blockPress: false };
+  return { mx: 0, mz: 0, speed: 0, attack: false, heavy: false, heavyHeld: false, dodge: false, roll: false, blockHeld: false, blockPress: false };
 }
 
 export class HeroSim {
@@ -140,7 +140,9 @@ export class HeroSim {
     return true;
   }
 
-  _startDodge(cmd, targets) {
+  // roll = true (ROLL button): always the evasive roll, even with a foe in guard range. Same frames, i-frames,
+  // travel and stamina as the dodge; only the quickstep branch is skipped.
+  _startDodge(cmd, targets, roll = false) {
     if (!this._spend(HERO_DODGE.stamina)) return false;
     this.state = HERO_STATE.DODGE; this.dodgeF = 0; this.actF = 0; this.blocking = false; this.queued = null;
     const l = Math.hypot(cmd.mx, cmd.mz);
@@ -149,7 +151,7 @@ export class HeroSim {
     else { dx = -this.facingX(); dz = -this.facingZ(); }         // no stick: backstep
     // Guarded quickstep: with a foe in range the hero squares up to it and steps in one of four directions
     // relative to that facing (MotionBricks clips), never turning its back. Otherwise: the roll.
-    const t = targets ? this._nearest(targets, HERO_DODGE.guardRange) : null;
+    const t = (targets && !roll) ? this._nearest(targets, HERO_DODGE.guardRange) : null;
     if (t) {
       this.yaw = Math.atan2(-(t.x - this.x), -(t.z - this.z));
       const fx = this.facingX(), fz = this.facingZ(), rx = Math.cos(this.yaw), rz = -Math.sin(this.yaw);
@@ -230,7 +232,7 @@ export class HeroSim {
             if (this.chargeF === HERO_CHARGE.MAX_F) this._event('charged');
             const ay = this._assistYaw(targets);
             if (ay !== null) this.yaw = wrap(this.yaw + Math.max(-TURN * 0.5, Math.min(TURN * 0.5, wrap(ay - this.yaw))));
-            if (cmd.dodge) { this.charging = false; this.state = HERO_STATE.LOCO; this._startDodge(cmd, targets); }
+            if (cmd.dodge || cmd.roll) { this.charging = false; this.state = HERO_STATE.LOCO; this._startDodge(cmd, targets, cmd.roll); }
             break;
           }
           if (this.actF >= holdAt) { this.charging = false; if (this.chargeLvl > 0) this._event('release'); }
@@ -251,8 +253,10 @@ export class HeroSim {
         if (cmd.attack && v.chainTo) this.queued = v.chainTo;
         if (cmd.heavy) this.queued = 'HEAVY';
         if (cmd.dodge) this.queued = 'DODGE';
-        if (this.queued === 'DODGE' && this.actF >= v.dodgeFrom) { this.state = HERO_STATE.LOCO; this._startDodge(cmd, targets); break; }
-        if (this.queued && this.queued !== 'DODGE' && v.chain && this.actF >= v.chain[0] && this.actF <= v.chain[1]) {
+        if (cmd.roll) this.queued = 'ROLL';
+        const evade = this.queued === 'DODGE' || this.queued === 'ROLL';
+        if (evade && this.actF >= v.dodgeFrom) { const r = this.queued === 'ROLL'; this.state = HERO_STATE.LOCO; this._startDodge(cmd, targets, r); break; }
+        if (this.queued && !evade && v.chain && this.actF >= v.chain[0] && this.actF <= v.chain[1]) {
           const q = this.queued; this.state = HERO_STATE.LOCO; if (!this._startVerb(q, targets)) this.state = HERO_STATE.LOCO;
           break;
         }
@@ -266,7 +270,7 @@ export class HeroSim {
 
       default: {   // LOCO
         this.actF++;
-        if (cmd.dodge && this._startDodge(cmd, targets)) break;
+        if ((cmd.dodge || cmd.roll) && this._startDodge(cmd, targets, cmd.roll)) break;
         if (cmd.heavy && this._startVerb('HEAVY', targets)) break;
         if (cmd.attack && this._startVerb('LIGHT_1', targets)) break;
         this.blocking = cmd.blockHeld;
