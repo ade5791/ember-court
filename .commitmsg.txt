@@ -1,1 +1,0 @@
-v2.11: two-handed great sword clips - with the great sword, attacks play a two-handed overhead chop and block/parry a two-handed guard (dev 214cd93)
