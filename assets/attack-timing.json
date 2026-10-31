@@ -38,23 +38,23 @@
    "contactDistM": 1.35
   },
   "LIGHT_2": {
-   "clip": "light_2",
+   "clip": "mh_rising",
    "phases": [
     {
      "phase": "STARTUP",
      "specF": 9,
      "clipF": [
-      69,
-      78
+      50,
+      61
      ],
-     "rate": 1.0
+     "rate": 1.222
     },
     {
      "phase": "ACTIVE",
      "specF": 5,
      "clipF": [
-      78,
-      82
+      61,
+      65
      ],
      "rate": 1.0
     },
@@ -62,34 +62,34 @@
      "phase": "RECOVERY",
      "specF": 20,
      "clipF": [
-      82,
-      92
+      65,
+      86
      ],
-     "rate": 0.8,
-     "playedF": 12,
+     "rate": 1.05,
+     "playedF": 20,
      "idleBlendF": 8
     }
    ],
    "contactDistM": 1.35
   },
   "LIGHT_3": {
-   "clip": "light_3",
+   "clip": "mh_reap",
    "phases": [
     {
      "phase": "STARTUP",
      "specF": 14,
      "clipF": [
-      76,
-      90
+      229,
+      246
      ],
-     "rate": 1.0
+     "rate": 1.214
     },
     {
      "phase": "ACTIVE",
      "specF": 6,
      "clipF": [
-      90,
-      95
+      246,
+      251
      ],
      "rate": 1.0
     },
@@ -97,34 +97,34 @@
      "phase": "RECOVERY",
      "specF": 28,
      "clipF": [
-      95,
-      116
+      251,
+      270
      ],
      "rate": 0.8,
-     "playedF": 26,
+     "playedF": 24,
      "idleBlendF": 8
     }
    ],
    "contactDistM": 1.55
   },
   "HEAVY": {
-   "clip": "heavy",
+   "clip": "mh_slam",
    "phases": [
     {
      "phase": "STARTUP",
      "specF": 26,
      "clipF": [
-      44,
-      70
+      71,
+      99
      ],
-     "rate": 1.0
+     "rate": 1.077
     },
     {
      "phase": "ACTIVE",
      "specF": 7,
      "clipF": [
-      70,
-      76
+      99,
+      105
      ],
      "rate": 1.0
     },
@@ -132,8 +132,8 @@
      "phase": "RECOVERY",
      "specF": 32,
      "clipF": [
-      76,
-      92
+      105,
+      121
      ],
      "rate": 0.8,
      "playedF": 20,

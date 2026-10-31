@@ -21,6 +21,9 @@ export const HERO_DODGE = Object.freeze({ total: 34, travel: 3.0, travelF: [2, 2
 export const STEP_DIR = Object.freeze({ NONE: 0, F: 1, B: 2, L: 3, R: 4 });
 export const STEP_CLIP = Object.freeze(['dodge', 'dodge_F', 'dodge_B', 'dodge_L', 'dodge_R']);
 export const HERO_FINISHER_F = 96;          // matches the boss finisher length (WyvernBrain FINISHER_F)
+// Finisher presentation: Sword Judgment (clip 102). Blade lands on clip frame 62, the boss takes the blow on sim
+// frame 60 (WyvernBrain FINISHER_HIT_F); knots map sim frames -> clip frames (60 fps).
+export const HERO_FINISHER_CLIP = Object.freeze({ clip: 'mh_judgment', knots: [[0, 0], [60, 62], [96, 112]] });
 const HITSTUN_F = 20, GUARDBREAK_F = 50, DEATH_F = 100, ASSIST_RANGE = 4.5;
 const STAMINA_REGEN = 34 / 60, STAMINA_DELAY = 30, BLOCK_REGEN_SCALE = 0.35;
 // Charged heavy: holding heavy freezes the swing at the top of its wind-up (CHARGE_HOLD_F frames before ACTIVE)
@@ -49,7 +52,8 @@ export class HeroSim {
       ? Float32Array.from(dodgeProfile.clips[c].profile) : lin);
     this.verbs = {};
     for (const k in HERO_VERBS) {
-      const v = { ...HERO_VERBS[k], name: k }, t = timing.verbs[k];
+      const t = timing.verbs[k], v = { ...HERO_VERBS[k], name: k };
+      if (t.clip) v.clip = t.clip;           // the timing table owns the clip choice (v2.8 long-sword set)
       v.phases = t.phases.map((p) => ({ ...p })); let f = 0;
       for (const p of v.phases) { p.start = f; f += p.specF; }
       v.total = f; v.startup = v.phases[0].specF; v.active = v.phases[1].specF;

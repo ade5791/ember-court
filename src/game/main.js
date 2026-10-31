@@ -14,13 +14,13 @@ import { Loop } from '../core/Loop.js';
 import { World } from '../world/World.js';
 import { CameraDirector, CINE, CINE_NAMES } from '../camera/CameraDirector.js';
 import { BossVerb, ActorKind } from '../shared/enums.js';
-import { FxPool, TELEGRAPH } from '../fx/FxPool.js';
+import { FxPool, TELEGRAPH, MIST } from '../fx/FxPool.js';
 import { Input } from '../player/Input.js';
 import { TouchOverlay } from '../ui/TouchOverlay.js';
 import { Hud } from '../ui/Hud.js';
 import { Fullscreen } from '../ui/Fullscreen.js';
 import { GameSim, GameState, HERO_STATE, DUEL_STATE, BRAIN_STATE, ART, WAVES, GAME_STATE_NAMES } from './GameSim.js';
-import { HERO_DODGE, HERO_FINISHER_F, STEP_DIR, STEP_CLIP, HERO_CHARGE } from './HeroSim.js';
+import { HERO_DODGE, HERO_FINISHER_F, HERO_FINISHER_CLIP, STEP_DIR, STEP_CLIP, HERO_CHARGE } from './HeroSim.js';
 import { buildQuickstep, quickstepClipTime } from '../shared/quickstep.js';
 import { DUELIST } from './DuelistSim.js';
 import { Inertializer, PoseJerk } from './Inertia.js';
@@ -78,7 +78,7 @@ progress(0.35);
 // ------------------------------------------------------------------ actors
 const loader = new GLTFLoader();
 const [heroGltf, enemyGltf, bossGltf, bossManifest, timing, heroCombat, heroLunge] = await Promise.all([
-  loader.loadAsync(ROOT + 'characters/hero/out/character.glb'),
+  loader.loadAsync(ROOT + 'characters/hero/out/character_mh.glb'),
   loader.loadAsync(ROOT + 'characters/enemy/out/character.glb'),
   loader.loadAsync(ROOT + 'characters/boss/wyvern.glb'),
   fetch(ROOT + 'characters/boss/wyvern.manifest.json').then((r) => r.json()),
@@ -313,7 +313,8 @@ sim.onHeroContact = (R) => {
     else hud.cue('DEFLECT', 'perfect');
   } else if (R.effect === 'slip' || R.effect === 'behind' || R.effect === 'phantom') {
     runStats.phantom++; loop.dilate(0.4, 18); cam.phantomStep(18);
-    fx.afterimage(HERO_ID, false, 1); fx.afterimage(HERO_ID, false, 0.7);
+    fx.afterimage(HERO_ID, INK_ON ? INK.GHOST : false, 1); fx.afterimage(HERO_ID, INK_ON ? INK.GHOST : false, 0.7);
+    if (INK_ON) fx.mist(H.x, colliders.terrainY(H.z) + 1.0, H.z, 0.6, MIST.JADE, 12, 0.5);
     hud.cue(R.effect === 'behind' ? 'PHANTOM STEP - BEHIND' : 'PHANTOM STEP', 'phantom');
   } else if (R.outcome === Outcome.HIT) {
     runStats.hits++; fx.burstBlood(_p, _n, R.damage >= 25 ? 1.5 : 1); cam.impact(R.damage >= 30 ? 'slam' : R.damage >= 22 ? 'heavy' : 'light');
@@ -323,8 +324,18 @@ sim.onHeroContact = (R) => {
     if (Math.abs(H.z) < 6.7) fx.splash(H.x, H.z, 0.6);
   } else if (R.outcome === Outcome.BLOCKED) { fx.burstSparks(_p, _n, 0.5); cam.impact('light'); }
 };
+// v2.7 MH-style damage numbers: project the contact point to CSS px (presentation only, deterministic drift)
+const _dproj = new THREE.Vector3(); let dmgSeq = 0;
+function popDamageAt(p, amount, kind) {
+  _dproj.copy(p).project(camera); if (_dproj.z > 1) return;
+  const dx = ((dmgSeq++ * 37) % 7 - 3) * 9;
+  hud.popDamage((_dproj.x * 0.5 + 0.5) * innerWidth, (-_dproj.y * 0.5 + 0.5) * innerHeight - 20, amount, kind, dx);
+}
 sim.onHeroHit = (t, dealt, v) => {
   if (dealt <= 0) return;
+  { const hv = v.name === 'HEAVY', c = v.charge || 0; _a.set(t.x, 1.6, t.z); if (t.isBoss) { HEAD.getWorldPosition(_a); _a.lerp(boss.root.position, 0.4); _a.y = Math.max(_a.y, 1.8); }
+    popDamageAt(_a, dealt, c > 0.5 || dealt >= 40 ? 'big' : hv ? '' : dealt < 12 ? 'weak' : '');
+    if (hv && c > 0.5) hud.flash(reducedMotion ? 0.15 : 0.35); }
   _n.set(H.facingX(), 0.2, H.facingZ());
   if (t.isBoss) { HEAD.getWorldPosition(_p); _p.lerp(boss.root.position, 0.5); _p.y = Math.max(_p.y, 1.2); }
   else _p.set(t.x, 1.2, t.z);
@@ -450,6 +461,53 @@ function fixedUpdate() {
 function lerpAngle(a, b, t) { let d = b - a; d -= Math.round(d / (2 * Math.PI)) * 2 * Math.PI; return a + d * t; }
 const loco = { phase: 0, lastX: H.x, lastZ: H.z };
 const streak = { hero: false, d: [false, false, false] };
+// v2.9 ink-blade pass (studied from Phantom Blade Zero's Drunken Sword footage): jade ink ribbons that linger as a
+// brush wash, mist-vanish dodges with a jade afterimage trail, a loose drunken sway between attacks, violet kill
+// dissolves and a lock-on reticle. Presentation only: nothing here reads back into the sim. Disable with ?ink=0.
+const INK_ON = qs.get('ink') !== '0';
+const INK = Object.freeze({ JADE: 0x14e09a, FIN: 0xffd27a, GHOST: 0x6ff0d0, LINGER: 0.34 });
+const ink = { puffF: -1, ghostF: -1, swayT: 0, swayK: 0 };
+function inkLayer(attacking, dt) {
+  if (dt <= 0) return;
+  if (H.state === HERO_STATE.DODGE) {
+    // vanish puff at the start of the step, then a jade ghost every 4 f through the travel window (once per sim frame)
+    if (H.actF === 2 && ink.puffF !== sim.frame) { ink.puffF = sim.frame; fx.mist(H.x, colliders.terrainY(H.z) + 0.9, H.z, 0.5, MIST.WHITE, 9, 0.4); }
+    if (!reducedMotion && H.actF >= 3 && H.actF <= 20 && (H.actF % 4) === 3 && ink.ghostF !== sim.frame) { ink.ghostF = sim.frame; fx.afterimage(HERO_ID, INK.GHOST, 0.55); }
+  }
+}
+// drunken sway: a slow, loose figure-eight in the spine and a lagging head while the hero is free (not attacking,
+// blocking, dodging or hit). Fades in over ~0.4 s and out in ~0.1 s, so it never touches a swing or a contact frame.
+function inkSway(dt, fx_, fz_) {
+  if (!INK_ON || dt <= 0) return;
+  const free = H.state === HERO_STATE.LOCO && !H.blocking && !H.charging;
+  ink.swayK += ((free ? 1 : 0) - ink.swayK) * Math.min(1, dt * (free ? 2.5 : 12));
+  if (ink.swayK < 1e-3) return;
+  ink.swayT += dt;
+  const slow = 1 - Math.min(1, H.speed / 5.5) * 0.55;          // less sway at a run
+  const a = ink.swayK * slow, t = ink.swayT;
+  const roll = (0.075 * Math.sin(t * 1.7) + 0.025 * Math.sin(t * 4.3 + 1.1)) * a;
+  const pitch = (0.04 * Math.sin(t * 3.4 + 0.6)) * a;
+  _ax2.set(fx_, 0, fz_); _ax.set(-fz_, 0, fx_);
+  rotWorld(HB.sp, _ax2, roll * 0.6); rotWorld(HB.s1, _ax2, roll * 0.5); rotWorld(HB.neck, _ax2, -roll * 0.7);
+  rotWorld(HB.s1, _ax, -pitch); rotWorld(HB.neck, _ax, pitch * 0.5);
+  rotWorld(HB.s2, UP, 0.05 * Math.sin(t * 1.3 + 0.4) * a);
+}
+// lock-on reticle: a thin ring + dot on the current target, DOM only (pointer-events none), hidden with no target
+const reticle = document.createElement('div'); reticle.className = 'ec-ret';
+{ const st = document.createElement('style');
+  st.textContent = '.ec-ret{position:fixed;left:0;top:0;width:34px;height:34px;margin:-17px 0 0 -17px;border:2px solid rgba(60,240,170,.9);border-radius:50%;pointer-events:none;z-index:19;opacity:0;box-shadow:0 0 10px rgba(20,224,154,.7),inset 0 0 6px rgba(20,224,154,.4);will-change:transform,opacity}.ec-ret:after{content:"";position:absolute;left:50%;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:50%;background:#eafff8}';
+  document.head.appendChild(st); }
+document.body.appendChild(reticle);
+const _rp = new THREE.Vector3(); let retOn = -1;
+function reticleLayer() {
+  const show = INK_ON && (sim.state === GameState.WAVE || sim.state === GameState.BOSS) && H.alive && cam.target && (lockOn || camTarget.isBoss) && !cam.cineActive;
+  if (!show) { if (retOn !== 0) { reticle.style.opacity = '0'; retOn = 0; } return; }
+  _rp.copy(camTarget.position).project(camera);
+  if (_rp.z > 1) { reticle.style.opacity = '0'; retOn = 0; return; }
+  const s = 1 + 0.06 * Math.sin(sim.frame * 0.12);
+  reticle.style.transform = 'translate(' + ((_rp.x * 0.5 + 0.5) * innerWidth).toFixed(1) + 'px,' + ((-_rp.y * 0.5 + 0.5) * innerHeight).toFixed(1) + 'px) scale(' + s.toFixed(3) + ')';
+  if (retOn !== 1) { reticle.style.opacity = '0.9'; retOn = 1; }
+}
 const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _dir = new THREE.Vector3();
 const footSlide = { worst: 0, samples: 0 };
 
@@ -569,6 +627,7 @@ function heroLayer(dt) {
     rotWorld(HB.s1, _ax, -depth); rotWorld(HB.s2, _ax, -depth * 0.6);
   }
   swingDrive(dt, fx_, fz_);
+  inkSway(dt, fx_, fz_);
   // C15 locomotion weight: pitch into acceleration / back on braking, bank into turns (spring-smoothed, loco only)
   if (dt > 0) {
     const sp = H.speed, acc = (sp - lean.sp) / dt; lean.sp = sp;
@@ -593,7 +652,7 @@ function heroLayer(dt) {
   chargeFx.glow += ((L > 0 ? 0.25 + 1.6 * L : 0) - chargeFx.glow) * Math.min(1, dt * 14);
   heroSteel.emissive.setRGB(1.0 * chargeFx.glow, 0.38 * chargeFx.glow, 0.08 * chargeFx.glow);
   const full = H.charging && H.chargeF >= HERO_CHARGE.MAX_F;
-  if (full && !chargeFx.wasFull) { heroSword.tip.getWorldPosition(_a); _n.set(0, 1, 0); fx.burstSparks(_a, _n, 0.9); cam.impact('light'); hud.cue('FULL CHARGE', 'perfect'); }
+  if (full && !chargeFx.wasFull) { heroSword.tip.getWorldPosition(_a); _n.set(0, 1, 0); fx.burstSparks(_a, _n, 0.9); cam.impact('light'); hud.cue('FULL CHARGE', 'perfect'); hud.flash(reducedMotion ? 0.08 : 0.18); }
   chargeFx.wasFull = full;
   if (L > 0.25 && dt > 0 && (H.frame % 7) === 0) { heroSword.tip.getWorldPosition(_a); _n.set(0, 1, 0); fx.burstSparks(_a, _n, 0.15 + 0.25 * L); }
 }
@@ -627,7 +686,7 @@ function bossLayer(dt) {
   for (const m of bossMats) if (m.emissive) m.emissive.copy(BOSS_FLASH).multiplyScalar(0.55 * bossReact.flash * bossReact.flash);
 }
 
-const HERO_ACT_CLIPS = new Set(Object.values(H.verbs).map((v) => v.clip).concat(['heavy', 'lunge_s', 'lunge_m', 'lunge_h']));
+const HERO_ACT_CLIPS = new Set(Object.values(H.verbs).map((v) => v.clip).concat(['heavy', 'mh_judgment', 'lunge_s', 'lunge_m', 'lunge_h']));
 const HERO_LOCO_CLIPS = new Set(['idle', 'walk', 'run', 'block', 'parry']);
 // blend windows (s): attacks enter fast so startup stays readable; recovery settles slowly into stance
 function heroBlend(nc, oc) {
@@ -684,7 +743,15 @@ function poseHeroBase(alpha, presentDt) {
   }
   if (st === HERO_STATE.HITSTUN) { pose(hero, 1, 'hit', 1, Math.min(H.actF, 40) / 60); return; }
   if (st === HERO_STATE.DEAD) { pose(hero, 1, 'death', 1, Math.min(H.actF / 60, hero.dur.death - 0.01)); return; }
-  if (st === HERO_STATE.FINISHER) { pose(hero, 1, 'heavy', 1, (H.actF / HERO_FINISHER_F) * hero.dur.heavy); return; }
+  if (st === HERO_STATE.FINISHER) {
+    const fc = HERO_FINISHER_CLIP, kn = fc.knots, f = Math.min(HERO_FINISHER_F, H.actF + alpha);
+    if (hero.actions[fc.clip]) {
+      let i = 0; while (i < kn.length - 2 && f > kn[i + 1][0]) i++;
+      const u = (f - kn[i][0]) / (kn[i + 1][0] - kn[i][0]);
+      pose(hero, 1, fc.clip, 1, (kn[i][1] + (kn[i + 1][1] - kn[i][1]) * Math.min(1, Math.max(0, u))) / 60); return;
+    }
+    pose(hero, 1, 'heavy', 1, (H.actF / HERO_FINISHER_F) * hero.dur.heavy); return;
+  }
   // LOCO: phase-locked walk/run blend (clip phase advances with real distance -> planted feet), idle under it
   const dist = Math.hypot(H.x - loco.lastX, H.z - loco.lastZ); loco.lastX = H.x; loco.lastZ = H.z;
   const sp = H.speed;
@@ -777,7 +844,7 @@ function breathFx(B) {
 let presentDtNow = 0;
 let dispYaw = null;
 
-let wasFinisher = false;
+let wasFinisher = false, finHitShown = false;
 // cinematic letterbox: two DOM bars (no extra render pass), height follows the cine blend weight
 const lbStyle = document.createElement('style');
 lbStyle.textContent = '.ec-lb{position:fixed;left:0;right:0;height:11vh;background:#000;z-index:5;pointer-events:none;transform:scaleY(0);will-change:transform}' +
@@ -794,7 +861,17 @@ function letterbox(w) {
 }
 bus.on('boss/phase', (p) => { if (!p.intro) cam.cine(CINE.PHASE); });
 bus.on('actor/death', (p) => {
-  if (p.kind !== ActorKind.WYVERN) return;
+  if (p.kind !== ActorKind.WYVERN) {
+    // v2.9 ink kill: the duelist dissolves in violet mist; a short presentation-only slow-mo sells the final blow
+    if (!INK_ON) return;
+    for (const s of slots) if (s.bound && s.actorId === p.actorId) {
+      const r = s.root.position, y = colliders.terrainY(r.z);
+      fx.mist(r.x, y + 1.0, r.z, 0.7, MIST.VIOLET, 14, 0.9); fx.mist(r.x, y + 0.3, r.z, 0.9, MIST.WHITE, 6, 0.3);
+      if (!reducedMotion) loop.dilate(0.45, 8, true);
+      break;
+    }
+    return;
+  }
   cam.cine(CINE.DEATH); loop.dilate(0.4, 70, true);
   { const B = sim.brain; fx.shockwave(B.x, colliders.terrainY(B.z) + 0.22, B.z, 9, 0xffc080, 1.4, 0.9); }
   hud.banner('THE FORD IS YOURS', 'the wyvern falls', 3.0);
@@ -841,9 +918,13 @@ function update(realDt, alpha, presentDt, noRender = false) {
   else { for (const m of poolMeshes) m.visible = false; orbMesh.visible = false; }
 
   const attacking = H.state === HERO_STATE.ACTION || H.state === HERO_STATE.FINISHER;
-  if (attacking) { heroSword.hilt.getWorldPosition(_a); heroSword.tip.getWorldPosition(_b); fx.streakSample(HERO_ID, _a, _b); streak.hero = true; }
+  if (attacking) { heroSword.hilt.getWorldPosition(_a); heroSword.tip.getWorldPosition(_b);
+    const finisher = H.state === HERO_STATE.FINISHER;
+    fx.streakSample(HERO_ID, _a, _b, INK_ON ? (finisher ? INK.FIN : INK.JADE) : 0xff1f14, INK_ON ? INK.LINGER : undefined); streak.hero = true; }
   else if (streak.hero) { fx.streakEnd(HERO_ID); streak.hero = false; }
-  if (H.state === HERO_STATE.DODGE && H.actF === 3 && presentDt > 0) fx.afterimage(HERO_ID, false, 0.5);
+  if (INK_ON) inkLayer(attacking, presentDt);
+  else if (H.state === HERO_STATE.DODGE && H.actF === 3 && presentDt > 0) fx.afterimage(HERO_ID, false, 0.5);
+  reticleLayer();
 
   camHero.position.copy(hero.root.position); camHero.yaw = H.yaw;
   chooseCamTarget();
@@ -857,6 +938,13 @@ function update(realDt, alpha, presentDt, noRender = false) {
   }
   const fin = H.state === HERO_STATE.FINISHER && sim.bossActive;
   if (fin && !wasFinisher) cam.cine(CINE.FINISHER);
+  // finisher blow lands on brain frame 60 (WyvernBrain FINISHER_HIT_F): flash + giant number, once per finisher
+  if (fin && sim.brain.finisherF >= 60 && !finHitShown) {
+    finHitShown = true; HEAD.getWorldPosition(_a); hud.popDamage(innerWidth * 0.5, innerHeight * 0.42, 160, 'fin', 0);
+    hud.flash(reducedMotion ? 0.2 : 0.7); fx.shockwave(boss.root.position.x, colliders.terrainY(boss.root.position.z) + 0.25, boss.root.position.z, 6.5, 0xffd080, 1.2, 0.6);
+    _n.set(0, 1, 0); fx.burstSparks(_a, _n, 1.6);
+  }
+  if (!fin) finHitShown = false;
   wasFinisher = fin;
   letterbox(cam.cineActive ? cam.cineW : 0);
   cam.update(presentDt);
@@ -912,7 +1000,7 @@ function resetPresentation() {
   prev.hx = H.x; prev.hz = H.z; prev.hyaw = H.yaw;
   const B = sim.brain; prev.bx = B.x; prev.by = B.y; prev.bz = B.z; prev.byaw = B.yaw;
   loco.lastX = H.x; loco.lastZ = H.z; loco.phase = 0;
-  fx.streakEnd(HERO_ID); streak.hero = false; fx.clearTelegraph(BOSS_ID); fx.clearFire(); wasFinisher = false; breathOn = 0; letterbox(0);
+  fx.streakEnd(HERO_ID); streak.hero = false; fx.clearTelegraph(BOSS_ID); fx.clearFire(); wasFinisher = false; finHitShown = false; hud.clearFx(); breathOn = 0; letterbox(0);
   hero.inert.reset(); boss.inert.reset(); for (const s of slots) s.inert.reset(); dispYaw = null; lean.sp = 0; lean.p = 0; lean.r = 0; lean.yaw = H.yaw;
   swing.aid = -1; bossAnim.lag = 0; bossAnim.foot[0] = bossAnim.foot[1] = 1; bossAnim.lastF = -1; bossAnim.lastVerb = -1; bossAnim.yawPrev = sim.brain.yaw;
   heroReact.amp = 0; bossReact.amp = 0; bossReact.flash = 0; bossReact.look = 0; bossReact.lastClip = ''; chargeFx.glow = 0; chargeFx.wasFull = false;
@@ -1041,6 +1129,11 @@ window.__ember = {
   frames() { const n = Math.min(ftN, ft.length); return Array.from(ft.subarray(0, n)); },
   resetFrames() { ftN = 0; lastNow = 0; },
   layout: () => touch.layoutReport(),
+  // ink probe (QA): live streak slots as owner / tint / life / sample count / guard->tip span of the newest sample
+  dbgStreaks() { const r = [], S = 10, Hh = fx.stHist; for (let s = 0; s < 4; s++) { if (fx.stLife[s] <= 0) continue; const b = s * S * 6;
+    r.push({ owner: fx.stOwner[s], hero: fx.stOwner[s] === HERO_ID, active: fx.stActive[s], life: +fx.stLife[s].toFixed(3), n: fx.stCount[s],
+      tint: [+fx.stTint[s * 3].toFixed(2), +fx.stTint[s * 3 + 1].toFixed(2), +fx.stTint[s * 3 + 2].toFixed(2)],
+      tipToHero: +Math.hypot(Hh[b + 3] - H.x, Hh[b + 5] - H.z).toFixed(2) }); } return r; },
   // Recorder lockstep: stop RAF, then each advance(n) runs n exact 1/60 s frames (sim + render), so captured
   // footage is a true 60 fps regardless of how slow the capture itself is.
   lockstep() { loop.stop(); return true; },

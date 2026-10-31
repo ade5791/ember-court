@@ -9,7 +9,7 @@
 import * as THREE from 'three';
 import { Outcome, Surface, FxKind } from '../shared/enums.js';
 
-export const FX_CAPS = Object.freeze({ streaks: 4, streakSamples: 6, sparkBursts: 3, sparksPerBurst: 24,
+export const FX_CAPS = Object.freeze({ streaks: 4, streakSamples: 10, sparkBursts: 3, sparksPerBurst: 24,
   bloodBursts: 6, bloodPerBurst: 20, splashRings: 24, dropsPerSplash: 8, auras: 4, afterimagesPerActor: 4 });
 export const TELEGRAPH = Object.freeze({ NORMAL: 0, RED: 1, BLUE: 2 });
 export const TELEGRAPH_COLORS = Object.freeze([0xffd84a, 0xff2414, 0x2f7dff]);
@@ -18,6 +18,10 @@ const SPARK_LIFE = 0.25, BLOOD_LIFE = 0.5, DROP_LIFE = 0.8, STREAK_LIFE = 0.12, 
 const GRAV = -9.81;
 const QUAD_OFF = new Int8Array([0, 3, 9, 0, 9, 6]);
 const QUAD_NEXT = new Uint8Array([0, 0, 1, 0, 1, 1]);
+const QUAD_EDGE = new Uint8Array([0, 1, 1, 0, 1, 0]);   // 1 = tip side of the ribbon (offsets 3 and 9)
+// v2.9 ink mist presets (rgb + peak alpha): WHITE dodge puff, VIOLET kill dissolve, JADE phantom vanish
+export const MIST = Object.freeze({ WHITE: 0, VIOLET: 1, JADE: 2 });
+const MIST_RGBA = new Float32Array([0.86, 0.89, 0.91, 0.40, 0.40, 0.20, 0.62, 0.55, 0.42, 0.86, 0.78, 0.34]);
 
 // soft round sprite with per-particle colour/alpha/size (one program for blood and droplets)
 const SPRITE_VS = `
@@ -41,7 +45,7 @@ void main(){
 }`;
 
 // fire breath: additive flame sprites (hot core -> orange -> deep red) + normal-blended smoke, fixed pools
-const FLAME_N = 320, SMOKE_N = 64, FLAME_LIFE = 0.55, SMOKE_LIFE = 1.4;
+const FLAME_N = 320, SMOKE_N = 112, FLAME_LIFE = 0.55, SMOKE_LIFE = 1.4;
 const FLAME_FS = `
 varying vec4 vColor;
 void main(){
@@ -246,19 +250,26 @@ export class FxPool {
     this.stOwner = new Int32Array(n).fill(-1);
     const verts = n * (S - 1) * 6;              // 2 tris per segment
     this.stPos = new Float32Array(verts * 3); this.stAlpha = new Float32Array(verts);
+    this.stCol = new Float32Array(verts * 3); this.stEdge = new Float32Array(verts);
+    this.stTint = new Float32Array(n * 3); this.stLifeMax = new Float32Array(n).fill(STREAK_LIFE);
+    for (let v = 0; v < verts; v++) this.stEdge[v] = QUAD_EDGE[v % 6];
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(this.stPos, 3).setUsage(THREE.DynamicDrawUsage));
     g.setAttribute('aA', new THREE.BufferAttribute(this.stAlpha, 1).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute('aC', new THREE.BufferAttribute(this.stCol, 3).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute('aE', new THREE.BufferAttribute(this.stEdge, 1));
     g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 64);
+    // v2.9 ink ribbon: per-owner tint, hot leading (tip) edge, soft wash fading toward the guard
     const m = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-      vertexShader: 'attribute float aA; varying float vA; void main(){ vA = aA; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
-      fragmentShader: 'varying float vA; void main(){ if (vA <= 0.0) discard; gl_FragColor = vec4(vec3(1.6,0.12,0.08) * vA, vA);\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}' });
+      vertexShader: 'attribute float aA; attribute vec3 aC; attribute float aE; varying float vA; varying vec3 vC; varying float vE; void main(){ vA = aA; vC = aC; vE = aE; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+      fragmentShader: 'varying float vA; varying vec3 vC; varying float vE; void main(){ if (vA <= 0.0) discard; float e = vE * vE; float core = pow(vE, 14.0); vec3 c = vC * (0.35 + 0.65 * e) + mix(vC, vec3(1.0), 0.5) * core * 0.8; float a = vA * (0.2 + 0.8 * e); gl_FragColor = vec4(c * a, a);\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}' });
     this.streakMesh = new THREE.Mesh(g, m); this.streakMesh.frustumCulled = false; this.streakMesh.name = 'fx_streaks'; this.streakMesh.renderOrder = 11;
     this.group.add(this.streakMesh);
   }
 
   // Called per frame while an ACTIVE window is open for ownerId with the blade guard/tip world positions.
-  streakSample(ownerId, guard, tip) {
+  // tint: 0xRRGGBB (default crimson), linger: seconds the ribbon persists after the window closes (ink wash)
+  streakSample(ownerId, guard, tip, tint = 0xff1f14, linger = STREAK_LIFE) {
     const S = FX_CAPS.streakSamples;
     let s = -1;
     for (let i = 0; i < FX_CAPS.streaks; i++) if (this.stActive[i] && this.stOwner[i] === ownerId) { s = i; break; }
@@ -267,37 +278,46 @@ export class FxPool {
       if (s < 0) return;                         // cap reached: drop (decorative, never gameplay)
       this.stActive[s] = 1; this.stOwner[s] = ownerId; this.stCount[s] = 0;
     }
+    // HDR tint, scaled so the brightest channel lands at 1.25: bright enough to read as light, low enough that the
+    // tonemap keeps the hue (x1.6 on every channel pushed jade past 1.0 on two channels and washed it to white)
+    const tr = ((tint >> 16) & 255) / 255, tg = ((tint >> 8) & 255) / 255, tb = (tint & 255) / 255, k = 1.25 / Math.max(tr, tg, tb, 1e-3);
+    this.stTint[s * 3] = tr * k; this.stTint[s * 3 + 1] = tg * k; this.stTint[s * 3 + 2] = tb * k;
+    this.stLifeMax[s] = linger;
     const H = this.stHist, base = s * S * 6;
     H.copyWithin(base + 6, base, base + (S - 1) * 6);
     H[base] = guard.x; H[base + 1] = guard.y; H[base + 2] = guard.z; H[base + 3] = tip.x; H[base + 4] = tip.y; H[base + 5] = tip.z;
     if (this.stCount[s] < S) this.stCount[s]++;
-    this.stLife[s] = STREAK_LIFE;
+    this.stLife[s] = linger;
   }
 
   streakEnd(ownerId) { for (let i = 0; i < FX_CAPS.streaks; i++) if (this.stActive[i] && this.stOwner[i] === ownerId) this.stActive[i] = 0; }
 
   _updateStreaks(dt) {
-    const S = FX_CAPS.streakSamples, H = this.stHist, P = this.stPos, A = this.stAlpha;
+    const S = FX_CAPS.streakSamples, H = this.stHist, P = this.stPos, A = this.stAlpha, C = this.stCol, T = this.stTint;
     let v = 0, live = 0;
     for (let s = 0; s < FX_CAPS.streaks; s++) {
       if (!this.stActive[s]) this.stLife[s] -= dt;
       const on = this.stLife[s] > 0 && this.stCount[s] >= 2;
       if (on) live++;
-      const fade = on ? Math.min(1, this.stLife[s] / STREAK_LIFE) : 0;
+      // ease-out fade: the ink wash hangs, then dissolves
+      const u = on ? Math.min(1, this.stLife[s] / this.stLifeMax[s]) : 0, fade = u * (2 - u);
+      const tr = T[s * 3], tg = T[s * 3 + 1], tb = T[s * 3 + 2];
       for (let k = 0; k < S - 1; k++) {
-        const a = s * S * 6 + k * 6, b = a + 6, valid = on && k + 1 < this.stCount[s];
-        const al0 = valid ? fade * (1 - k / (S - 1)) : 0, al1 = valid ? fade * (1 - (k + 1) / (S - 1)) : 0;
+        const a = s * S * 6 + k * 6, valid = on && k + 1 < this.stCount[s];
+        // quadratic falloff along the history so the tail tapers like a brush stroke
+        const q0 = 1 - k / (S - 1), q1 = 1 - (k + 1) / (S - 1);
+        const al0 = valid ? fade * q0 * q0 : 0, al1 = valid ? fade * q1 * q1 : 0;
         // quad (g0, t0, t1) (g0, t1, g1); offsets from a: g0 0, t0 3, g1 6, t1 9 (static tables, no allocation)
         for (let j = 0; j < 6; j++) {
           const src = a + QUAD_OFF[j]; P[v * 3] = H[src]; P[v * 3 + 1] = H[src + 1]; P[v * 3 + 2] = H[src + 2];
-          A[v] = QUAD_NEXT[j] ? al1 : al0; v++;
+          A[v] = QUAD_NEXT[j] ? al1 : al0; C[v * 3] = tr; C[v * 3 + 1] = tg; C[v * 3 + 2] = tb; v++;
         }
       }
     }
     this.stats.streaks = live;
     if (live > this.maxSeen.streaks) this.maxSeen.streaks = live;
     this.streakMesh.visible = live > 0;
-    if (live > 0) { this.streakMesh.geometry.attributes.position.needsUpdate = true; this.streakMesh.geometry.attributes.aA.needsUpdate = true; }
+    if (live > 0) { const at = this.streakMesh.geometry.attributes; at.position.needsUpdate = true; at.aA.needsUpdate = true; at.aC.needsUpdate = true; }
   }
 
   // ---------- telegraph auras: additive ground ring + inner disc per actor slot, colour = art ----------
@@ -413,7 +433,7 @@ export class FxPool {
       if (e.skel.boneTexture) e.skel.boneTexture.needsUpdate = true;
       e.g.matrixWorld.copy(e.src.matrixWorld);
       e.g.bindMatrix.copy(e.src.bindMatrix); e.g.bindMatrixInverse.copy(e.src.bindMatrixInverse);
-      e.mat.color.setHex(red ? 0xff3a2a : 0x6fb4ff);
+      e.mat.color.setHex(typeof red === 'number' ? red : red ? 0xff3a2a : 0x6fb4ff);
       e.mat.userData.peak = 0.55 * strength;
       e.g.visible = true;
     }
@@ -456,6 +476,10 @@ export class FxPool {
     this.flame = mk(FLAME_N, FLAME_FS, true, 'fx_flame', 12);
     this.smoke = mk(SMOKE_N, SPRITE_FS, false, 'fx_smoke', 6);
     this.flameAcc = 0; this.smokeAcc = 0; this.breathHeat = 0;
+    // per-particle smoke tint (rgb + peak alpha); breath/pool smoke writes the soot default, mist() writes presets
+    this.smokeTint = new Float32Array(SMOKE_N * 4);
+    this.smokeDrag = new Float32Array(SMOKE_N);
+    this.mistLive = 0;
     this.flameJet = new Uint8Array(FLAME_N);   // 1 = breath stream particle (low drag, widening), 0 = pool lick
   }
 
@@ -503,7 +527,25 @@ export class FxPool {
       S.pos[o] = x + Math.cos(a) * d; S.pos[o + 1] = y + 0.4; S.pos[o + 2] = z + Math.sin(a) * d;
       S.vel[o] = r.range(-0.15, 0.15); S.vel[o + 1] = r.range(0.6, 1.1); S.vel[o + 2] = r.range(-0.15, 0.15);
       const life = SMOKE_LIFE * r.range(0.7, 1.0); S.life[i] = life; S.max[i] = life; S.size[i] = r.range(0.8, 1.4);
+      const o4 = i * 4; this.smokeTint[o4] = 0.09; this.smokeTint[o4 + 1] = 0.07; this.smokeTint[o4 + 2] = 0.065; this.smokeTint[o4 + 3] = 0.45; this.smokeDrag[i] = 0;
     }
+  }
+
+  // v2.9 ink mist: a soft burst of billowing puffs (dodge vanish, kill dissolve). Shares the smoke pool, so no new
+  // program. x,y,z = centre, radius = spawn spread, preset = MIST.*, n = puff count, up = rise speed.
+  mist(x, y, z, radius = 0.6, preset = MIST.WHITE, n = 10, up = 0.6) {
+    const S = this.smoke, r = this.rng, T = this.smokeTint, p4 = preset * 4;
+    if (this.reducedMotion) n = Math.max(2, n >> 1);
+    for (let j = 0; j < n; j++) {
+      const i = S.next; S.next = (S.next + 1) % S.n; const o = i * 3, o4 = i * 4;
+      const a = r.float() * Math.PI * 2, d = Math.sqrt(r.float()) * radius, h = r.range(-0.4, 0.6) * radius;
+      S.pos[o] = x + Math.cos(a) * d; S.pos[o + 1] = y + h; S.pos[o + 2] = z + Math.sin(a) * d;
+      const out = r.range(0.8, 2.2);
+      S.vel[o] = Math.cos(a) * out; S.vel[o + 1] = up * r.range(0.6, 1.4); S.vel[o + 2] = Math.sin(a) * out;
+      const life = r.range(0.7, 1.15); S.life[i] = life; S.max[i] = life; S.size[i] = r.range(0.5, 0.9) * (0.6 + radius);
+      T[o4] = MIST_RGBA[p4]; T[o4 + 1] = MIST_RGBA[p4 + 1]; T[o4 + 2] = MIST_RGBA[p4 + 2]; T[o4 + 3] = MIST_RGBA[p4 + 3]; this.smokeDrag[i] = 1;
+    }
+    this.mistLive++;
   }
 
   _updateFlame(dt) {
@@ -533,10 +575,11 @@ export class FxPool {
       const o = i * 3, o4 = i * 4;
       if (S.life[i] <= 0) { S.col[o4 + 3] = 0; continue; }
       S.life[i] -= dt;
+      if (this.smokeDrag[i]) { const dr = Math.exp(-3.2 * dt); S.vel[o] *= dr; S.vel[o + 2] *= dr; S.vel[o + 1] *= Math.exp(-1.2 * dt); }
       S.pos[o] += S.vel[o] * dt; S.pos[o + 1] += S.vel[o + 1] * dt; S.pos[o + 2] += S.vel[o + 2] * dt;
-      const t = Math.max(0, S.life[i] / S.max[i]);
-      S.col[o4] = 0.09; S.col[o4 + 1] = 0.07; S.col[o4 + 2] = 0.065; S.col[o4 + 3] = Math.min(1, (1 - t) * 3) * t * 0.45;
-      S.size[i] += dt * 0.9;
+      const t = Math.max(0, S.life[i] / S.max[i]), T = this.smokeTint;
+      S.col[o4] = T[o4]; S.col[o4 + 1] = T[o4 + 1]; S.col[o4 + 2] = T[o4 + 2]; S.col[o4 + 3] = Math.min(1, (1 - t) * 3) * t * T[o4 + 3] * (this.smokeDrag[i] ? 2.2 : 1);
+      S.size[i] += dt * (this.smokeDrag[i] ? 1.6 : 0.9);
       if (S.life[i] > 0) ns++;
     }
     this.breathHeat = Math.max(0, this.breathHeat - dt * 4);

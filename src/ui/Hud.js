@@ -39,6 +39,10 @@ const CSS = `
 .ec-load{position:fixed;inset:0;z-index:40;background:#0b0504;display:flex;align-items:center;justify-content:center;flex-direction:column;
   color:#f0d2b0;font-family:Georgia,serif;letter-spacing:.3em;transition:opacity .6s}
 .ec-load .pb{width:min(320px,60vw);height:3px;background:#2a130c;margin-top:16px}.ec-load .pb i{display:block;height:100%;width:0;background:#d4602e;transition:width .3s}
+.ec-dmg{position:absolute;left:0;top:0;font-weight:700;font-size:22px;letter-spacing:.04em;color:#fff4dc;opacity:0;white-space:nowrap;
+  text-shadow:0 0 2px #000,0 2px 6px #000,0 0 14px rgba(255,120,40,.55);will-change:transform,opacity}
+.ec-dmg.big{font-size:34px;color:#ffd36a}.ec-dmg.weak{font-size:16px;color:#cfc6bb}.ec-dmg.fin{font-size:48px;color:#ffb347}
+.ec-flash{position:absolute;inset:0;background:#fff3e0;opacity:0;mix-blend-mode:screen}
 @media (prefers-reduced-motion:reduce){.ec-banner,.ec-cue,.ec-vign,.ec-load{transition:none}}
 `;
 
@@ -78,6 +82,11 @@ export class Hud {
     const bind = (k, fn) => { const b = q(k); const h = (e) => { e.preventDefault(); e.stopPropagation(); if (fn) fn(); }; b.addEventListener('click', h); (this._binds ||= []).push([b, h]); };
     bind('start', onStart); bind('again', onRestart); bind('retry', onRetry); bind('restart', onRestart); bind('resume', onResume); bind('quit', onRestart);
     this._hpLag = 1; this._bhpLag = 1; this._cueT = 0; this._bannerT = 0; this._screen = '';
+    // pooled floating damage numbers (Monster Hunter style) + full-screen impact flash. Fixed pool, no per-hit DOM churn.
+    this._flash = document.createElement('div'); this._flash.className = 'ec-flash'; r.insertBefore(this._flash, r.firstChild); this._flashA = 0;
+    this._dmg = [];
+    for (let i = 0; i < 12; i++) { const e = document.createElement('div'); e.className = 'ec-dmg'; r.appendChild(e); this._dmg.push({ e, t: 9, life: 0.9, x: 0, y: 0, dx: 0 }); }
+    this._dmgNext = 0;
     return this;
   }
 
@@ -134,7 +143,30 @@ export class Hud {
     E.vign.style.boxShadow = 'inset 0 0 160px rgba(160,10,0,' + (view.flash > 0 ? 0.55 : hp < 0.3 ? 0.28 : 0) + ')';
     if (this._cueT > 0 && (this._cueT -= dt) <= 0) E.cue.classList.remove('on');
     if (this._bannerT > 0 && (this._bannerT -= dt) <= 0) E.banner.classList.remove('on');
+    for (const d of this._dmg) {
+      if (d.t >= d.life) continue;
+      d.t += dt; const k = Math.min(1, d.t / d.life);
+      const pop = k < 0.12 ? 1.6 - 5 * k : 1.0;                 // punch in, settle
+      const y = d.y - 46 * (1 - (1 - k) * (1 - k));             // ease-out rise
+      d.e.style.opacity = (k < 0.7 ? 1 : (1 - k) / 0.3).toFixed(3);
+      d.e.style.transform = 'translate(' + (d.x + d.dx * k).toFixed(1) + 'px,' + y.toFixed(1) + 'px) translate(-50%,-50%) scale(' + pop.toFixed(3) + ')';
+      if (d.t >= d.life) d.e.style.opacity = '0';
+    }
+    if (this._flashA > 0) { this._flashA = Math.max(0, this._flashA - dt * 3.2); this._flash.style.opacity = this._flashA.toFixed(3); }
   }
+
+  // screen-space damage number. kind: '' | 'big' | 'weak' | 'fin'. x/y in CSS px. dx: horizontal drift (caller-seeded).
+  popDamage(x, y, amount, kind = '', dx = 0) {
+    if (!(amount > 0) || x < -50 || y < -50 || x > innerWidth + 50 || y > innerHeight + 50) return;
+    const d = this._dmg[this._dmgNext]; this._dmgNext = (this._dmgNext + 1) % this._dmg.length;
+    d.e.textContent = String(Math.round(amount)); d.e.className = 'ec-dmg' + (kind ? ' ' + kind : '');
+    d.x = x; d.y = y; d.dx = dx; d.t = 0; d.life = kind === 'fin' ? 1.4 : kind === 'big' ? 1.1 : 0.85;
+  }
+
+  // full-screen white flash (capped; reduced-motion callers pass a lower k)
+  flash(k = 0.6) { this._flashA = Math.max(this._flashA, Math.min(0.85, k)); this._flash.style.opacity = this._flashA.toFixed(3); }
+
+  clearFx() { for (const d of this._dmg) { d.t = 9; d.e.style.opacity = '0'; } this._flashA = 0; this._flash.style.opacity = '0'; }
 
   dispose() {
     this.disposed = true;
