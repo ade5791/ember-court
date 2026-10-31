@@ -18,6 +18,7 @@ import { FxPool, TELEGRAPH } from '../fx/FxPool.js';
 import { Input } from '../player/Input.js';
 import { TouchOverlay } from '../ui/TouchOverlay.js';
 import { Hud } from '../ui/Hud.js';
+import { Fullscreen } from '../ui/Fullscreen.js';
 import { GameSim, GameState, HERO_STATE, DUEL_STATE, BRAIN_STATE, ART, WAVES, GAME_STATE_NAMES } from './GameSim.js';
 import { HERO_DODGE, HERO_FINISHER_F, STEP_DIR, STEP_CLIP, HERO_CHARGE } from './HeroSim.js';
 import { buildQuickstep, quickstepClipTime } from '../shared/quickstep.js';
@@ -868,9 +869,12 @@ function update(realDt, alpha, presentDt, noRender = false) {
 
 // ------------------------------------------------------------------ HUD, pause, screens
 const credit = 'Boss model: ' + bossManifest.provenance.attribution.replace(/CC-BY-(\d)\.(\d)/g, 'CC BY $1.$2') + '. Three.js (MIT).';
+// Fullscreen: corner button + F key always; BEGIN (a user gesture) also enters it unless ?fs=0. Hidden while recording.
+const fullscreen = new Fullscreen().init({ visible: !recMode });
+const FS_ON_BEGIN = !recMode && qs.get('fs') !== '0';
 const hud = new Hud().init({
   credit, touch: touch.visible,
-  onStart: () => { input.releaseAll(); sim.start(); resetPresentation(); },
+  onStart: () => { if (FS_ON_BEGIN) fullscreen.request(); input.releaseAll(); sim.start(); resetPresentation(); },
   onRetry: () => { input.releaseAll(); input.clearBuffer(); sim.retry(); resetPresentation(); },
   onRestart: () => { input.releaseAll(); input.clearBuffer(); setPaused(false); sim.reset('title'); sim.start(); resetPresentation(); },
   onResume: () => { setPaused(false); captureMouse(); },
@@ -1022,7 +1026,7 @@ window.__ember = {
         dist: Math.hypot(camera.position.x - H.x, camera.position.z - H.z), occFrames: cam.occFrames, occYaw: cam.occYaw, occOn: cam.occluder.active },
       cine: { kind: CINE_NAMES[cam.cineKind], w: cam.cineW, log: cam.cineLog.slice() }, fx: fx.counts(), rec: recMode, lunge: Object.keys(lungeOk),
       step: { kind: H.stepKind, dodgeF: H.dodgeF, clip: hero.on.length ? hero.on[0].getClip().name : '' }, programs: { start: progStart, now: renderer.info.programs.length },
-      dropped: loop.droppedSteps, touch: touch.visible, hud: { hp: hud.el.hpI.style.transform, boss: hud.el.boss.style.display } };
+      dropped: loop.droppedSteps, touch: touch.visible, fs: { supported: fullscreen.supported, active: fullscreen.active, requests: fullscreen.requests }, hud: { hp: hud.el.hpI.style.transform, boss: hud.el.boss.style.display } };
   },
   // camera framing probe (QA): hero chest in NDC + camera forward bearing, read straight off the rendered camera
   camProbe() {
@@ -1050,7 +1054,7 @@ window.__ember = {
   dispose() {
     loop.dispose(); removeEventListener('resize', onResize);
     document.removeEventListener('visibilitychange', onVisPause); document.removeEventListener('pointerlockchange', onLockLost);
-    sim.dispose(); hud.dispose(); touch.dispose(); input.dispose(); fx.dispose(); cam.dispose(); world.dispose(); look.dispose(); bus.dispose();
+    sim.dispose(); hud.dispose(); fullscreen.dispose(); touch.dispose(); input.dispose(); fx.dispose(); cam.dispose(); world.dispose(); look.dispose(); bus.dispose();
     for (const a of [hero, boss, ...slots]) a.mixer.stopAllAction();
     scene.traverse((o) => { if (o.isMesh) { o.geometry.dispose(); for (const m of [].concat(o.material)) { for (const k in m) if (m[k] && m[k].isTexture) m[k].dispose(); m.dispose(); } } });
     renderer.dispose(); renderer.forceContextLoss(); renderer.domElement.remove();
