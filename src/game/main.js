@@ -78,7 +78,7 @@ progress(0.35);
 // ------------------------------------------------------------------ actors
 const loader = new GLTFLoader();
 const [heroGltf, enemyGltf, bossGltf, bossManifest, timing, heroCombat, heroLunge] = await Promise.all([
-  loader.loadAsync(ROOT + 'characters/hero/out/character_mh.glb'),
+  loader.loadAsync(ROOT + 'characters/hero/out/character_gs.glb'),
   loader.loadAsync(ROOT + 'characters/enemy/out/character.glb'),
   loader.loadAsync(ROOT + 'characters/boss/wyvern.glb'),
   fetch(ROOT + 'characters/boss/wyvern.manifest.json').then((r) => r.json()),
@@ -97,6 +97,23 @@ const clipSmooth = SMOOTH_ON ? [
 // C16: continuous attack clip-time warp per verb (same knots as attack-timing.json, rate continuous). ?warp=0 = old
 const WARP_ON = qs.get('warp') !== '0';
 const WARP = {}; for (const k in timing.verbs) WARP[k] = buildWarp(timing.verbs[k].phases);
+// v2.11 great sword clip set (presentation only): with the great sword equipped, LIGHT_1 and HEAVY both play the
+// two-handed overhead chop (Meshy 4): LIGHT_1 enters at the overhead peak (f50), HEAVY plays the full raised
+// wind-up from f30 (charged vs uncharged chop). Same sim phase lengths as the timing table; only the clip frame
+// knots differ. Active = f66-71: blade comes forward at f67 and is forward/down by f69 (gs-review.py side view),
+// tip peak 32.3 m/s at f66 (attack-probe.py). Meshy 128 (Heavy_Hammer_Swing) was rejected: the left hand never
+// joins the grip and the blade only drives down at f104. Block / parry use Two_Handed_Parry (149).
+const GS_SET = {
+  LIGHT_1: { clip: 'gs_overhead', clipF: [[50, 66], [66, 71], [71, 96]] },
+  HEAVY: { clip: 'gs_overhead', clipF: [[30, 66], [66, 72], [72, 104]] },
+};
+const GS_WARP = {};
+for (const k in GS_SET) {
+  const ph = timing.verbs[k] && timing.verbs[k].phases;
+  if (!ph || ph.length !== GS_SET[k].clipF.length) { console.warn('great sword clip set skipped (phase mismatch):', k); continue; }
+  GS_WARP[k] = buildWarp(ph.map((p, i) => ({ ...p, clipF: GS_SET[k].clipF[i] })));
+}
+const GS_GUARD = { clip: 'gs_guard', blockT: 16 / 60, parryT0: 3 / 60 };
 // MotionBricks guarded quickstep (NVIDIA MotionBricks bake): sim travel curve + clip-time map from one root curve
 const QUICKSTEP = buildQuickstep(heroCombat, HERO_DODGE.travelF[1] - HERO_DODGE.travelF[0] + 1);
 progress(0.8);
@@ -751,8 +768,8 @@ function bossLayer(dt) {
   for (const m of bossMats) if (m.emissive) m.emissive.copy(BOSS_FLASH).multiplyScalar(0.55 * bossReact.flash * bossReact.flash);
 }
 
-const HERO_ACT_CLIPS = new Set(Object.values(H.verbs).map((v) => v.clip).concat(['heavy', 'mh_judgment', 'lunge_s', 'lunge_m', 'lunge_h']));
-const HERO_LOCO_CLIPS = new Set(['idle', 'walk', 'run', 'block', 'parry']);
+const HERO_ACT_CLIPS = new Set(Object.values(H.verbs).map((v) => v.clip).concat(['heavy', 'mh_judgment', 'lunge_s', 'lunge_m', 'lunge_h'], Object.values(GS_SET).map((g) => g.clip)));
+const HERO_LOCO_CLIPS = new Set(['idle', 'walk', 'run', 'block', 'parry', GS_GUARD.clip]);
 // blend windows (s): attacks enter fast so startup stays readable; recovery settles slowly into stance
 function heroBlend(nc, oc) {
   if (nc === 'hit') return 0.07;
@@ -783,18 +800,22 @@ function contactDeadline() {
   return Math.max(0, (v.startup - f) / 60);
 }
 function heroClipT() { const w = WARP_ON && WARP[H.verb]; return w ? w.clipTime(H.actF) : H.verbClipTime(H.actF); }
+// great sword equipped and its two-handed clip is present -> that clip; else null (standard set)
+function heroGsVerb() { const g = H.weapon === 1 && GS_SET[H.verb]; return g && GS_WARP[H.verb] && hero.actions[g.clip] ? g : null; }
+const heroGsGuard = () => H.weapon === 1 && !!hero.actions[GS_GUARD.clip];
 function poseHeroBase(alpha, presentDt) {
   const st = H.state;
   if (st === HERO_STATE.ACTION) {
     const v = H.verbs[H.verb], ln = LUNGE_FOR[H.verb], ld = ln && lungeOk[ln];
+    const gs = heroGsVerb(), clip = gs ? gs.clip : v.clip, ct = gs ? GS_WARP[H.verb].clipTime(H.actF) : heroClipT();
     if (ld) {
       // footwork covers the sim lunge window (startup+active) and settles through early recovery
       const lf = v.startup + v.active, span = lf * 1.5, u = Math.min(1, (H.actF + alpha) / span);
       const w = H.actF < span ? 1.6 : Math.max(0, 1.6 * (1 - (H.actF - span) / 12));
-      pose(hero, 2, v.clip, 1, heroClipT(), ln, w, u * ld);
+      pose(hero, 2, clip, 1, ct, ln, w, u * ld);
       return;
     }
-    pose(hero, 1, v.clip, 1, heroClipT()); return;
+    pose(hero, 1, clip, 1, ct); return;
   }
   if (st === HERO_STATE.DODGE) {
     const qn = H.stepKind !== STEP_DIR.NONE ? STEP_CLIP[H.stepKind] : null, qi = qn && QUICKSTEP.clips[qn];
@@ -824,8 +845,9 @@ function poseHeroBase(alpha, presentDt) {
   const stride = STRIDE_WALK + (STRIDE_RUN - STRIDE_WALK) * wRun;
   loco.phase = (loco.phase + (dist < 0.5 ? dist / stride : 0)) % 1;
   const wMove = Math.max(0, Math.min(1, sp / 0.9));
-  if (H.blocking) { pose(hero, 2, 'block', 1 - wMove * 0.5, 0.35, 'walk', wMove * 0.5, loco.phase * hero.dur.walk); return; }
-  if (H.deflectF >= 0 && H.deflectF < 20 && wMove < 0.5) { pose(hero, 1, 'parry', 1, H.deflectF / 60 + 0.1); return; }
+  const gg = heroGsGuard();
+  if (H.blocking) { pose(hero, 2, gg ? GS_GUARD.clip : 'block', 1 - wMove * 0.5, gg ? GS_GUARD.blockT : 0.35, 'walk', wMove * 0.5, loco.phase * hero.dur.walk); return; }
+  if (H.deflectF >= 0 && H.deflectF < 20 && wMove < 0.5) { pose(hero, 1, gg ? GS_GUARD.clip : 'parry', 1, H.deflectF / 60 + (gg ? GS_GUARD.parryT0 : 0.1)); return; }
   pose(hero, 3, 'idle', 1 - wMove, (H.frame / 60) % hero.dur.idle,
     'walk', wMove * (1 - wRun), loco.phase * hero.dur.walk, 'run', wMove * wRun, loco.phase * hero.dur.run);
   // foot-slide metric: implied stride speed vs actual planar speed (only meaningful while moving)
