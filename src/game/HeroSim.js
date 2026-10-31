@@ -32,6 +32,10 @@ const STAMINA_REGEN = 34 / 60, STAMINA_DELAY = 30, BLOCK_REGEN_SCALE = 0.35;
 export const HERO_CHARGE = Object.freeze({ HOLD_F: 8, MIN_F: 8, MAX_F: 54, DMG: 0.7, POSTURE: 0.9, LUNGE: 0.5 });
 // Health regen: after REGEN_DELAY frames without taking damage, HP refills at REGEN_PER_S (never while dead).
 export const HERO_REGEN = Object.freeze({ DELAY_F: 300, PER_S: 4 });
+// v2.10 great sword (picked up beside the wyvern's landing): same verbs and frame data as the standard blade,
+// longer reach and heavier hits for a little more stamina. weapon 0 = standard sword, 1 = great sword.
+export const GREATSWORD = Object.freeze({ REACH: 0.7, DMG: 1.4, POSTURE: 1.35, STAMINA: 1.15 });
+export const WEAPON = Object.freeze({ SWORD: 0, GREAT: 1 });
 const TURN = SIM.TURN_RATE / 60;
 const TAU = Math.PI * 2;
 function wrap(a) { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI; }
@@ -61,6 +65,7 @@ export class HeroSim {
       this.verbs[k] = v;
     }
     this._charged = { ...this.verbs.HEAVY };   // scratch verb record for a charged release (no per-hit allocation)
+    this._great = { name: '', dmg: 0, posture: 0, reach: 0, charge: 0 };   // scratch verb record for great-sword hits
     this.id = 1; this.radius = SIM.CAPSULE_RADIUS;
     this.contactSink = null;     // (rec) => void, presentation hook after the hero applied an incoming contact
     this.hitSink = null;         // (targetKind, target, dmg, info) => void, presentation hook for outgoing hits
@@ -83,7 +88,10 @@ export class HeroSim {
     this._hitN = 0;
     this.charging = false; this.chargeF = 0; this.chargeLvl = 0; this.chargedHits = 0;
     this.hpIdle = 0; this.hpRegained = 0;
+    this.weapon = WEAPON.SWORD;
   }
+
+  equipGreatsword() { if (this.weapon === WEAPON.GREAT) return false; this.weapon = WEAPON.GREAT; this._event('equip'); return true; }
 
   // charge level of the current (or last) heavy, 0..1
   _chargeLevel() { return Math.max(0, Math.min(1, (this.chargeF - HERO_CHARGE.MIN_F) / (HERO_CHARGE.MAX_F - HERO_CHARGE.MIN_F))); }
@@ -132,7 +140,7 @@ export class HeroSim {
 
   _startVerb(name, targets) {
     const v = this.verbs[name];
-    if (!this._spend(v.stamina)) return false;
+    if (!this._spend(this.weapon === WEAPON.GREAT ? Math.round(v.stamina * GREATSWORD.STAMINA) : v.stamina)) return false;
     this.state = HERO_STATE.ACTION; this.verb = name; this.actF = 0; this.actionId++; this._hitN = 0;
     this.queued = null; this.blocking = false;
     this.charging = name === 'HEAVY'; this.chargeF = 0; this.chargeLvl = 0;
@@ -326,6 +334,12 @@ export class HeroSim {
       c.dmg = Math.round(v.dmg * (1 + HERO_CHARGE.DMG * L)); c.posture = Math.round(v.posture * (1 + HERO_CHARGE.POSTURE * L));
       c.charge = L; v = c;
     }
+    if (this.weapon === WEAPON.GREAT) {
+      const g = this._great;
+      g.name = v.name; g.charge = v.charge || 0; g.reach = v.reach + GREATSWORD.REACH;
+      g.dmg = Math.round(v.dmg * GREATSWORD.DMG); g.posture = Math.round(v.posture * GREATSWORD.POSTURE); g.great = true;
+      v = g;
+    }
     const fx = this.facingX(), fz = this.facingZ();
     for (let i = 0; i < targets.length; i++) {
       const t = targets[i]; if (!t || !t.targetable) continue;
@@ -372,7 +386,7 @@ export class HeroSim {
   hash() {
     let x = 2166136261 >>> 0;
     const q = (v) => { x = Math.imul(x ^ (Math.round(v * 1000) | 0), 16777619) >>> 0; };
-    q(this.x); q(this.z); q(this.yaw); q(this.hp); q(this.stamina); q(this.state); q(this.actF);
+    q(this.x); q(this.z); q(this.yaw); q(this.hp); q(this.stamina); q(this.state); q(this.actF); q(this.weapon);
     return x >>> 0;
   }
 }

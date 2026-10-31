@@ -16,6 +16,9 @@ export const WAVES = Object.freeze([
 ]);
 export const FLOW_F = Object.freeze({ INTRO: 150, WAVE_CLEAR: 150, VICTORY_HOLD: 150, DEFEAT_HOLD: 120, BOSS_HOLD: 130 });
 const HERO_SPAWN = [0, 9, 0];
+// v2.10 great sword pickup: planted in the ford beside the wyvern's landing spot (BOSS.SPAWN 0,-9) when the boss
+// fight starts. Walking into it equips it (no extra button, works the same on touch). Radius is hero centre to hilt.
+export const GREAT_PICKUP = Object.freeze({ X: 4.2, Z: -4.6, R: 1.1 });
 const BOSS_ID = 100, HERO_ID = 1;
 
 export class GameSim {
@@ -31,6 +34,7 @@ export class GameSim {
     this.bossTarget = { id: BOSS_ID, x: 0, z: 0, radius: BOSS.BODY_RADIUS, targetable: false, isBoss: true,
       onHeroHit: (h, v) => this._hitBoss(h, v) };
     // presentation hooks (copy what you keep)
+    this.onEquip = null;
     this.onState = null; this.onHeroContact = null; this.onHeroHit = null; this.onTelegraph = null; this.onDuelistTelegraph = null;
     this.reset(startAt);
   }
@@ -44,6 +48,7 @@ export class GameSim {
     this.hero.reset(HERO_SPAWN[0], HERO_SPAWN[1], HERO_SPAWN[2]);
     this.duelists.length = 0;
     this.frame = 0; this.stateF = 0; this.wave = -1; this.bossActive = false;
+    this.pickup = { x: GREAT_PICKUP.X, z: GREAT_PICKUP.Z, active: false, takenF: -1 };
     this.stats = { kills: 0, waveTimes: [], bossF: 0, totalF: 0, perfects: 0, phantoms: 0, finishers: 0, damageTaken: 0, damageDealt: 0 };
     this.state = GameState.TITLE;
     if (startAt === 'wave2') { this._spawnWave(1); this._setState(GameState.WAVE); }
@@ -78,6 +83,7 @@ export class GameSim {
   _startBoss() {
     this.duelists.length = 0; this.wave = WAVES.length; this.bossActive = true; this.bossStartF = this.frame;
     this.brain.startIntro();
+    if (this.hero.weapon === 0) { this.pickup.active = true; this.pickup.takenF = -1; }
     this._setState(GameState.BOSS);
   }
 
@@ -118,6 +124,13 @@ export class GameSim {
     // INTRO and the boss intro/roar: hero may move but cannot attack yet (no targets to hurt anyway)
     if (this.state === S.INTRO || this.state === S.WAVE_CLEAR) { c.attack = c.attack && false; }
     h.step(c, T);
+    // great sword pickup: walk into it (any live, non-dead state) to equip
+    const P = this.pickup;
+    if (P.active && h.alive && Math.hypot(h.x - P.x, h.z - P.z) < GREAT_PICKUP.R + h.radius && h.equipGreatsword()) {
+      P.active = false; P.takenF = this.frame;
+      if (this.bus) { const p = this.bus.payload('weapon/equip'); p.actorId = HERO_ID; p.weapon = 1; this.bus.dispatch('weapon/equip'); }
+      if (this.onEquip) this.onEquip(1);
+    }
 
     if (this.state === S.INTRO) {
       if (this.stateF >= FLOW_F.INTRO) { this._spawnWave(0); this._setState(S.WAVE); }
@@ -170,7 +183,7 @@ export class GameSim {
     let x = this.hero.hash() ^ this.brain.hash();
     const q = (v) => { x = Math.imul(x ^ (Math.round(v * 1000) | 0), 16777619) >>> 0; };
     for (const d of this.duelists) { q(d.x); q(d.z); q(d.hp); q(d.state); }
-    q(this.state); q(this.frame);
+    q(this.state); q(this.frame); q(this.pickup.active ? 1 : 0);
     return x >>> 0;
   }
 

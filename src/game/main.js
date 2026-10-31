@@ -150,7 +150,29 @@ function addSword(bone, s, bladeMat = steel) {
   for (const m of [blade, guard]) { m.castShadow = true; socket.add(m); }
   const tip = new THREE.Object3D(); tip.position.y = 0.87; socket.add(tip);
   const hilt = new THREE.Object3D(); hilt.position.y = 0.09; socket.add(hilt);
-  return { tip, hilt };
+  return { tip, hilt, socket };
+}
+// v2.10 great sword: 1.36 m blade (+0.62 m over the standard blade, matching GREATSWORD.REACH in the sim), wide
+// guard, long two-hand grip under the hand, ember inlay down the fuller. Socket units are metres, blade along +Y.
+const gsBladeGeo = new THREE.BoxGeometry(0.25, 1.36, 0.035), gsInlayGeo = new THREE.BoxGeometry(0.05, 1.18, 0.04);
+const gsGuardGeo = new THREE.BoxGeometry(0.52, 0.06, 0.07), gsGripGeo = new THREE.CylinderGeometry(0.022, 0.025, 0.34, 8);
+const gsPommelGeo = new THREE.SphereGeometry(0.042, 8, 6), gsTipGeo = new THREE.ConeGeometry(0.177, 0.24, 4);
+const leather = new THREE.MeshStandardMaterial({ color: 0x3a2418, metalness: 0, roughness: 0.85 });
+const emberInlay = new THREE.MeshStandardMaterial({ color: 0x2a0d06, emissive: 0xff5a1a, emissiveIntensity: 1.2, metalness: 0.2, roughness: 0.6 });
+function addGreatSword(parent, s, bladeMat = steel) {
+  const socket = new THREE.Group();
+  socket.position.fromArray(s.position); socket.quaternion.fromArray(s.quaternion); socket.scale.setScalar(s.scale);
+  parent.add(socket);
+  const blade = new THREE.Mesh(gsBladeGeo, bladeMat); blade.position.y = 0.8;
+  const inlay = new THREE.Mesh(gsInlayGeo, emberInlay); inlay.position.y = 0.76;
+  const point = new THREE.Mesh(gsTipGeo, bladeMat); point.position.y = 1.6; point.rotation.y = Math.PI / 4; point.scale.z = 0.24;
+  const guard = new THREE.Mesh(gsGuardGeo, brass); guard.position.y = 0.1;
+  const grip = new THREE.Mesh(gsGripGeo, leather); grip.position.y = -0.08;
+  const pommel = new THREE.Mesh(gsPommelGeo, brass); pommel.position.y = -0.27;
+  for (const m of [blade, inlay, point, guard, grip, pommel]) { m.castShadow = true; socket.add(m); }
+  const tip = new THREE.Object3D(); tip.position.y = 1.6; socket.add(tip);
+  const hilt = new THREE.Object3D(); hilt.position.y = 0.12; socket.add(hilt);
+  return { tip, hilt, socket };
 }
 
 // hero: pivot PI faces engine -Z
@@ -210,7 +232,19 @@ const INERT_ON = qs.get('inert') !== '0';
 const INERT_MODE = qs.get('inert') === 'decay' ? 'decay' : 'spring';
 const INERT_HL = +(qs.get('ihl') || 0.6);
 hero.inert = new Inertializer(hero.model, heroGltf.animations.concat(mbClips)); hero.inert.enabled = INERT_ON; hero.inert.mode = INERT_MODE; hero.inert.hlScale = INERT_HL;
-const heroSword = addSword(heroBones.RightHand, { position: [-0.3366, 7.6967, -1.1561], quaternion: [0.00031, 0.23882, 0.6183, 0.74878], scale: 100 }, heroSteel);
+const HERO_SOCKET = { position: [-0.3366, 7.6967, -1.1561], quaternion: [0.00031, 0.23882, 0.6183, 0.74878], scale: 100 };
+const heroSwordStd = addSword(heroBones.RightHand, HERO_SOCKET, heroSteel);
+const heroGreat = addGreatSword(heroBones.RightHand, HERO_SOCKET, heroSteel); heroGreat.socket.visible = false;
+let heroSword = heroSwordStd;
+function setHeroWeapon(w) { heroSword = w === 1 ? heroGreat : heroSwordStd; heroSwordStd.socket.visible = w !== 1; heroGreat.socket.visible = w === 1; }
+// planted pickup: the same great sword, blade down in the ford beside the wyvern's landing, with a pulsing ember
+// column so it reads from the hero spawn. No light (constant light count); additive basic material only.
+const pickupRoot = new THREE.Group(); pickupRoot.visible = false; scene.add(pickupRoot);
+const pickupSword = addGreatSword(pickupRoot, { position: [0, 0, 0], quaternion: [0, 0, 0, 1], scale: 1 }, steel);
+pickupSword.socket.rotation.set(Math.PI + 0.14, 0.6, 0.08);
+const pickupBeamMat = new THREE.MeshBasicMaterial({ color: 0xff7a30, transparent: true, opacity: 0.15, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+const pickupBeam = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.7, 7, 20, 1, true), pickupBeamMat); pickupBeam.position.y = 2.2; pickupRoot.add(pickupBeam);
+const pickupGlow = { t: 0, ping: -1 };
 // locomotion stride lengths from the manifest (natural speed x duration) -> phase-locked feet
 const STRIDE_WALK = 1.377 * 1.067, STRIDE_RUN = 4.632 * 0.667;
 
@@ -339,13 +373,15 @@ sim.onHeroHit = (t, dealt, v) => {
   _n.set(H.facingX(), 0.2, H.facingZ());
   if (t.isBoss) { HEAD.getWorldPosition(_p); _p.lerp(boss.root.position, 0.5); _p.y = Math.max(_p.y, 1.2); }
   else _p.set(t.x, 1.2, t.z);
-  const heavy = v.name === 'HEAVY', ch = v.charge || 0;
-  fx.burstSparks(_p, _n, heavy ? 1.0 + 0.9 * ch : 0.6);
+  const heavy = v.name === 'HEAVY', ch = v.charge || 0, great = !!v.great;
+  fx.burstSparks(_p, _n, (heavy ? 1.0 + 0.9 * ch : 0.6) * (great ? 1.4 : 1));
   if (heavy && !t.isBoss) fx.burstBlood(_p, _n, 0.8 + 0.6 * ch);
   if (ch > 0.5) fx.burstSparks(_p, _n, 0.8);
-  cam.impact(ch > 0.5 ? 'slam' : heavy ? 'heavy' : 'light');
+  cam.impact(ch > 0.5 ? 'slam' : heavy ? (great ? 'slam' : 'heavy') : great ? 'heavy' : 'light');
   // hit-stop: a short presentation+sim time dilation sells weight (outcomes are per-frame, so determinism holds)
-  if (heavy) loop.dilate(ch > 0 ? 0.15 : 0.25, ch > 0.5 ? 3 : 2); else loop.dilate(0.35, 1);
+  if (heavy) loop.dilate(ch > 0 ? 0.15 : 0.25, (ch > 0.5 ? 3 : 2) + (great ? 1 : 0)); else loop.dilate(0.35, great ? 2 : 1);
+  // great sword lights still shove the water: a small ring at the target
+  if (great && !heavy) { const gx = t.isBoss ? _p.x : t.x, gz = t.isBoss ? _p.z : t.z; fx.shockwave(gx, colliders.terrainY(gz) + 0.22, gz, 1.8, 0xff8a3a, 0.5, 0.35); }
   if (ch > 0.5) hud.cue('CHARGED STRIKE', 'perfect');
   // ground shockwave under heavy contacts (size and heat scale with the charge)
   if (heavy) { const gx = t.isBoss ? _p.x : t.x, gz = t.isBoss ? _p.z : t.z; fx.shockwave(gx, colliders.terrainY(gz) + 0.22, gz, 2.2 + 3.0 * ch, ch > 0.5 ? 0xffd080 : 0xff8a3a, 0.7 + 0.6 * ch, 0.45 + 0.2 * ch); }
@@ -353,6 +389,29 @@ sim.onHeroHit = (t, dealt, v) => {
   if (heavy) fx.shockwave(t.x, colliders.terrainY(t.z) + 0.24, t.z, (t.isBoss ? 3.5 : 2.2) * (1 + 0.6 * ch), 0xffa040, 0.6 + 0.6 * ch, 0.4);
   if (t.isBoss) { bossReact.amp = Math.min(1.6, bossReact.amp * 0.4 + (heavy ? 1 : 0.5) * (1 + ch)); bossReact.t = 0; bossReact.dx = H.facingX(); bossReact.dz = H.facingZ(); bossReact.flash = Math.min(1, 0.5 + 0.5 * ch + (heavy ? 0.3 : 0)); }
 };
+sim.onEquip = (w) => {
+  setHeroWeapon(w);
+  if (w !== 1) return;
+  const P = sim.pickup, gy = colliders.terrainY(P.z);
+  _p.set(P.x, gy + 1.2, P.z); _n.set(0, 1, 0);
+  fx.burstSparks(_p, _n, 1.6); fx.shockwave(P.x, gy + 0.22, P.z, 3.4, 0xffa040, 0.9, 0.55);
+  cam.impact('light'); hud.cue('GREAT SWORD CLAIMED', 'perfect'); hud.flash(reducedMotion ? 0.08 : 0.2);
+};
+function pickupLayer(dt) {
+  const P = sim.pickup, on = P.active && sim.bossActive;
+  pickupRoot.visible = on;
+  if (!on) return;
+  const gy = colliders.terrainY(P.z);
+  pickupRoot.position.set(P.x, gy + 1.38, P.z);
+  pickupGlow.t += dt;
+  const k = 0.5 + 0.5 * Math.sin(pickupGlow.t * 3.2);
+  pickupBeamMat.opacity = 0.07 + 0.13 * k;
+  emberInlay.emissiveIntensity = 0.8 + 1.6 * k;
+  // ground ping every 1.25 s so it reads even when the column is behind the camera
+  if (dt > 0 && sim.frame % 75 === 0 && pickupGlow.ping !== sim.frame) {
+    pickupGlow.ping = sim.frame; fx.shockwave(P.x, gy + 0.22, P.z, 2.0, 0xffa040, 0.45, 0.6);
+  }
+}
 sim.onTelegraph = (v, art, lead) => {
   fx.telegraph(BOSS_ID, art === ART.RED ? TELEGRAPH.RED : art === ART.BLUE ? TELEGRAPH.BLUE : TELEGRAPH.NORMAL, lead, boss.root, 2.6);
   if (art === ART.RED) hud.cue('RED - DODGE ASIDE', 'hit'); else if (art === ART.BLUE) hud.cue('BLUE - DODGE IN', 'phantom');
@@ -378,7 +437,7 @@ sim.onState = (s) => {
   if (s === GameState.INTRO) hud.banner('THE CRIMSON FORD', 'cross the river', 2.4);
   else if (s === GameState.WAVE) hud.banner('WAVE ' + (sim.wave + 1), WAVES[sim.wave].name.toUpperCase(), 2.0);
   else if (s === GameState.WAVE_CLEAR) hud.banner('CLEARED', sim.wave + 1 < WAVES.length ? 'more come' : 'something stirs in the gorge', 2.0);
-  else if (s === GameState.BOSS) { hud.banner('FORD WYVERN', 'guardian of the crossing', 2.6); fx.clearTelegraph(BOSS_ID); cam.cine(CINE.INTRO); }
+  else if (s === GameState.BOSS) { hud.banner('FORD WYVERN', sim.pickup.active ? 'claim the great sword in the ford' : 'guardian of the crossing', 2.6); fx.clearTelegraph(BOSS_ID); cam.cine(CINE.INTRO); }
   else if (s === GameState.VICTORY) { hud.setStats('victory', statsView()); }
   else if (s === GameState.DEFEAT) { hud.setStats('defeat', statsView()); }
   syncScreen();
@@ -413,6 +472,11 @@ function botCommand(c) {
       const px = H.x - p.x, pz = H.z - p.z, pd = Math.hypot(px, pz);
       if (pd < p.r + 0.6) { c.mx = px / (pd || 1); c.mz = pz / (pd || 1); c.speed = SIM.RUN_SPEED; return; }
     }
+  }
+  // great sword: go claim it first (it is the intended opening of the boss fight)
+  if (sim.bossActive && sim.pickup.active && sim.frame + 1 !== bot.at) {
+    const px = sim.pickup.x - H.x, pz = sim.pickup.z - H.z, pl = Math.hypot(px, pz) || 1;
+    c.mx = px / pl; c.mz = pz / pl; c.speed = SIM.RUN_SPEED; return;
   }
   // rec showcase: hold a charged heavy through its wind-up (released by the dodge/block reflex or at full charge)
   if (recMode && bot.hold > 0 && sim.frame + 1 !== bot.at) { bot.hold--; c.heavyHeld = true; return; }
@@ -917,6 +981,7 @@ function update(realDt, alpha, presentDt, noRender = false) {
   for (let i = 0; i < slots.length; i++) if (slots[i].bound) poseDuelist(slots[i], i, alpha);
   if (sim.bossActive) poseBoss(alpha);
   else { for (const m of poolMeshes) m.visible = false; orbMesh.visible = false; }
+  pickupLayer(presentDt);
 
   const attacking = H.state === HERO_STATE.ACTION || H.state === HERO_STATE.FINISHER;
   if (attacking) { heroSword.hilt.getWorldPosition(_a); heroSword.tip.getWorldPosition(_b);
@@ -1010,6 +1075,7 @@ function resetPresentation() {
   heroSteel.emissive.setRGB(0, 0, 0); for (const m of bossMats) if (m.emissive) m.emissive.setRGB(0, 0, 0);
   for (let i = 0; i < slots.length; i++) { if (slots[i].actorId >= 0) { fx.streakEnd(slots[i].actorId); fx.clearTelegraph(slots[i].actorId); } streak.d[i] = false; }
   bindSlots(); boss.root.visible = sim.bossActive;
+  setHeroWeapon(H.weapon); pickupGlow.t = 0; pickupGlow.ping = -1; pickupRoot.visible = sim.pickup.active && sim.bossActive;
   input.consumeLook(_look);                       // drop look delta accumulated on the end screen
   cam.reset(H.yaw); camHero.position.set(H.x, colliders.terrainY(H.z), H.z); camHero.yaw = H.yaw;
   chooseCamTarget(); cam.update(1 / 60);          // snap frame: right shot, framing yaw, no blend
@@ -1062,6 +1128,7 @@ const loop = new Loop({ fixedUpdate, update, lateUpdate, reducedMotion });
   for (const s of slots) s.root.visible = true; boss.root.visible = true;
   fx.prewarmBegin();
   for (const m of poolMeshes) m.visible = true; orbMesh.visible = true;
+  pickupRoot.visible = true; pickupRoot.position.set(4.2, 1.4, -4.6); heroGreat.socket.visible = true;
   lbTop.style.transform = 'scaleY(0)';
   renderer.setRenderTarget(null);
   await renderer.compileAsync(scene, camera, scene);
@@ -1070,6 +1137,7 @@ const loop = new Loop({ fixedUpdate, update, lateUpdate, reducedMotion });
   await world.water.prewarm(renderer, scene, camera);
   fx.prewarmEnd();
   for (const m of poolMeshes) m.visible = false; orbMesh.visible = false;
+  setHeroWeapon(H.weapon); pickupRoot.visible = sim.pickup.active && sim.bossActive;
   for (const s of slots) s.root.visible = !!s.bound;
   boss.root.visible = sim.bossActive;
   loop.load(loopState);
@@ -1118,6 +1186,7 @@ window.__ember = {
         dist: Math.hypot(camera.position.x - H.x, camera.position.z - H.z), occFrames: cam.occFrames, occYaw: cam.occYaw, occOn: cam.occluder.active },
       cine: { kind: CINE_NAMES[cam.cineKind], w: cam.cineW, log: cam.cineLog.slice() }, fx: fx.counts(), rec: recMode, lunge: Object.keys(lungeOk),
       step: { kind: H.stepKind, dodgeF: H.dodgeF, clip: hero.on.length ? hero.on[0].getClip().name : '' }, programs: { start: progStart, now: renderer.info.programs.length },
+      weapon: H.weapon, heroXZ: [+H.x.toFixed(2), +H.z.toFixed(2), +H.yaw.toFixed(3)], pickup: { x: sim.pickup.x, z: sim.pickup.z, active: sim.pickup.active, takenF: sim.pickup.takenF, shown: pickupRoot.visible },
       dropped: loop.droppedSteps, touch: touch.visible, fs: { supported: fullscreen.supported, mode: fullscreen.mode, active: fullscreen.active, requests: fullscreen.requests }, hud: { hp: hud.el.hpI.style.transform, boss: hud.el.boss.style.display } };
   },
   // camera framing probe (QA): hero chest in NDC + camera forward bearing, read straight off the rendered camera

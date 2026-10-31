@@ -47,4 +47,5 @@ export const EVENT_IDS = Object.freeze([
   'actor/state', 'action/start', 'action/phase', 'action/end', 'combat/contact', 'combat/hitstop',
   'combat/parry', 'combat/guardbreak', 'combat/dodge', 'actor/damage', 'actor/death', 'boss/phase',
   'ai/telegraph', 'lock/target', 'world/footstep', 'fx/request', 'input/device',
+  'weapon/equip',   // v2.10 { actorId, weapon } - appended, existing ids unchanged
 ]);
