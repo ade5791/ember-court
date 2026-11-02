@@ -1,4 +1,4 @@
-// main - the shipped game page (index.html). Owner: game. Wires GameSim (deterministic run) to the render stack,
+﻿// main - the shipped game page (index.html). Owner: game. Wires GameSim (deterministic run) to the render stack,
 // input layer, touch overlay, camera director, fx pool and HUD. Visuals stay downstream of sim events.
 // Query: ?seed=N  ?q=low|medium|high  ?start=title|wave1|wave2|boss  ?god=1  ?bot=1 (autopilot)  ?touch=0|1  ?rm=1
 import * as THREE from 'three';
@@ -20,7 +20,7 @@ import { TouchOverlay } from '../ui/TouchOverlay.js';
 import { Hud } from '../ui/Hud.js';
 import { Fullscreen } from '../ui/Fullscreen.js';
 import { GameSim, GameState, HERO_STATE, DUEL_STATE, BRAIN_STATE, ART, WAVES, GAME_STATE_NAMES } from './GameSim.js';
-import { HERO_DODGE, HERO_FINISHER_F, HERO_FINISHER_CLIP, STEP_DIR, STEP_CLIP, HERO_CHARGE } from './HeroSim.js';
+import { HERO_DODGE, HERO_FINISHER_F, HERO_FINISHER_CLIP, STEP_DIR, STEP_CLIP, HERO_CHARGE, GREATSWORD, scalePhases } from './HeroSim.js';
 import { buildQuickstep, quickstepClipTime } from '../shared/quickstep.js';
 import { DUELIST } from './DuelistSim.js';
 import { Inertializer, PoseJerk } from './Inertia.js';
@@ -103,15 +103,26 @@ const WARP = {}; for (const k in timing.verbs) WARP[k] = buildWarp(timing.verbs[
 // knots differ. Active = f66-71: blade comes forward at f67 and is forward/down by f69 (gs-review.py side view),
 // tip peak 32.3 m/s at f66 (attack-probe.py). Meshy 128 (Heavy_Hammer_Swing) was rejected: the left hand never
 // joins the grip and the blade only drives down at f104. Block / parry use Two_Handed_Parry (149).
+// v2.12: every great-sword swing is the authored two-handed chop. The v2.12 rig run (Meshy 237/92/199/202/240/85/
+// 335/560/550/551) was measured with scan-grip.py and none of those clips keeps both fists together (fist gap < 25 cm
+// on <= 3% of frames; Double_Combo_Attack is sword-and-shield), so they are not shipped. Combo variety comes from
+// different entry frames plus a per-verb diagonal torso roll (gsCutRoll) that tilts the whole two-handed cut.
 const GS_SET = {
-  LIGHT_1: { clip: 'gs_overhead', clipF: [[50, 66], [66, 71], [71, 96]] },
-  HEAVY: { clip: 'gs_overhead', clipF: [[30, 66], [66, 72], [72, 104]] },
+  LIGHT_1: { clip: 'gs_overhead', clipF: [[50, 66], [66, 71], [71, 96]], roll: 0 },
+  LIGHT_2: { clip: 'gs_overhead', clipF: [[46, 66], [66, 71], [71, 96]], roll: -0.42 },
+  LIGHT_3: { clip: 'gs_overhead', clipF: [[36, 66], [66, 72], [72, 104]], roll: 0.38 },
+  HEAVY: { clip: 'gs_overhead', clipF: [[30, 66], [66, 72], [72, 104]], roll: 0 },
 };
-const GS_WARP = {};
+// great-sword finisher: the full raised chop, blade lands (clip f67) on the boss hit frame (sim f60)
+const GS_FINISHER_CLIP = { clip: 'gs_overhead', knots: [[0, 14], [60, 67], [96, 104]] };
+// v2.12: the sim stretches every great-sword verb by GREATSWORD.SWING, so the warps use the same stretched phases
+// (same clip knots, played slower). WARP_GS covers the verbs that keep their one-hand clip (LIGHT_2/3).
+const GS_WARP = {}, WARP_GS = {};
+for (const k in timing.verbs) WARP_GS[k] = buildWarp(scalePhases(timing.verbs[k].phases, GREATSWORD.SWING));
 for (const k in GS_SET) {
   const ph = timing.verbs[k] && timing.verbs[k].phases;
   if (!ph || ph.length !== GS_SET[k].clipF.length) { console.warn('great sword clip set skipped (phase mismatch):', k); continue; }
-  GS_WARP[k] = buildWarp(ph.map((p, i) => ({ ...p, clipF: GS_SET[k].clipF[i] })));
+  GS_WARP[k] = buildWarp(scalePhases(ph, GREATSWORD.SWING).map((p, i) => ({ ...p, clipF: GS_SET[k].clipF[i] })));
 }
 const GS_GUARD = { clip: 'gs_guard', blockT: 16 / 60, parryT0: 3 / 60 };
 // MotionBricks guarded quickstep (NVIDIA MotionBricks bake): sim travel curve + clip-time map from one root curve
@@ -135,7 +146,7 @@ function makeActions(actor, clips) {
   for (const clip of clips) { const a = actor.mixer.clipAction(clip); a.timeScale = 0; a.play(); a.setEffectiveWeight(0); actor.actions[clip.name] = a; actor.dur[clip.name] = clip.duration; }
 }
 // Pose = up to 3 (clip, weight, time) entries; everything else weight 0. Sim-time driven, no mixer clock.
-function pose(actor, n, c0, w0, t0_, c1, w1, t1, c2, w2, t2) {
+function pose(actor, n, c0, w0, t0_, c1, w1, t1, c2, w2, t2, c3, w3, t3) {
   if (actor.inert) actor.inert.restore();
   const on = actor.on;
   for (let i = 0; i < on.length; i++) on[i].setEffectiveWeight(0);
@@ -146,7 +157,7 @@ function pose(actor, n, c0, w0, t0_, c1, w1, t1, c2, w2, t2) {
     a.time = t >= d ? (a._loopPose ? t % d : d - 1e-3) : t; a.setEffectiveWeight(w); on.push(a);
   };
   actor.pc = c0; actor.pt = t0_;
-  set(c0, w0, t0_); if (n > 1) set(c1, w1, t1); if (n > 2) set(c2, w2, t2);
+  set(c0, w0, t0_); if (n > 1) set(c1, w1, t1); if (n > 2) set(c2, w2, t2); if (n > 3) set(c3, w3, t3);
   actor.mixer.update(0);
 }
 const LOOP_CLIPS = new Set(['idle', 'walk', 'run', 'e_idle', 'e_walk', 'e_run', 'e_back']);
@@ -243,6 +254,25 @@ if (heroLunge && heroLunge.clips) {
     mbClips.push(new THREE.AnimationClip(name, (c.frames - 1) / fps, tracks)); lungeOk[name] = (c.frames - 1) / fps;
   }
 }
+// v2.12 great-sword carry: arms-only static pose sampled from the authored two-handed low-ready (gs_overhead f0).
+// Layered over idle/walk/run with a dominant weight while the great sword is equipped, so the legs keep the
+// phase-locked locomotion and both hands stay on the grip. Presentation only.
+// Spine bones come along too: the idle/run torso twists the right shoulder forward and leaves the hilt 0.85 m from
+// the left shoulder (reach is 0.58 m), so the carry takes the authored two-handed chest as well; hips and legs stay loco.
+const CARRY_BONES = ['Spine02', 'Spine01', 'Spine', 'LeftShoulder', 'LeftArm', 'LeftForeArm', 'LeftHand', 'RightShoulder', 'RightArm', 'RightForeArm', 'RightHand'];
+{
+  const src = heroGltf.animations.find((c) => c.name === 'gs_overhead');
+  if (src) {
+    const tracks = [];
+    for (const b of CARRY_BONES) {
+      const t = src.tracks.find((k) => k.name === b + '.quaternion'); if (!t) continue;
+      const q = t.createInterpolant().evaluate(0);
+      tracks.push(new THREE.QuaternionKeyframeTrack(b + '.quaternion', [0, 1], [q[0], q[1], q[2], q[3], q[0], q[1], q[2], q[3]]));
+    }
+    if (tracks.length === CARRY_BONES.length) mbClips.push(new THREE.AnimationClip('gs_carry', 1, tracks));
+    else console.warn('gs_carry dropped (unresolved arm tracks):', tracks.length);
+  }
+}
 makeActions(hero, heroGltf.animations.concat(mbClips)); markLoops(hero);
 // C15 inertialization: every clip switch decays the old pose into the new one (presentation only, ?inert=0 disables)
 const INERT_ON = qs.get('inert') !== '0';
@@ -262,6 +292,39 @@ pickupSword.socket.rotation.set(Math.PI + 0.14, 0.6, 0.08);
 const pickupBeamMat = new THREE.MeshBasicMaterial({ color: 0xff7a30, transparent: true, opacity: 0.15, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
 const pickupBeam = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.7, 7, 20, 1, true), pickupBeamMat); pickupBeam.position.y = 2.2; pickupRoot.add(pickupBeam);
 const pickupGlow = { t: 0, ping: -1 };
+// fist centres in hand-bone space: centroid of the bind-pose vertices skinned mostly to each hand bone
+const FIST = { L: new THREE.Vector3(), R: new THREE.Vector3() };
+{
+  let sk = null; hero.model.traverse((o) => { if (!sk && o.isSkinnedMesh) sk = o; });
+  if (sk) {
+    const bones = sk.skeleton.bones, pos = sk.geometry.attributes.position, si = sk.geometry.attributes.skinIndex, sw = sk.geometry.attributes.skinWeight;
+    const v = new THREE.Vector3();
+    for (const [side, key] of [['LeftHand', 'L'], ['RightHand', 'R']]) {
+      const bi = bones.findIndex((b) => b.name === side); if (bi < 0) continue;
+      let n = 0; const acc = new THREE.Vector3();
+      for (let i = 0; i < pos.count; i++) {
+        let w = 0; for (let k = 0; k < 4; k++) if (si.getComponent(i, k) === bi) w += sw.getComponent(i, k);
+        if (w < 0.6) continue;
+        v.fromBufferAttribute(pos, i).applyMatrix4(sk.bindMatrix).applyMatrix4(sk.skeleton.boneInverses[bi]); acc.add(v); n++;
+      }
+      if (n) FIST[key].copy(acc.multiplyScalar(1 / n));
+    }
+  }
+}
+// v2.12 two-hand grip: where the left hand sits on the great sword (socket-local position + rotation), measured
+// once from the authored two-handed hold (gs_overhead f0). leftGripIK() pins the left hand there every frame.
+const GRIP = { on: false, p: new THREE.Vector3(), q: new THREE.Quaternion(), w: 0, n: 0, far: 0, err: 0, errMax: 0 };
+if (hero.actions.gs_overhead && heroBones.LeftHand && heroBones.LeftArm && heroBones.LeftForeArm) {
+  const qs_ = new THREE.Quaternion(), ql = new THREE.Quaternion(), pw = new THREE.Vector3();
+  pose(hero, 1, 'gs_overhead', 1, 0); hero.model.updateMatrixWorld(true);
+  heroBones.LeftHand.getWorldPosition(pw); GRIP.p.copy(heroGreat.socket.worldToLocal(pw)); GRIP.auth = GRIP.p.toArray();
+  heroBones.RightHand.getWorldPosition(pw); GRIP.r = heroGreat.socket.worldToLocal(pw).toArray();
+  heroGreat.socket.getWorldQuaternion(qs_); heroBones.LeftHand.getWorldQuaternion(ql);
+  GRIP.q.copy(qs_).invert().multiply(ql); GRIP.on = true;
+  // left fist target: the authored left FIST on the hilt in the two-handed hold (reachable by construction)
+  pw.copy(FIST.L).applyMatrix4(heroBones.LeftHand.matrixWorld); GRIP.fist = heroGreat.socket.worldToLocal(pw).clone();
+  pose(hero, 1, 'idle', 1, 0);
+}
 // locomotion stride lengths from the manifest (natural speed x duration) -> phase-locked feet
 const STRIDE_WALK = 1.377 * 1.067, STRIDE_RUN = 4.632 * 0.667;
 
@@ -707,6 +770,15 @@ function heroLayer(dt) {
     const k = f < a ? 0 : f < e ? (f - a) / Math.max(1, v.active) : Math.max(0, 1 - (f - e) / 14);
     const depth = (H.verb === 'HEAVY' ? 0.16 * (1 + 0.8 * H.chargeLvl) : 0.07) * Math.sin(Math.min(1, k) * Math.PI * 0.5 + (f >= e ? Math.PI * 0.5 : 0));
     rotWorld(HB.s1, _ax, -depth); rotWorld(HB.s2, _ax, -depth * 0.6);
+    // great sword combo variety: roll the torso about the facing axis so the same two-handed chop lands as a
+    // diagonal cut (LIGHT_2 right-high to left-low, LIGHT_3 the mirror). Arms and blade ride the spine; the grip IK
+    // runs after this, so both hands stay on the hilt. Presentation only.
+    const g = H.weapon === 1 && GS_SET[H.verb];
+    if (g && g.roll) {
+      const ramp = f < a ? f / Math.max(1, a) : f < e + 6 ? 1 : Math.max(0, 1 - (f - e - 6) / 20);
+      const r = g.roll * Math.sin(Math.min(1, ramp) * Math.PI * 0.5);
+      _ax2.set(fx_, 0, fz_); rotWorld(HB.s2, _ax2, r * 0.45); rotWorld(HB.s1, _ax2, r * 0.55);
+    }
   }
   swingDrive(dt, fx_, fz_);
   inkSway(dt, fx_, fz_);
@@ -786,10 +858,92 @@ function poseHero(alpha, presentDt) {
   if (trace.on && presentDt > 0) jerkRaw.sample();
   hero.inert.apply(hero.pc, hero.pt, LOOP_CLIPS.has(hero.pc), presentDt, heroBlend, contactDeadline());
   heroLayer(presentDt);
+  leftGripIK(presentDt);
   if (presentDt > 0) jerk.hero.sample();
   if (trace.on && presentDt > 0) {
     const r = jerkRaw.na ? jerkRaw.acc[jerkRaw.na - 1] : null, f = jerk.hero.na ? jerk.hero.acc[jerk.hero.na - 1] : null;
     heroSword.tip.getWorldPosition(_b); trace.rows.push({ tip: [+_b.x.toFixed(4), +_b.y.toFixed(4), +_b.z.toFixed(4)], act: H.state === HERO_STATE.ACTION && H.actF >= H.verbs[H.verb].startup && H.actF < H.verbs[H.verb].startup + H.verbs[H.verb].active, raw: r, fin: f, bone: jerk.hero.accBone, rbone: jerkRaw.accBone, st: H.state, clip: hero.pc, verb: H.verb, f: H.actF });
+  }
+}
+// v2.12 two-hand grip IK (presentation only, ?grip=0 disables): with the great sword equipped the left hand is
+// pinned to the grip below the right hand in every state except death - loco, every swing (including the one-hand
+// mh clips), guard, dodge, finisher. Two-bone analytic IK on LeftArm/LeftForeArm with the elbow pole out to the
+// hero's left and down, then the hand takes the measured grip orientation. Runs last, after every additive layer,
+// so it follows the socket wherever the swing / sway put it. Nothing is read back into the sim.
+const GRIP_ON = qs.get('grip') !== '0';
+const _ga = new THREE.Vector3(), _gb = new THREE.Vector3(), _gc = new THREE.Vector3(), _gt = new THREE.Vector3(), _ge = new THREE.Vector3();
+const _gd = new THREE.Vector3(), _gp = new THREE.Vector3(), _gu = new THREE.Vector3(), _gv = new THREE.Vector3();
+const _gq = new THREE.Quaternion(), _gq2 = new THREE.Quaternion(), _gq3 = new THREE.Quaternion();
+const _gw = new THREE.Vector3(), _gx = new THREE.Vector3();
+function alignBone(bone, from, to) {   // rotate bone in world space so world direction `from` points along `to`
+  _gu.copy(from).normalize(); _gv.copy(to).normalize();
+  if (_gu.dot(_gv) > 0.999999) return;
+  _gq.setFromUnitVectors(_gu, _gv); bone.parent.getWorldQuaternion(_gq2);
+  _gq3.copy(_gq2).invert().multiply(_gq).multiply(_gq2); bone.quaternion.premultiply(_gq3);
+  bone.updateMatrixWorld(true);
+}
+function leftGripIK(dt) {
+  // the off hand lets go only for a roll / dodge, a hit reaction or death (those clips throw the arms wide);
+  // loco, every swing, guard, parry and the finisher keep both hands on the hilt
+  const free = H.state === HERO_STATE.DEAD || H.state === HERO_STATE.DODGE || H.state === HERO_STATE.HITSTUN;
+  const want = GRIP_ON && GRIP.on && H.weapon === 1 && !free ? 1 : 0;
+  GRIP.w = dt > 0 ? GRIP.w + (want - GRIP.w) * Math.min(1, dt * (want ? 14 : 4)) : GRIP.w;
+  if (GRIP.w < 1e-3) return;
+  const A = heroBones.LeftArm, F = heroBones.LeftForeArm, Hd = heroBones.LeftHand, S = heroBones.LeftShoulder;
+  hero.model.updateMatrixWorld(true);
+  A.getWorldPosition(_ga); F.getWorldPosition(_gb); Hd.getWorldPosition(_gc);
+  // target the FIST (skin-weighted hand centroid), not the wrist joint: fist on the grip axis one hand-width below
+  // the right fist; the wrist target is that minus the fist offset at the final hand orientation
+  heroGreat.socket.getWorldQuaternion(_gq); _gq.multiply(GRIP.q); Hd.getWorldScale(_gw);
+  _gt.copy(GRIP.fist); heroGreat.socket.localToWorld(_gt);
+  _gx.copy(FIST.L).multiply(_gw).applyQuaternion(_gq); _gt.sub(_gx);
+  let l1 = _gb.distanceTo(_ga), l2 = _gc.distanceTo(_gb);
+  // hilt beyond the left arm's reach outside a swing (idle / loco / guard settling out of a chop): bring the sword
+  // arm in. Rotate RightArm about its joint so the grip point moves toward the left shoulder by the excess. Never
+  // during ACTION / FINISHER, so swing paths and contact frames keep the authored blade (no sword drift).
+  const RA = heroBones.RightArm;
+  if (RA && H.state !== HERO_STATE.ACTION && H.state !== HERO_STATE.FINISHER) {
+    const ex = (_ga.distanceTo(_gt) - (l1 + l2) * 0.95) * GRIP.w;
+    if (ex > 0) {
+      RA.getWorldPosition(_ge); _gu.subVectors(_gt, _ge);
+      _gv.subVectors(_ga, _gt).normalize().multiplyScalar(ex).add(_gt).sub(_ge);
+      alignBone(RA, _gu, _gv);
+      _gt.copy(GRIP.fist); heroGreat.socket.localToWorld(_gt);
+      heroGreat.socket.getWorldQuaternion(_gq); _gq.multiply(GRIP.q);
+      _gx.copy(FIST.L).multiply(_gw).applyQuaternion(_gq); _gt.sub(_gx);
+      A.getWorldPosition(_ga); F.getWorldPosition(_gb); Hd.getWorldPosition(_gc);
+    }
+  }
+  _gt.sub(_gc).multiplyScalar(GRIP.w).add(_gc);                        // blend target from the authored hand
+  // out of reach: swing the clavicle toward the hilt first (<= 28 deg), like a real shoulder reaching across
+  if (S && _ga.distanceTo(_gt) > (l1 + l2) * 0.98) {
+    S.getWorldPosition(_ge); _gu.subVectors(_ga, _ge); const sl = _gu.length();
+    _gv.subVectors(_gt, _ge).normalize().multiplyScalar(sl);
+    const ang = _gu.angleTo(_gv), lim = 0.49 * GRIP.w;
+    if (ang > 1e-4) { _gv.sub(_gu).multiplyScalar(Math.min(1, lim / ang)).add(_gu); alignBone(S, _gu, _gv); }
+    A.getWorldPosition(_ga); F.getWorldPosition(_gb); Hd.getWorldPosition(_gc);
+    l1 = _gb.distanceTo(_ga); l2 = _gc.distanceTo(_gb);
+  }
+  _gd.subVectors(_gt, _ga); let d = _gd.length(); const reach = (l1 + l2) * 0.999;
+  const far = d > reach; d = Math.max(Math.abs(l1 - l2) + 1e-3, Math.min(reach, d)); _gd.normalize();
+  // elbow pole: hero's left and down, a little behind
+  const fx_ = H.facingX(), fz_ = H.facingZ();
+  _gp.set(fz_ * 0.6 - fx_ * 0.2, -0.8, -fx_ * 0.6 - fz_ * 0.2);
+  _gp.addScaledVector(_gd, -_gp.dot(_gd)); if (_gp.lengthSq() < 1e-6) _gp.set(0, -1, 0); _gp.normalize();
+  const cosA = Math.max(-1, Math.min(1, (l1 * l1 + d * d - l2 * l2) / (2 * l1 * d))), sinA = Math.sqrt(1 - cosA * cosA);
+  _ge.copy(_ga).addScaledVector(_gd, l1 * cosA).addScaledVector(_gp, l1 * sinA);
+  _gu.subVectors(_gb, _ga); _gv.subVectors(_ge, _ga); alignBone(A, _gu, _gv);
+  F.getWorldPosition(_gb); Hd.getWorldPosition(_gc);
+  _gu.subVectors(_gc, _gb); _gv.subVectors(_gt, _gb); alignBone(F, _gu, _gv);
+  // hand orientation: measured grip rotation relative to the socket, slerped by the blend weight
+  heroGreat.socket.getWorldQuaternion(_gq); _gq.multiply(GRIP.q);
+  Hd.parent.getWorldQuaternion(_gq2); _gq2.invert().multiply(_gq);
+  Hd.quaternion.slerp(_gq2, GRIP.w); Hd.updateMatrixWorld(true);
+  if (dt > 0) {
+    _gc.copy(FIST.L).applyMatrix4(Hd.matrixWorld); _gt.copy(GRIP.fist); heroGreat.socket.localToWorld(_gt);
+    const e = _gc.distanceTo(_gt) * (GRIP.w > 0.99 ? 1 : 0);
+    GRIP.n++; GRIP.err += e; if (e > GRIP.errMax) GRIP.errMax = e; if (far) GRIP.far++;
+    GRIP.e = e; GRIP.dbg = [+l1.toFixed(3), +l2.toFixed(3), +_ga.distanceTo(_gt).toFixed(3)];
   }
 }
 // seconds until the current swing's active window (pose must be exact there: no sword drift). Infinity otherwise.
@@ -799,7 +953,7 @@ function contactDeadline() {
   if (f >= v.startup + v.active) return Infinity;
   return Math.max(0, (v.startup - f) / 60);
 }
-function heroClipT() { const w = WARP_ON && WARP[H.verb]; return w ? w.clipTime(H.actF) : H.verbClipTime(H.actF); }
+function heroClipT() { const w = WARP_ON && (H.weapon === 1 ? WARP_GS : WARP)[H.verb]; return w ? w.clipTime(H.actF) : H.verbClipTime(H.actF); }
 // great sword equipped and its two-handed clip is present -> that clip; else null (standard set)
 function heroGsVerb() { const g = H.weapon === 1 && GS_SET[H.verb]; return g && GS_WARP[H.verb] && hero.actions[g.clip] ? g : null; }
 const heroGsGuard = () => H.weapon === 1 && !!hero.actions[GS_GUARD.clip];
@@ -830,7 +984,7 @@ function poseHeroBase(alpha, presentDt) {
   if (st === HERO_STATE.HITSTUN) { pose(hero, 1, 'hit', 1, Math.min(H.actF, 40) / 60); return; }
   if (st === HERO_STATE.DEAD) { pose(hero, 1, 'death', 1, Math.min(H.actF / 60, hero.dur.death - 0.01)); return; }
   if (st === HERO_STATE.FINISHER) {
-    const fc = HERO_FINISHER_CLIP, kn = fc.knots, f = Math.min(HERO_FINISHER_F, H.actF + alpha);
+    const fc = H.weapon === 1 && hero.actions[GS_FINISHER_CLIP.clip] ? GS_FINISHER_CLIP : HERO_FINISHER_CLIP, kn = fc.knots, f = Math.min(HERO_FINISHER_F, H.actF + alpha);
     if (hero.actions[fc.clip]) {
       let i = 0; while (i < kn.length - 2 && f > kn[i + 1][0]) i++;
       const u = (f - kn[i][0]) / (kn[i + 1][0] - kn[i][0]);
@@ -848,8 +1002,10 @@ function poseHeroBase(alpha, presentDt) {
   const gg = heroGsGuard();
   if (H.blocking) { pose(hero, 2, gg ? GS_GUARD.clip : 'block', 1 - wMove * 0.5, gg ? GS_GUARD.blockT : 0.35, 'walk', wMove * 0.5, loco.phase * hero.dur.walk); return; }
   if (H.deflectF >= 0 && H.deflectF < 20 && wMove < 0.5) { pose(hero, 1, gg ? GS_GUARD.clip : 'parry', 1, H.deflectF / 60 + (gg ? GS_GUARD.parryT0 : 0.1)); return; }
-  pose(hero, 3, 'idle', 1 - wMove, (H.frame / 60) % hero.dur.idle,
-    'walk', wMove * (1 - wRun), loco.phase * hero.dur.walk, 'run', wMove * wRun, loco.phase * hero.dur.run);
+  // great sword: arms take the two-handed low-ready carry (weight 12 of 13 on the arm bones), legs keep the loco blend
+  const carry = H.weapon === 1 && hero.actions.gs_carry ? 12 : 0;
+  pose(hero, carry ? 4 : 3, 'idle', 1 - wMove, (H.frame / 60) % hero.dur.idle,
+    'walk', wMove * (1 - wRun), loco.phase * hero.dur.walk, 'run', wMove * wRun, loco.phase * hero.dur.run, 'gs_carry', carry, 0);
   // foot-slide metric: implied stride speed vs actual planar speed (only meaningful while moving)
   if (sp > 0.5 && presentDt > 0) { footSlide.samples++; }
 }
@@ -1186,6 +1342,7 @@ if (recMode) setTimeout(() => { if (sim.state === GameState.TITLE) { sim.start()
 
 window.__ember = {
   ready: true, seed, quality: quality.name, loadMs, credit, bot: useBot,
+  heroActs() { return hero.on.map((a) => [a.getClip().name, +a.getEffectiveWeight().toFixed(2), +a.time.toFixed(2)]).concat([['deflectF', H.deflectF], ['block', H.blocking], ['cine', cam.cineKind || '']]); },
   dbgOcc() { const o = cam.occluder.position, r = (v) => +v.toFixed(2);
     return { o: [r(o.x), r(o.y), r(o.z)], cam: [r(camera.position.x), r(camera.position.y), r(camera.position.z)], hero: [r(H.x), r(H.y), r(H.z)],
       boss: [r(boss.root.position.x), r(boss.root.position.y), r(boss.root.position.z)], on: cam.occluder.active, avoid: cam.occAvoid, cine: cam.cineKind }; },
@@ -1207,8 +1364,8 @@ window.__ember = {
       cam: { shot: cam.shot, trauma: cam.trauma, push: cam.push, phantom: cam.phantom, orbitYaw: cam.orbitYaw, heroYaw: H.yaw, timeScale: loop.timeScale,
         dist: Math.hypot(camera.position.x - H.x, camera.position.z - H.z), occFrames: cam.occFrames, occYaw: cam.occYaw, occOn: cam.occluder.active },
       cine: { kind: CINE_NAMES[cam.cineKind], w: cam.cineW, log: cam.cineLog.slice() }, fx: fx.counts(), rec: recMode, lunge: Object.keys(lungeOk),
-      step: { kind: H.stepKind, dodgeF: H.dodgeF, clip: hero.on.length ? hero.on[0].getClip().name : '' }, programs: { start: progStart, now: renderer.info.programs.length },
-      weapon: H.weapon, heroXZ: [+H.x.toFixed(2), +H.z.toFixed(2), +H.yaw.toFixed(3)], pickup: { x: sim.pickup.x, z: sim.pickup.z, active: sim.pickup.active, takenF: sim.pickup.takenF, shown: pickupRoot.visible },
+      step: { kind: H.stepKind, dodgeF: H.dodgeF, clip: hero.on.length ? hero.on[0].getClip().name : '', verb: H.state === HERO_STATE.ACTION ? H.verb : H.state === HERO_STATE.FINISHER ? 'FINISHER' : '', hs: H.state }, programs: { start: progStart, now: renderer.info.programs.length },
+      weapon: H.weapon, grip: { w: +GRIP.w.toFixed(3), n: GRIP.n, far: GRIP.far, errMeanMm: GRIP.n ? +(GRIP.err / GRIP.n * 1000).toFixed(2) : 0, errMaxMm: +(GRIP.errMax * 1000).toFixed(2), speed: +H.speed.toFixed(3), loco: H.state === HERO_STATE.LOCO, eMm: +((GRIP.e || 0) * 1000).toFixed(1), dbg: GRIP.dbg }, heroXZ: [+H.x.toFixed(2), +H.z.toFixed(2), +H.yaw.toFixed(3)], pickup: { x: sim.pickup.x, z: sim.pickup.z, active: sim.pickup.active, takenF: sim.pickup.takenF, shown: pickupRoot.visible },
       dropped: loop.droppedSteps, touch: touch.visible, fs: { supported: fullscreen.supported, mode: fullscreen.mode, active: fullscreen.active, requests: fullscreen.requests }, hud: { hp: hud.el.hpI.style.transform, boss: hud.el.boss.style.display } };
   },
   // camera framing probe (QA): hero chest in NDC + camera forward bearing, read straight off the rendered camera
@@ -1235,6 +1392,31 @@ window.__ember = {
   world: () => ({ stats: world.stats, programs: renderer.info.programs.length, calls: renderer.info.render.calls, tris: renderer.info.render.triangles }),
   // review camera (QA screenshots only): stops the loop, places the camera, renders one frame
   reviewCam(p, t) { loop.stop(); camera.position.set(p[0], p[1], p[2]); camera.lookAt(t[0], t[1], t[2]); placeFill(); renderer.render(scene, camera); return true; },
+  // QA: hold the hero in one clip frame (optionally with the grip IK applied) and frame a close-up of the hands
+  holdPose(clip, f, ik = true, view = 'left', dist = 1.4) {
+    loop.stop(); setHeroWeapon(1); heroSword = heroGreat;
+    pose(hero, 1, clip, 1, f / 60); hero.model.updateMatrixWorld(true);
+    const saveW = H.weapon; H.weapon = 1; GRIP.w = ik ? 1 : 0; if (ik) leftGripIK(0); H.weapon = saveW;
+    const c = new THREE.Vector3(), r = new THREE.Vector3(); heroBones.LeftHand.getWorldPosition(c); heroBones.RightHand.getWorldPosition(r); c.add(r).multiplyScalar(0.5);
+    const yaw = H.yaw, fx = -Math.sin(yaw), fz = -Math.cos(yaw), sx = view === 'left' ? -1 : view === 'right' ? 1 : 0;
+    const dx = view === 'front' ? fx : -fz * sx, dz = view === 'front' ? fz : fx * sx;
+    camera.position.set(c.x + dx * dist, c.y + 0.25, c.z + dz * dist); camera.lookAt(c); placeFill(); renderer.render(scene, camera);
+    return true;
+  },
+  heroClips: () => Object.keys(hero.actions),
+  // QA: left / right FIST centres (skin-weighted hand vertices) in great-sword socket space per clip frame
+  gripScan(clip, step = 2) {
+    const a = hero.actions[clip]; if (!a) return null;
+    const out = [], pw = new THREE.Vector3(), n = Math.floor(a.getClip().duration * 60);
+    for (let f = 0; f <= n; f += step) {
+      pose(hero, 1, clip, 1, f / 60); hero.model.updateMatrixWorld(true);
+      pw.copy(FIST.L).applyMatrix4(heroBones.LeftHand.matrixWorld); const l = heroGreat.socket.worldToLocal(pw).toArray();
+      pw.copy(FIST.R).applyMatrix4(heroBones.RightHand.matrixWorld); const r = heroGreat.socket.worldToLocal(pw).toArray();
+      heroBones.LeftArm.getWorldPosition(pw); const sh = heroGreat.socket.worldToLocal(pw).toArray();
+      out.push({ f, l: l.map((v) => +v.toFixed(3)), r: r.map((v) => +v.toFixed(3)), sh: sh.map((v) => +v.toFixed(3)) });
+    }
+    return out;
+  },
   forceBossVerb(name) { const v = BossVerb[name]; if (v === undefined) return false; sim.brain.forceNext = v; return true; },
   advance(n = 1) { for (let i = 0; i < n; i++) { loop.advance(1 / 60); } return { state: GAME_STATE_NAMES[sim.state], frame: sim.frame, cine: CINE_NAMES[cam.cineKind] }; },
   begin() { if (sim.state === GameState.TITLE) { input.releaseAll(); sim.start(); resetPresentation(); } return GAME_STATE_NAMES[sim.state]; },

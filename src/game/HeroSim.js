@@ -34,7 +34,23 @@ export const HERO_CHARGE = Object.freeze({ HOLD_F: 8, MIN_F: 8, MAX_F: 54, DMG: 
 export const HERO_REGEN = Object.freeze({ DELAY_F: 300, PER_S: 4 });
 // v2.10 great sword (picked up beside the wyvern's landing): same verbs and frame data as the standard blade,
 // longer reach and heavier hits for a little more stamina. weapon 0 = standard sword, 1 = great sword.
-export const GREATSWORD = Object.freeze({ REACH: 0.7, DMG: 1.4, POSTURE: 1.35, STAMINA: 1.15 });
+// v2.12: the great sword is heavy - every verb's frame data (startup, active, recovery, chain window, dodge cancel)
+// is stretched by SWING, and locomotion top speed is scaled by MOVE. Dodge / roll are unchanged (defence stays fair).
+export const GREATSWORD = Object.freeze({ REACH: 0.7, DMG: 1.4, POSTURE: 1.35, STAMINA: 1.15, SWING: 1.3, MOVE: 0.72, TURN: 0.8 });
+// Stretch one verb record's frame data by k (phases, chain window, dodge cancel). Pure; used for the great-sword set.
+// Stretch timing-table phases by k (specF / playedF; clip frame knots unchanged, so the clip plays slower).
+export function scalePhases(phases, k) {
+  const s = (n) => Math.max(1, Math.round(n * k));
+  return phases.map((p) => ({ ...p, specF: s(p.specF), playedF: p.playedF ? s(p.playedF) : undefined }));
+}
+export function scaleVerb(v, k) {
+  const s = (n) => Math.max(1, Math.round(n * k));
+  const o = { ...v, phases: scalePhases(v.phases, k) };
+  let f = 0; for (const p of o.phases) { p.start = f; f += p.specF; }
+  o.total = f; o.startup = o.phases[0].specF; o.active = o.phases[1].specF;
+  o.chain = v.chain ? [s(v.chain[0]), s(v.chain[1])] : null; o.dodgeFrom = s(v.dodgeFrom);
+  return o;
+}
 export const WEAPON = Object.freeze({ SWORD: 0, GREAT: 1 });
 const TURN = SIM.TURN_RATE / 60;
 const TAU = Math.PI * 2;
@@ -64,6 +80,9 @@ export class HeroSim {
       v.reach = t.contactDistM || 1.35;
       this.verbs[k] = v;
     }
+    // great-sword frame data: same verbs stretched by GREATSWORD.SWING (this.verbs swaps on equip / reset)
+    this.verbsStd = this.verbs; this.verbsGreat = {};
+    for (const k in this.verbsStd) this.verbsGreat[k] = scaleVerb(this.verbsStd[k], GREATSWORD.SWING);
     this._charged = { ...this.verbs.HEAVY };   // scratch verb record for a charged release (no per-hit allocation)
     this._great = { name: '', dmg: 0, posture: 0, reach: 0, charge: 0 };   // scratch verb record for great-sword hits
     this.id = 1; this.radius = SIM.CAPSULE_RADIUS;
@@ -88,10 +107,10 @@ export class HeroSim {
     this._hitN = 0;
     this.charging = false; this.chargeF = 0; this.chargeLvl = 0; this.chargedHits = 0;
     this.hpIdle = 0; this.hpRegained = 0;
-    this.weapon = WEAPON.SWORD;
+    this.weapon = WEAPON.SWORD; this.verbs = this.verbsStd;
   }
 
-  equipGreatsword() { if (this.weapon === WEAPON.GREAT) return false; this.weapon = WEAPON.GREAT; this._event('equip'); return true; }
+  equipGreatsword() { if (this.weapon === WEAPON.GREAT) return false; this.weapon = WEAPON.GREAT; this.verbs = this.verbsGreat; this._event('equip'); return true; }
 
   // charge level of the current (or last) heavy, 0..1
   _chargeLevel() { return Math.max(0, Math.min(1, (this.chargeF - HERO_CHARGE.MIN_F) / (HERO_CHARGE.MAX_F - HERO_CHARGE.MIN_F))); }
@@ -282,7 +301,10 @@ export class HeroSim {
         if (cmd.heavy && this._startVerb('HEAVY', targets)) break;
         if (cmd.attack && this._startVerb('LIGHT_1', targets)) break;
         this.blocking = cmd.blockHeld;
-        const want = this.blocking ? Math.min(cmd.speed, SIM.WALK_SPEED) : cmd.speed;
+        const gk = this.weapon === WEAPON.GREAT ? GREATSWORD.MOVE : 1;   // heavy blade: slower top speed and turns
+        const want = (this.blocking ? Math.min(cmd.speed, SIM.WALK_SPEED) : cmd.speed) * gk;
+        // dodge / lunge carry-over enters LOCO at full velocity; with the great sword cap it at the heavy top speed
+        if (gk < 1) this.speed = Math.min(this.speed, SIM.RUN_SPEED * gk);
         const l = Math.hypot(cmd.mx, cmd.mz);
         const dirX = l > 1e-4 ? cmd.mx / l : 0, dirZ = l > 1e-4 ? cmd.mz / l : 0;
         // speed ramps with ACCEL/DECEL; facing always turns toward travel, so the hero never runs backwards
@@ -291,7 +313,8 @@ export class HeroSim {
         this.speed += Math.max(-rate, Math.min(rate, target - this.speed));
         if (l > 1e-4) {
           const wantYaw = Math.atan2(-dirX, -dirZ), d = wrap(wantYaw - this.yaw);
-          this.yaw = wrap(this.yaw + Math.max(-TURN, Math.min(TURN, d)));
+          const tr = gk < 1 ? TURN * GREATSWORD.TURN : TURN;
+          this.yaw = wrap(this.yaw + Math.max(-tr, Math.min(tr, d)));
           // move along facing once mostly turned (no backwards travel while the turn completes)
           const fx = this.facingX(), fz = this.facingZ();
           const dot = fx * dirX + fz * dirZ;
