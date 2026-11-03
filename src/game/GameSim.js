@@ -2,14 +2,15 @@
 // Flow: TITLE -> INTRO -> WAVE 1 -> WAVE_CLEAR -> WAVE 2 -> WAVE_CLEAR -> BOSS -> VICTORY | DEFEAT.
 // Owns HeroSim, the wave duelists and the WyvernBrain; the page (src/game/main.js) only feeds a hero command
 // per fixed step and draws what this produces. Same seed + same commands -> same run (hash()).
-import { SIM, BOSS } from '../shared/constants.js';
+import { SIM, BOSS, GAUNTLET } from '../shared/constants.js';
 import { GameState, Outcome } from '../shared/enums.js';
 import { Rng } from '../core/Rng.js';
 import { WyvernBrain, BRAIN_STATE, ART } from '../boss/WyvernBrain.js';
+import { GauntletBrain, G_STATE } from '../boss/GauntletBrain.js';
 import { HeroSim, HERO_STATE, makeHeroCommand } from './HeroSim.js';
 import { DuelistSim, DUEL_STATE, assignTokens, separate } from './DuelistSim.js';
 
-export const GAME_STATE_NAMES = Object.freeze(['BOOT', 'TITLE', 'INTRO', 'WAVE', 'WAVE_CLEAR', 'BOSS', 'VICTORY', 'DEFEAT']);
+export const GAME_STATE_NAMES = Object.freeze(['BOOT', 'TITLE', 'INTRO', 'WAVE', 'WAVE_CLEAR', 'BOSS', 'VICTORY', 'DEFEAT', 'DOOR', 'STAGE3']);
 export const WAVES = Object.freeze([
   Object.freeze({ name: 'The Ford Guard', spawns: [[-3.0, -6.0], [3.0, -6.0]], tokens: 1, aggression: 1.0 }),
   Object.freeze({ name: 'Ember Duelists', spawns: [[-5.0, -5.0], [0.0, -8.0], [5.0, -5.0]], tokens: 1, aggression: 1.25 }),
@@ -19,11 +20,17 @@ const HERO_SPAWN = [0, 9, 0];
 // v2.10 great sword pickup: planted in the ford beside the wyvern's landing spot (BOSS.SPAWN 0,-9) when the boss
 // fight starts. Walking into it equips it (no extra button, works the same on touch). Radius is hero centre to hilt.
 export const GREAT_PICKUP = Object.freeze({ X: 4.2, Z: -4.6, R: 1.1 });
-const BOSS_ID = 100, HERO_ID = 1;
+const BOSS_ID = 100, HERO_ID = 1, GAUNTLET_ID = 200;
 
 export class GameSim {
-  constructor({ seed = SIM.SEED_DEFAULT, timing, colliders = null, bus = null, god = false, startAt = 'title', dodgeProfile = null }) {
+  constructor({ seed = SIM.SEED_DEFAULT, timing, colliders = null, bus = null, god = false, startAt = 'title', dodgeProfile = null, stage3 = false, stage3Colliders = null }) {
+    // stage3: after the wyvern dies the run goes DOOR -> STAGE3 (Frozen Foundry) instead of VICTORY.
+    // Off by default until the foundry presentation ships; startAt 'stage3' always enters it.
+    this.stage3 = stage3 || startAt === 'stage3';
     this.seed = seed >>> 0; this.timing = timing; this.colliders = colliders; this.bus = bus; this.god = god;
+    // stage3Colliders: the Frozen Foundry doc (assets/foundry-colliders.json). Swapped in on Stage 3 entry and back
+    // out on any reset that leaves Stage 3, so the hero never collides with the ford while standing in the foundry.
+    this.stage3Colliders = stage3Colliders;
     this.hero = new HeroSim({ timing, colliders, god, dodgeProfile });
     this.hero.id = HERO_ID;
     this.hero.contactSink = (R) => { if (this.onHeroContact) this.onHeroContact(R); };
@@ -33,9 +40,11 @@ export class GameSim {
     this.targets = [];
     this.bossTarget = { id: BOSS_ID, x: 0, z: 0, radius: BOSS.BODY_RADIUS, targetable: false, isBoss: true,
       onHeroHit: (h, v) => this._hitBoss(h, v) };
+    this.gauntletTarget = { id: GAUNTLET_ID, x: 0, z: 0, radius: GAUNTLET.BODY_RADIUS, targetable: false, isBoss: true,
+      onHeroHit: (h, v) => this._hitGauntlet(h, v) };
     // presentation hooks (copy what you keep)
     this.onEquip = null;
-    this.onState = null; this.onHeroContact = null; this.onHeroHit = null; this.onTelegraph = null; this.onDuelistTelegraph = null;
+    this.onState = null; this.onHeroContact = null; this.onHeroHit = null; this.onTelegraph = null; this.onDuelistTelegraph = null; this.onGauntletTelegraph = null;
     this.reset(startAt);
   }
 
@@ -45,6 +54,11 @@ export class GameSim {
     this.brain = new WyvernBrain().init({}, { rng: root.stream('boss'), colliders: this.colliders, bus: this.bus, actorId: BOSS_ID });
     this.brain.heroSink = (R) => this.hero.applyContact(R);
     this.brain.telegraphSink = (v, art, lead) => { if (this.onTelegraph) this.onTelegraph(v, art, lead); };
+    this.gauntlet = new GauntletBrain().init({}, { rng: root.stream('gauntlet'), colliders: null, bus: this.bus, actorId: GAUNTLET_ID });
+    this.gauntlet.heroSink = (R) => this.hero.applyContact(R);
+    this.gauntlet.telegraphSink = (v, unguardable, lead) => { if (this.onGauntletTelegraph) this.onGauntletTelegraph(v, unguardable, lead); };
+    this.stage3Active = false;
+    this.hero.colliders = this.colliders;
     this.hero.reset(HERO_SPAWN[0], HERO_SPAWN[1], HERO_SPAWN[2]);
     this.duelists.length = 0;
     this.frame = 0; this.stateF = 0; this.wave = -1; this.bossActive = false;
@@ -53,6 +67,7 @@ export class GameSim {
     this.state = GameState.TITLE;
     if (startAt === 'wave2') { this._spawnWave(1); this._setState(GameState.WAVE); }
     else if (startAt === 'boss') this._startBoss();
+    else if (startAt === 'stage3') this._startStage3();
     else if (startAt === 'wave1') { this._spawnWave(0); this._setState(GameState.WAVE); }
     else this._setState(GameState.TITLE);
   }
@@ -87,6 +102,24 @@ export class GameSim {
     this._setState(GameState.BOSS);
   }
 
+  // Stage 3 entry (from DOOR or the review state): foundry, hero refilled at spawn, weapon kept.
+  _startStage3() {
+    const weapon = this.hero.weapon;
+    this.duelists.length = 0; this.bossActive = false; this.pickup.active = false;
+    this.hero.colliders = this.stage3Colliders; this.gauntlet.colliders = this.stage3Colliders;
+    this.hero.reset(GAUNTLET.HERO_SPAWN[0], GAUNTLET.HERO_SPAWN[1], 0);
+    if (weapon === 1) this.hero.equipGreatsword();
+    this.stage3Active = true; this.stage3StartF = this.frame;
+    this.gauntlet.startIntro();
+    this._setState(GameState.STAGE3);
+  }
+
+  _hitGauntlet(h, v) {
+    const G = this.gauntlet;
+    if (G.y > 1.5) return 0;
+    return G.takeHit(v.dmg, v.posture, G.hitPart(h.x, h.z));
+  }
+
   _hitBoss(h, v) {
     const B = this.brain;
     if (B.airborne && B.y > 2.0) return 0;
@@ -99,7 +132,9 @@ export class GameSim {
 
   // Finisher prompt: true when a heavy press now would start one.
   finisherReady() {
-    if (this.state !== GameState.BOSS || !this.hero.alive || this.hero.state === HERO_STATE.FINISHER) return false;
+    if (!this.hero.alive || this.hero.state === HERO_STATE.FINISHER) return false;
+    if (this.state === GameState.STAGE3) return this.gauntlet.canFinish(this.hero);
+    if (this.state !== GameState.BOSS) return false;
     return this.brain.canFinish(this.hero);
   }
 
@@ -117,12 +152,18 @@ export class GameSim {
       bt.x = B.x; bt.z = B.z; bt.targetable = B.state !== BRAIN_STATE.DEAD && !(B.airborne && B.y > 2.0) && B.finisherF < 0;
       T.push(bt);
     }
+    if (this.stage3Active) {
+      const G = this.gauntlet, gt = this.gauntletTarget;
+      gt.x = G.x; gt.z = G.z; gt.targetable = G.state !== G_STATE.DEAD && G.y <= 1.5 && G.finisherF < 0;
+      T.push(gt);
+    }
     // boss finisher replaces the heavy when available
     if (c.heavy && this.finisherReady()) {
-      if (this.brain.startFinisher(h)) { h.startFinisher(this.bossTarget); this.stats.finishers++; c.heavy = false; }
+      if (this.state === S.STAGE3) { if (this.gauntlet.startFinisher(h)) { h.startFinisher(this.gauntletTarget); this.stats.finishers++; c.heavy = false; } }
+      else if (this.brain.startFinisher(h)) { h.startFinisher(this.bossTarget); this.stats.finishers++; c.heavy = false; }
     }
     // INTRO and the boss intro/roar: hero may move but cannot attack yet (no targets to hurt anyway)
-    if (this.state === S.INTRO || this.state === S.WAVE_CLEAR) { c.attack = c.attack && false; }
+    if (this.state === S.INTRO || this.state === S.WAVE_CLEAR || this.state === S.DOOR) { c.attack = c.attack && false; }
     h.step(c, T);
     // great sword pickup: walk into it (any live, non-dead state) to equip
     const P = this.pickup;
@@ -153,7 +194,16 @@ export class GameSim {
     } else if (this.state === S.BOSS) {
       this.brain.fixedUpdate(h, this.frame);
       this.stats.bossF++;
-      if (this.brain.state === BRAIN_STATE.DEAD && this.brain.f >= FLOW_F.BOSS_HOLD) { this._finish(true); return; }
+      if (this.brain.state === BRAIN_STATE.DEAD && this.brain.f >= FLOW_F.BOSS_HOLD) {
+        if (this.stage3) { this.stats.wyvernF = this.stats.bossF; this._setState(S.DOOR); return; }
+        this._finish(true); return;
+      }
+    } else if (this.state === S.DOOR) {
+      if (this.stateF >= FLOW_F.INTRO) this._startStage3();
+    } else if (this.state === S.STAGE3) {
+      this.gauntlet.fixedUpdate(h, this.frame);
+      this.stats.stage3F = (this.stats.stage3F || 0) + 1;
+      if (this.gauntlet.state === G_STATE.DEAD && this.gauntlet.f >= FLOW_F.BOSS_HOLD) { this._finish(true); return; }
     }
     if (!h.alive && h.actF >= FLOW_F.DEFEAT_HOLD && this.state !== S.DEFEAT && this.state !== S.VICTORY) this._finish(false);
     if (this.state !== S.VICTORY && this.state !== S.DEFEAT) this.stats.totalF++;
@@ -167,13 +217,14 @@ export class GameSim {
   _finish(won) {
     const s = this.stats, h = this.hero;
     s.perfects = h.perfects; s.phantoms = h.phantoms; s.damageTaken = h.damageTaken; s.damageDealt = h.damageDealt;
-    s.won = won; s.bossHp = this.brain.hp;
+    s.won = won; s.bossHp = this.brain.hp; s.gauntletHp = this.gauntlet.hp; s.guards = this.gauntlet.jgCount;
     if (this.bus) { const p = this.bus.payload('run/end'); p.won = won; p.frames = s.totalF; this.bus.dispatch('run/end'); }
     this._setState(won ? GameState.VICTORY : GameState.DEFEAT);
   }
 
   // Retry from the start of the encounter that was lost (boss retry keeps the waves cleared).
   retry() {
+    if (this.stage3Active) { this.reset('stage3'); return; }
     const atBoss = this.bossActive;
     this.reset(atBoss ? 'boss' : 'title');
     if (!atBoss) this._setState(GameState.INTRO);
@@ -184,10 +235,11 @@ export class GameSim {
     const q = (v) => { x = Math.imul(x ^ (Math.round(v * 1000) | 0), 16777619) >>> 0; };
     for (const d of this.duelists) { q(d.x); q(d.z); q(d.hp); q(d.state); }
     q(this.state); q(this.frame); q(this.pickup.active ? 1 : 0);
+    if (this.stage3Active) x = this.gauntlet.hash(x);
     return x >>> 0;
   }
 
-  dispose() { this.brain.dispose(); this.onState = this.onHeroContact = this.onHeroHit = this.onTelegraph = this.onDuelistTelegraph = null; }
+  dispose() { this.brain.dispose(); this.gauntlet.dispose(); this.onGauntletTelegraph = null; this.onState = this.onHeroContact = this.onHeroHit = this.onTelegraph = this.onDuelistTelegraph = null; }
 }
 
-export { GameState, HERO_STATE, DUEL_STATE, BRAIN_STATE, ART, Outcome };
+export { GameState, HERO_STATE, DUEL_STATE, BRAIN_STATE, ART, Outcome, G_STATE };

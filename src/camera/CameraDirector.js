@@ -283,10 +283,18 @@ export class CameraDirector extends BaseCameraRig {
     if (!this.colliders) { this._clampLimits(desired); return; }
     const C = this.colliders, m = CAMERA_LIMITS.margin;
     this._clampLimits(desired);
-    if (C.clearance(desired.x, desired.y, desired.z, CAMERA_LIMITS.wallTop) >= m) return;
     _v.subVectors(desired, pivot);
     const len = _v.length();
-    let lo = 0, hi = 1;
+    // March the boom: an endpoint can be clear while a column sits between it and the pivot (Stage 3 foundry).
+    // The first blocked sample bounds the search, so the camera never ends up behind solid geometry.
+    let hi = 1;
+    const n = Math.max(2, Math.ceil(len / 0.25));
+    for (let i = 1; i <= n; i++) {
+      const t = i / n; _w.copy(pivot).addScaledVector(_v, t);
+      if (C.clearance(_w.x, _w.y, _w.z, CAMERA_LIMITS.wallTop) < m) { hi = t; break; }
+    }
+    if (hi === 1 && C.clearance(desired.x, desired.y, desired.z, CAMERA_LIMITS.wallTop) >= m) return;
+    let lo = 0;
     for (let i = 0; i < 12; i++) {                     // binary search on the boom fraction
       const mid = (lo + hi) * 0.5;
       _w.copy(pivot).addScaledVector(_v, mid);

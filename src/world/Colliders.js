@@ -41,8 +41,20 @@ export class Colliders {
       } else throw new Error('Colliders: unknown kind ' + c.kind + ' on ' + c.name);
       if (typeof c.walkTop === 'number') this.walkTop[i] = c.walkTop;
     }
-    this.waterTop = doc.ford.waterTop;
-    this.wetHalfZ = 6.7;   // ford.surfaces "abs(z)<6.7" -> WATER
+    // ford stage: river band is WATER, banks SAND. Foundry (no ford block): flat floor of ground.surface with
+    // optional diagonal zones (the X grating strips). Unknown surface names throw like the colliders do.
+    this.waterTop = doc.ford ? doc.ford.waterTop : -1e9;
+    this.wetHalfZ = doc.ford ? 6.7 : -1;   // ford.surfaces "abs(z)<6.7" -> WATER
+    const gs = doc.ground.surface || 'SAND';
+    if (Surface[gs] === undefined) throw new Error('Colliders: unknown ground surface ' + gs);
+    this.drySurface = Surface[gs];
+    const zones = doc.ground.zones || [];
+    this.zoneHalf = new Float32Array(zones.length); this.zoneLimit = new Float32Array(zones.length); this.zoneSurf = new Uint8Array(zones.length);
+    zones.forEach((zn, i) => {
+      if (zn.shape !== 'diag') throw new Error('Colliders: unknown zone shape ' + zn.shape);
+      if (Surface[zn.surface] === undefined) throw new Error('Colliders: unknown zone surface ' + zn.surface);
+      this.zoneHalf[i] = zn.halfWidth; this.zoneLimit[i] = zn.limit ?? 1e9; this.zoneSurf[i] = Surface[zn.surface];
+    });
     this.hit = { x: 0, z: 0, nx: 0, nz: 0, index: -1, surface: 0, pushed: false, y: 0 };
   }
 
@@ -68,7 +80,13 @@ export class Colliders {
   // Writes surface to this.hit.surface and returns the height.
   groundY(x, z, footY) {
     let y = this.terrainY(z);
-    let surf = Math.abs(z) < this.wetHalfZ ? Surface.WATER : Surface.SAND;
+    let surf = Math.abs(z) < this.wetHalfZ ? Surface.WATER : this.drySurface;
+    for (let i = 0; i < this.zoneHalf.length; i++) {
+      const lim = this.zoneLimit[i];
+      if (Math.abs(x) > lim || Math.abs(z) > lim) continue;
+      const hw = this.zoneHalf[i];
+      if (Math.abs(x - z) * Math.SQRT1_2 <= hw || Math.abs(x + z) * Math.SQRT1_2 <= hw) { surf = this.zoneSurf[i]; break; }
+    }
     for (let i = 0; i < this.count; i++) {
       const wt = this.walkTop[i];
       if (wt !== wt || wt <= y) continue;

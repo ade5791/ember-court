@@ -396,6 +396,13 @@ export class HeroSim {
       this.stamina -= (R.posture || 0) * 0.5; this.staminaIdle = 0;
       if (this.stamina <= 0) { this.stamina = 0; this.state = HERO_STATE.HITSTUN; this.actF = 0; this.hitstunLen = GUARDBREAK_F; this.blocking = false; this._event('guardbreak'); }
       else this._event('block');
+      if (R.slide > 0) { const l = Math.hypot(R.normal.x, R.normal.z) || 1; this.pushX += R.normal.x / l * R.slide; this.pushZ += R.normal.z / l * R.slide; }
+    } else if (R.outcome === O.GUARDBREAK) {
+      // Stage 3 G_DOME against a held block (wyvern/duelists never send this to the hero)
+      this.hpIdle = 0;
+      this.hp = Math.max(this.god ? 1 : 0, this.hp - (R.damage || 0)); this.damageTaken += R.damage || 0;
+      if (this.hp <= 0) { this.state = HERO_STATE.DEAD; this.actF = 0; this.blocking = false; this.dodgeF = -1; this._event('death'); }
+      else { this.state = HERO_STATE.HITSTUN; this.actF = 0; this.hitstunLen = GUARDBREAK_F; this.blocking = false; this.queued = null; this._event('guardbreak'); }
     } else if (R.outcome === O.PARRIED) {
       if (R.perfect) { this.perfects++; this._event('perfect'); this.stamina = Math.min(SIM.STAMINA_MAX, this.stamina + 15); }
       else { this.deflects++; this._event('deflect'); }

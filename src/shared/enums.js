@@ -4,9 +4,14 @@ const e = (names) => Object.freeze(Object.fromEntries(names.map((n, i) => [n, i]
 // Order is append-only: v1 indices stay stable. Crimson Ford (stage ford-32m) adds the last eight;
 // court-colliders.json carries surface by NAME, resolved through this table at load.
 export const Surface = e(['STONE_FLOOR', 'STONE_WALL', 'WOOD_CRATE', 'METAL_BRAZIER', 'CLOTH_BANNER', 'FLESH', 'ARMOR', 'BLADE',
-  'WATER', 'SAND', 'WOOD_PLANK', 'MOSS_STONE', 'ROCK', 'STONE_LANTERN', 'WOOD_BARK', 'SCALE']);
-export const GameState = e(['BOOT', 'TITLE', 'INTRO', 'WAVE', 'WAVE_CLEAR', 'BOSS', 'VICTORY', 'DEFEAT']);
-export const ActorKind = e(['HERO', 'DUELIST', 'WYVERN']);
+  'WATER', 'SAND', 'WOOD_PLANK', 'MOSS_STONE', 'ROCK', 'STONE_LANTERN', 'WOOD_BARK', 'SCALE',
+  // Stage 3 foundry (STAGE3_SPEC section 1), appended: earlier indices unchanged
+  'METAL_PLATE', 'GRATING', 'ICE', 'STEEL_BEAM']);
+// DOOR + STAGE3 appended for Stage 3 (docs/STAGE3_SPEC.md section 0): indices 0-7 unchanged.
+export const GameState = e(['BOOT', 'TITLE', 'INTRO', 'WAVE', 'WAVE_CLEAR', 'BOSS', 'VICTORY', 'DEFEAT', 'DOOR', 'STAGE3']);
+export const ActorKind = e(['HERO', 'DUELIST', 'WYVERN', 'GAUNTLET']);
+// Stage 3 boss "Chrome Gauntlet" verbs (STAGE3_SPEC section 4). Separate enum: payloads carry actorId to disambiguate.
+export const GauntletVerb = e(['G_SWEEP_L', 'G_SWEEP_R', 'G_LUNGE', 'G_SLAM', 'G_LIGHTNING', 'G_DOME', 'G_TAIL', 'G_ROAR']);
 // Wyvern boss: locomotion layer (ground biped / ground quadruped / air) and verbs (CINEMATIC_SPEC section 9).
 export const BossStance = e(['GROUND_UP', 'GROUND_LOW', 'AIR']);
 export const BossVerb = e(['W_BITE', 'W_LUNGE', 'W_CHARGE', 'W_TAIL_L', 'W_TAIL_R', 'W_SPIT', 'W_HAZE', 'W_SWOOP', 'W_SKY_HAZE', 'W_LAND', 'W_ROAR']);

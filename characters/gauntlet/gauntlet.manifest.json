@@ -1,0 +1,29 @@
+{
+ "file": "characters/gauntlet/gauntlet.glb",
+ "bytes": 17699188,
+ "sha256": "3ddbf2be22ddd5b4440c3bbcfeb9dcc245df2e4924585b933c48175b74d849b3",
+ "provenance": {
+  "kind": "imported 3D (Sketchfab)",
+  "title": "Four-Legged-Frost-Predator.",
+  "author": "bensimulator2 (https://sketchfab.com/bensimulator1)",
+  "license": "CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)",
+  "source": "https://sketchfab.com/3d-models/four-legged-frost-predator-3ddc6f711201449cbc33617f430d1b20",
+  "attribution": "\"Four-Legged-Frost-Predator\" by bensimulator2 (https://sketchfab.com/bensimulator1), licensed CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/). Broken morph targets removed, static tracks dropped, clips trimmed and renamed, chrome blades added at runtime for Ember Court.",
+  "modifiedBy": "Ember Court tools/boss/pack-gauntlet.py + src/game/GauntletView.js"
+ },
+ "skins": 1,
+ "facing": "+Z (glTF); runtime pivot.rotation.y = PI",
+ "restSize": "1.68 m tall, 3.04 m wide, 7.06 m nose to tail (deform bones); runtime scale 1.6",
+ "rootMotion": "none: hip travel 0.00-0.03 m on every clip; GauntletBrain owns root XZ, yaw and leap height",
+ "morphTargets": "removed: every source morph target displaced vertices by metres (the 'exploding mesh' bug)",
+ "sockets": { "head": "head_0285", "chest": "DEF-spine004_013", "hips": "DEF-spine_09", "pawL": "DEF-f_toeL_068", "pawR": "DEF-f_toeR_0154", "tail": "DEF-tail004_0212" },
+ "clips": [
+  { "state": "g_idle", "duration": 9.56, "use": "idle / hold / wait" },
+  { "state": "g_walk", "duration": 1.16, "use": "walk loop" },
+  { "state": "g_pounce", "duration": 1.35, "use": "G_LUNGE (time-warped: head peak on active[0])" },
+  { "state": "g_swipe", "duration": 1.25, "use": "G_SWEEP_R, G_SWEEP_L (mirrored), G_TAIL (late window + body twist)" },
+  { "state": "g_rear", "duration": 2.6, "use": "G_SLAM (rear, leap, landing on active[0])" },
+  { "state": "g_roar", "duration": 2.9, "use": "G_ROAR, G_LIGHTNING summon, G_DOME" },
+  { "state": "g_rest", "duration": 2.0, "use": "stagger / down / death" }
+ ]
+}

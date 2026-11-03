@@ -12,6 +12,9 @@ import { Rng } from '../core/Rng.js';
 import { EventBus, EVENT_IDS } from '../core/EventBus.js';
 import { Loop } from '../core/Loop.js';
 import { World } from '../world/World.js';
+import { Colliders } from '../world/Colliders.js';
+import { FoundryStage } from '../world/FoundryStage.js';
+import { makeFoundryEnvironment, setFoundryLook, restoreGorgeLook } from '../render/FoundryLook.js';
 import { CameraDirector, CINE, CINE_NAMES } from '../camera/CameraDirector.js';
 import { BossVerb, ActorKind } from '../shared/enums.js';
 import { FxPool, TELEGRAPH, MIST } from '../fx/FxPool.js';
@@ -26,6 +29,9 @@ import { DUELIST } from './DuelistSim.js';
 import { Inertializer, PoseJerk } from './Inertia.js';
 import { smoothClips } from './ClipSmooth.js';
 import { buildWarp } from './TimeWarp.js';
+import { GauntletView, GAUNTLET_ID } from './GauntletView.js';
+import { GAUNTLET } from '../shared/constants.js';
+import { G_STATE } from '../boss/GauntletBrain.js';
 
 const ROOT = new URL('../../', import.meta.url).href;      // site root (works under a GitHub Pages sub-path)
 const qs = new URLSearchParams(location.search);
@@ -72,12 +78,31 @@ const world = new World();
 await world.init(ctx, { scene, renderer, quality, base: ROOT.slice(0, -1), blenderKit: qs.get('bk') !== '0', bkRocks: qs.get('bkrocks') === '1' });
 gradeMaterials(world.materials, look.envRT.texture); hazeMaterials(world.materials); gradeWater(world.water);
 systems.set('world', world);
-const colliders = world.colliders;
+// Stage 3 Frozen Foundry: built once at load (hidden), so entering it never compiles or allocates mid-run.
+// `colliders` is the ACTIVE doc for presentation queries (terrainY etc.) and flips with the arena.
+const fordColliders = world.colliders;
+const foundryDoc = await (await fetch(ROOT + 'assets/foundry-colliders.json')).json();
+const foundryColliders = new Colliders(foundryDoc);
+const foundry = new FoundryStage().build({ scene, quality, rng: rootRng, doc: foundryDoc });
+scene.add(foundry.root);
+const arenaRig = { scene, renderer, sun: look.sun, hemi: look.hemi, points: world.lights, slots: foundryDoc.foundry.lightSlots,
+  sky: look.sky, envRT: makeFoundryEnvironment(renderer) };
+let colliders = fordColliders, arena = 'ford';
+function setArena(name) {
+  if (name === arena) return;
+  arena = name; const fd = name === 'foundry';
+  world.root.visible = !fd; if (world.water) world.water.mesh.visible = !fd; if (world.props) world.props.group.visible = !fd;
+  foundry.setVisible(fd); colliders = fd ? foundryColliders : fordColliders;
+  cam.colliders = colliders;   // camera clearance must test the active arena (setArena is only called after cam init)
+  if (fd) setFoundryLook(arenaRig); else { restoreGorgeLook(arenaRig); for (const L of world.lights) L.position.copy(L.userData.fordPos); }
+  renderer.shadowMap.needsUpdate = true;
+}
+for (const L of world.lights) L.userData.fordPos = L.position.clone();
 progress(0.35);
 
 // ------------------------------------------------------------------ actors
 const loader = new GLTFLoader();
-const [heroGltf, enemyGltf, bossGltf, bossManifest, timing, heroCombat, heroLunge] = await Promise.all([
+const [heroGltf, enemyGltf, bossGltf, bossManifest, timing, heroCombat, heroLunge, gauntletGltf, gauntletManifest] = await Promise.all([
   loader.loadAsync(ROOT + 'characters/hero/out/character_gs.glb'),
   loader.loadAsync(ROOT + 'characters/enemy/out/character.glb'),
   loader.loadAsync(ROOT + 'characters/boss/wyvern.glb'),
@@ -85,6 +110,8 @@ const [heroGltf, enemyGltf, bossGltf, bossManifest, timing, heroCombat, heroLung
   fetch(ROOT + 'assets/attack-timing.json').then((r) => r.json()),
   fetch(ROOT + 'motion/mb/hero.combat.json').then((r) => (r.ok ? r.json() : null)).catch(() => null),
   fetch(ROOT + 'motion/mb/hero.lunge.json').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+  loader.loadAsync(ROOT + 'characters/gauntlet/gauntlet.glb'),
+  fetch(ROOT + 'characters/gauntlet/gauntlet.manifest.json').then((r) => r.json()),
 ]);
 // C16: authored clips are 30 Hz LINEAR keys -> resample to 60 Hz monotone cubic (keys/extremes/holds kept exactly,
 // velocity continuous through every key). ?smooth=0 keeps the raw tracks for A/B.
@@ -383,6 +410,11 @@ for (let i = 0; i < 3; i++) { const m = new THREE.Mesh(poolGeo, poolMat); m.visi
 const orbMat = new THREE.MeshBasicMaterial({ color: 0xffb04a, fog: false });
 const orbMesh = new THREE.Mesh(new THREE.SphereGeometry(0.35, 20, 14), orbMat); orbMesh.visible = false; scene.add(orbMesh);
 
+// Stage 3 boss (Chrome Gauntlet): built at load, hidden; GauntletView owns pose, blades and hazard meshes
+const gview = new GauntletView().build({ gltf: gauntletGltf, scene, Inertializer, inertOpts: { enabled: INERT_ON, mode: INERT_MODE, hlScale: INERT_HL } });
+const gstat = { prevState: -1, prevPhase: 1, finHit: false, wasFin: false };
+function gauntletBlend(nc) { return nc === 'g_rest' ? 0.14 : nc === 'g_swipe' || nc === 'g_pounce' ? 0.1 : 0.2; }
+
 // every light also on layer 1 (kept from S6 so the boss mask pass sees the same light set)
 scene.traverse((o) => { if (o.isLight) o.layers.enable(1); });
 
@@ -392,6 +424,7 @@ fx.init(ctx, { scene, quality, water: world.water, reducedMotion, rng: rootRng.s
 fx.setViewportHeight(renderer.domElement.height);
 fx.registerAfterimages(HERO_ID, hero.root);
 fx.registerAfterimages(BOSS_ID, boss.root);
+fx.registerAfterimages(GAUNTLET_ID, gview.root);
 systems.set('fx', fx);
 const cam = new CameraDirector();
 cam.init(ctx, { camera, colliders, reducedMotion });
@@ -409,7 +442,9 @@ touch.init(ctx, tq === null ? { sink: input } : { sink: input, visible: tq === '
 systems.set('touch', touch);
 
 // ------------------------------------------------------------------ simulation
-const sim = new GameSim({ seed, timing, colliders, bus, god: qs.get('god') === '1', startAt: qs.get('start') || 'title', dodgeProfile: QUICKSTEP });
+const sim = new GameSim({ seed, timing, colliders: fordColliders, stage3Colliders: foundryColliders, bus, god: qs.get('god') === '1',
+  startAt: qs.get('start') || 'title', dodgeProfile: QUICKSTEP, stage3: qs.get('stage3') === '1' });
+if (sim.stage3Active) setArena('foundry');
 const H = sim.hero;
 const prev = { hx: H.x, hz: H.z, hyaw: H.yaw, bx: 0, by: 0, bz: 0, byaw: 0 };
 const dPrev = []; for (let i = 0; i < MAX_DUELISTS; i++) dPrev.push({ x: 0, z: 0, yaw: 0 });
@@ -447,11 +482,12 @@ function popDamageAt(p, amount, kind) {
 }
 sim.onHeroHit = (t, dealt, v) => {
   if (dealt <= 0) return;
-  { const hv = v.name === 'HEAVY', c = v.charge || 0; _a.set(t.x, 1.6, t.z); if (t.isBoss) { HEAD.getWorldPosition(_a); _a.lerp(boss.root.position, 0.4); _a.y = Math.max(_a.y, 1.8); }
+  const gH = t.id === GAUNTLET_ID, bHead = gH ? gview.HEAD : HEAD, bRoot = gH ? gview.root : boss.root;
+  { const hv = v.name === 'HEAVY', c = v.charge || 0; _a.set(t.x, 1.6, t.z); if (t.isBoss) { bHead.getWorldPosition(_a); _a.lerp(bRoot.position, 0.4); _a.y = Math.max(_a.y, 1.8); }
     popDamageAt(_a, dealt, c > 0.5 || dealt >= 40 ? 'big' : hv ? '' : dealt < 12 ? 'weak' : '');
     if (hv && c > 0.5) hud.flash(reducedMotion ? 0.15 : 0.35); }
   _n.set(H.facingX(), 0.2, H.facingZ());
-  if (t.isBoss) { HEAD.getWorldPosition(_p); _p.lerp(boss.root.position, 0.5); _p.y = Math.max(_p.y, 1.2); }
+  if (t.isBoss) { bHead.getWorldPosition(_p); _p.lerp(bRoot.position, 0.5); _p.y = Math.max(_p.y, 1.2); }
   else _p.set(t.x, 1.2, t.z);
   const heavy = v.name === 'HEAVY', ch = v.charge || 0, great = !!v.great;
   fx.burstSparks(_p, _n, (heavy ? 1.0 + 0.9 * ch : 0.6) * (great ? 1.4 : 1));
@@ -467,7 +503,8 @@ sim.onHeroHit = (t, dealt, v) => {
   if (heavy) { const gx = t.isBoss ? _p.x : t.x, gz = t.isBoss ? _p.z : t.z; fx.shockwave(gx, colliders.terrainY(gz) + 0.22, gz, 2.2 + 3.0 * ch, ch > 0.5 ? 0xffd080 : 0xff8a3a, 0.7 + 0.6 * ch, 0.45 + 0.2 * ch); }
   if (heavy && ch > 0.5) { _n.set(0, 1, 0); fx.burstSparks(_p, _n, 1.3); }
   if (heavy) fx.shockwave(t.x, colliders.terrainY(t.z) + 0.24, t.z, (t.isBoss ? 3.5 : 2.2) * (1 + 0.6 * ch), 0xffa040, 0.6 + 0.6 * ch, 0.4);
-  if (t.isBoss) { bossReact.amp = Math.min(1.6, bossReact.amp * 0.4 + (heavy ? 1 : 0.5) * (1 + ch)); bossReact.t = 0; bossReact.dx = H.facingX(); bossReact.dz = H.facingZ(); bossReact.flash = Math.min(1, 0.5 + 0.5 * ch + (heavy ? 0.3 : 0)); }
+  if (t.isBoss && t.id === GAUNTLET_ID) gview.hit(H.facingX(), H.facingZ(), (heavy ? 1 : 0.5) * (1 + ch));
+  else if (t.isBoss) { bossReact.amp = Math.min(1.6, bossReact.amp * 0.4 + (heavy ? 1 : 0.5) * (1 + ch)); bossReact.t = 0; bossReact.dx = H.facingX(); bossReact.dz = H.facingZ(); bossReact.flash = Math.min(1, 0.5 + 0.5 * ch + (heavy ? 0.3 : 0)); }
 };
 sim.onEquip = (w) => {
   setHeroWeapon(w);
@@ -497,8 +534,20 @@ sim.onTelegraph = (v, art, lead) => {
   if (art === ART.RED) hud.cue('RED - DODGE ASIDE', 'hit'); else if (art === ART.BLUE) hud.cue('BLUE - DODGE IN', 'phantom');
 };
 sim.onDuelistTelegraph = (d) => { const s = slotFor(d); if (s) fx.telegraph(s.actorId, TELEGRAPH.NORMAL, d.verbs[d.verb].startup, s.root, 1.1); };
-bus.on('action/end', (p) => { if (p.actorId === BOSS_ID) fx.clearTelegraph(BOSS_ID); });
-bus.on('boss/phase', (p) => { if (!p.intro) { cam.onBossPhase(); hud.banner('THE WYVERN RAGES', '', 1.8); } });
+// Gauntlet: lightning is unguardable (red ring + cue); the dome breaks a held block (blue ring + cue)
+const G_CUES = ['', '', '', '', 'LIGHTNING - KEEP MOVING', 'DOME - DO NOT HOLD BLOCK', '', ''];
+sim.onGauntletTelegraph = (v, unguardable, lead) => {
+  fx.telegraph(GAUNTLET_ID, unguardable ? TELEGRAPH.RED : v === 5 ? TELEGRAPH.BLUE : TELEGRAPH.NORMAL, lead, gview.root, 3.0);
+  if (G_CUES[v]) hud.cue(G_CUES[v], unguardable ? 'hit' : 'phantom');
+};
+bus.on('action/end', (p) => { if (p.actorId === BOSS_ID || p.actorId === GAUNTLET_ID) fx.clearTelegraph(p.actorId); });
+bus.on('boss/phase', (p) => {
+  if (p.actorId !== GAUNTLET_ID) return;
+  if (p.intro) { cam.cine(CINE.INTRO); return; }
+  cam.onBossPhase(); hud.banner('THE GAUNTLET BURNS', 'it moves faster now', 1.8);
+  fx.shockwave(sim.gauntlet.x, colliders.terrainY(sim.gauntlet.z) + 0.22, sim.gauntlet.z, 7, 0xff6a4a, 1.2, 0.7);
+});
+bus.on('boss/phase', (p) => { if (p.actorId !== GAUNTLET_ID && !p.intro) { cam.onBossPhase(); hud.banner('THE WYVERN RAGES', '', 1.8); } });
 
 function slotFor(d) { for (const s of slots) if (s.bound === d) return s; return null; }
 function bindSlots() {
@@ -513,11 +562,16 @@ function bindSlots() {
 
 sim.onState = (s) => {
   bindSlots();
+  if (s === GameState.STAGE3) setArena('foundry'); else if (!sim.stage3Active) setArena('ford');
   boss.root.visible = sim.bossActive;
+  gview.root.visible = sim.stage3Active; if (!sim.stage3Active) gview.hideHazards();
+  if (sim.stage3Active) { const G = sim.gauntlet; gview.prev.x = G.x; gview.prev.y = G.y; gview.prev.z = G.z; gview.prev.yaw = G.yaw; }
   if (s === GameState.INTRO) hud.banner('THE CRIMSON FORD', 'cross the river', 2.4);
   else if (s === GameState.WAVE) hud.banner('WAVE ' + (sim.wave + 1), WAVES[sim.wave].name.toUpperCase(), 2.0);
   else if (s === GameState.WAVE_CLEAR) hud.banner('CLEARED', sim.wave + 1 < WAVES.length ? 'more come' : 'something stirs in the gorge', 2.0);
   else if (s === GameState.BOSS) { hud.banner('FORD WYVERN', sim.pickup.active ? 'claim the great sword in the ford' : 'guardian of the crossing', 2.6); fx.clearTelegraph(BOSS_ID); cam.cine(CINE.INTRO); }
+  else if (s === GameState.DOOR) hud.banner('THE WAY OPENS', 'the foundry gate', 2.4);
+  else if (s === GameState.STAGE3) { hud.banner('THE FROZEN FOUNDRY', 'chrome gauntlet', 2.6); fx.clearTelegraph(BOSS_ID); }
   else if (s === GameState.VICTORY) { hud.setStats('victory', statsView()); }
   else if (s === GameState.DEFEAT) { hud.setStats('defeat', statsView()); }
   syncScreen();
@@ -525,7 +579,8 @@ sim.onState = (s) => {
 function statsView() {
   const S = sim.stats;
   return { totalF: S.totalF, kills: S.kills, perfects: H.perfects, phantoms: H.phantoms, finishers: S.finishers,
-    bossHp: sim.brain.hp, bossMax: BOSS.HP, reachedBoss: sim.bossActive };
+    bossHp: sim.stage3Active ? sim.gauntlet.hp : sim.brain.hp, bossMax: sim.stage3Active ? GAUNTLET.HP : BOSS.HP,
+    reachedBoss: sim.bossActive || sim.stage3Active, bossName: sim.stage3Active ? 'GAUNTLET' : 'WYVERN' };
 }
 
 // ------------------------------------------------------------------ hero command: real input or seeded bot
@@ -538,11 +593,19 @@ if (useBot) {
   sim.onTelegraph = (v, art, lead) => { prevT(v, art, lead); const ok = botRng.float() < 0.85;
     if (art === ART.NORMAL) { bot.at = sim.frame + lead - (ok ? 3 : 7); bot.kind = 1; } else { bot.at = sim.frame + lead - (ok ? 5 : 11); bot.kind = art === ART.BLUE ? 3 : 2; } };
   sim.onDuelistTelegraph = (d, v) => { prevD(d, v); if (botRng.float() < 0.85) { bot.at = sim.frame + v.startup - 3; bot.kind = 1; } };
+  // gauntlet: just-guard (block press) the guardable verbs; dodge the lightning (sideways) and the dome (away).
+  // Lightning columns land 'lead' frames after each placement, the bot sidesteps the last one.
+  const prevG = sim.onGauntletTelegraph;
+  sim.onGauntletTelegraph = (v, ung, lead) => { prevG(v, ung, lead); const ok = botRng.float() < 0.85;
+    if (v === 4) { bot.at = -1; bot.kind = 0; }        // columns are walked out of (botCommand), not timed
+    else if (v === 5) { bot.at = sim.frame + lead - (ok ? 4 : 10); bot.kind = 4; }
+    else { bot.at = sim.frame + lead - (ok ? 3 : 7); bot.kind = 1; } };
 }
 function botCommand(c) {
   let tx = 0, tz = 0, has = false, td = 1e9, reach = 1.6;
   for (const d of sim.duelists) if (d.alive) { const dd = Math.hypot(d.x - H.x, d.z - H.z); if (dd < td) { td = dd; tx = d.x; tz = d.z; has = true; } }
   if (sim.bossActive && sim.brain.state !== BRAIN_STATE.DEAD) { tx = sim.brain.x; tz = sim.brain.z; td = Math.hypot(tx - H.x, tz - H.z); has = true; reach = 3.2; }
+  if (sim.stage3Active && sim.gauntlet.state !== G_STATE.DEAD) { tx = sim.gauntlet.x; tz = sim.gauntlet.z; td = Math.hypot(tx - H.x, tz - H.z); has = true; reach = GAUNTLET.BODY_RADIUS + 1.2; }
   if (!has) return;
   const dx = tx - H.x, dz = tz - H.z, l = Math.hypot(dx, dz) || 1;
   // rec tactics: never stand in a burning pool - walk out radially (only in ?rec=1; qa bot stays byte-identical)
@@ -551,6 +614,15 @@ function botCommand(c) {
       if (p.left <= 0) continue;
       const px = H.x - p.x, pz = H.z - p.z, pd = Math.hypot(px, pz);
       if (pd < p.r + 0.6) { c.mx = px / (pd || 1); c.mz = pz / (pd || 1); c.speed = SIM.RUN_SPEED; return; }
+    }
+  }
+  // lightning: run out of any marked column before it strikes (perpendicular to the boss line so we stay in range)
+  if (sim.stage3Active && sim.frame + 1 !== bot.at) {
+    for (const col of sim.gauntlet.cols) {
+      if (col.left <= 0 || sim.frame >= col.at + col.def.cols.len) continue;
+      const px = H.x - col.x, pz = H.z - col.z, pd = Math.hypot(px, pz);
+      if (pd < col.def.reach + 1.0) { const s = (px * -dz + pz * dx) >= 0 ? 1 : -1; c.mx = -dz / l * s + px / (pd || 1) * 0.5; c.mz = dx / l * s + pz / (pd || 1) * 0.5;
+        const ml = Math.hypot(c.mx, c.mz) || 1; c.mx /= ml; c.mz /= ml; c.speed = SIM.RUN_SPEED; return; }
     }
   }
   // great sword: go claim it first (it is the intended opening of the boss fight)
@@ -563,6 +635,7 @@ function botCommand(c) {
   if (sim.frame + 1 === bot.at) {
     bot.hold = 0;
     if (bot.kind === 1) c.blockPress = true;
+    else if (bot.kind === 4) { c.dodge = true; c.mx = -dx / l; c.mz = -dz / l; }
     else { c.dodge = true; if (bot.kind === 3) { c.mx = dx / l; c.mz = dz / l; } else { c.mx = -dz / l; c.mz = dx / l; } }
   } else if (td > reach + 0.6) { c.mx = dx / l; c.mz = dz / l; c.speed = SIM.RUN_SPEED; }
   else if ((sim.frame + 1) % 9 === 0) {
@@ -596,6 +669,7 @@ function fixedUpdate() {
   input.fixedUpdate();
   prev.hx = H.x; prev.hz = H.z; prev.hyaw = H.yaw;
   const B = sim.brain; prev.bx = B.x; prev.by = B.y; prev.bz = B.z; prev.byaw = B.yaw;
+  { const G = sim.gauntlet, gp = gview.prev; gp.x = G.x; gp.y = G.y; gp.z = G.z; gp.yaw = G.yaw; }
   for (let i = 0; i < slots.length; i++) { const d = slots[i].bound; if (d) { dPrev[i].x = d.x; dPrev[i].z = d.z; dPrev[i].yaw = d.yaw; } }
   fillCommand();
   sim.step();
@@ -1084,6 +1158,32 @@ function breathFx(B) {
     if (p.left > 0) fx.poolFire(p.x, colliders.terrainY(p.z) + 0.2, p.z, p.r * Math.min(1, p.left / 30), dt, Math.min(1, p.left / 60));
   }
 }
+// Stage 3: pose the gauntlet, blade streaks during active windows, hazard meshes + their one-shot fx
+const gStreak = { l: false, r: false, c: false };
+const G_STREAK_ID = { l: GAUNTLET_ID + 1, r: GAUNTLET_ID + 2, c: GAUNTLET_ID + 3 };
+const gCb = {
+  strike: (x, y, z) => { _p.set(x, y + 0.6, z); _n.set(0, 1, 0); fx.burstSparks(_p, _n, 1.2); fx.shockwave(x, y + 0.2, z, 2.4, 0xbfe6ff, 0.9, 0.35); if (presentDtNow > 0) cam.impact('heavy'); },
+  dome: (x, y, z) => { fx.shockwave(x, y + 0.2, z, 7, 0x7fd8ff, 1.0, 0.8); if (presentDtNow > 0) cam.impact('slam'); },
+  slam: (x, y, z) => { fx.shockwave(x, y + 0.2, z, 4, 0xffb070, 1.2, 0.5); _p.set(x, y + 0.3, z); _n.set(0, 1, 0); fx.burstSparks(_p, _n, 1.4); if (presentDtNow > 0) cam.impact('slam'); },
+};
+function streakBlade(key, on, b) {
+  if (on) { b.base.getWorldPosition(_a); b.tip.getWorldPosition(_b); fx.streakSample(G_STREAK_ID[key], _a, _b, sim.gauntlet.phase >= 2 ? 0xff6a4a : 0x9fe8ff); gStreak[key] = true; }
+  else if (gStreak[key]) { fx.streakEnd(G_STREAK_ID[key]); gStreak[key] = false; }
+}
+const gTerrainY = (z) => colliders.terrainY(z);
+function poseGauntlet(alpha, dt) {
+  const G = sim.gauntlet;
+  gview.root.visible = true;
+  gview.update(G, sim.frame, alpha, dt, gTerrainY, gauntletBlend);
+  // blade trails: from 6 f before contact through the active window (verb-specific blade)
+  const f = G.f, d = G.def, act = G.state === G_STATE.ACTION && d && f >= d.active[0] - 6 && f <= d.active[1] + 2;
+  const v = G.verb;
+  streakBlade('c', act && (v === 0 || v === 1 || v === 2 || v === 6), gview.crest);
+  streakBlade('l', act && (v === 0 || v === 2 || v === 3), gview.bladeL);
+  streakBlade('r', act && (v === 1 || v === 2 || v === 3), gview.bladeR);
+  if (act && v === 2 && (f % 4) === 0 && dt > 0) fx.afterimage(GAUNTLET_ID, false, 0.6);
+  gview.hazards(G, sim.frame, dt, gTerrainY, gCb);
+}
 let presentDtNow = 0;
 let dispYaw = null;
 
@@ -1104,6 +1204,13 @@ function letterbox(w) {
 }
 bus.on('boss/phase', (p) => { if (!p.intro) cam.cine(CINE.PHASE); });
 bus.on('actor/death', (p) => {
+  if (p.kind === ActorKind.GAUNTLET) {
+    cam.cine(CINE.DEATH); loop.dilate(0.4, 70, true);
+    const G = sim.gauntlet; fx.shockwave(G.x, colliders.terrainY(G.z) + 0.22, G.z, 9, 0x9fe8ff, 1.4, 0.9);
+    if (INK_ON) fx.mist(G.x, colliders.terrainY(G.z) + 1.2, G.z, 1.6, MIST.WHITE, 18, 1.2);
+    hud.banner('THE FOUNDRY FALLS SILENT', 'the chrome gauntlet is broken', 3.0);
+    return;
+  }
   if (p.kind !== ActorKind.WYVERN) {
     // v2.9 ink kill: the duelist dissolves in violet mist; a short presentation-only slow-mo sells the final blow
     if (!INK_ON) return;
@@ -1129,6 +1236,14 @@ function chooseCamTarget() {
     camTarget.position.x = boss.root.position.x; camTarget.position.z = boss.root.position.z;
     camTarget.isBoss = true; camTarget.airborne = sim.brain.airborne && sim.brain.y > 2.0;
     camTarget.distance = Math.hypot(sim.brain.x - H.x, sim.brain.z - H.z);
+    cam.setTarget(camTarget, true); return;
+  }
+  if (sim.stage3Active && sim.gauntlet.state !== G_STATE.DEAD) {
+    gview.HEAD.getWorldPosition(camTarget.position);
+    camTarget.position.x = gview.root.position.x; camTarget.position.z = gview.root.position.z;
+    camTarget.position.y = Math.max(1.6, Math.min(3.2, camTarget.position.y));
+    camTarget.isBoss = true; camTarget.airborne = sim.gauntlet.y > 2.0;
+    camTarget.distance = Math.hypot(sim.gauntlet.x - H.x, sim.gauntlet.z - H.z);
     cam.setTarget(camTarget, true); return;
   }
   let best = null, bd = 1e9;
@@ -1159,6 +1274,7 @@ function update(realDt, alpha, presentDt, noRender = false) {
   for (let i = 0; i < slots.length; i++) if (slots[i].bound) poseDuelist(slots[i], i, alpha);
   if (sim.bossActive) poseBoss(alpha);
   else { for (const m of poolMeshes) m.visible = false; orbMesh.visible = false; }
+  if (sim.stage3Active) poseGauntlet(alpha, presentDt);
   pickupLayer(presentDt);
 
   const attacking = H.state === HERO_STATE.ACTION || H.state === HERO_STATE.FINISHER;
@@ -1176,10 +1292,25 @@ function update(realDt, alpha, presentDt, noRender = false) {
   // C13 occluder: the wyvern body centre (pelvis->chest), only while grounded near the hero
   cam.occluder.active = sim.bossActive && !sim.brain.airborne; cam.occAvoid = OCC_ON;
   if (cam.occluder.active) { BB.s2.getWorldPosition(cam.occluder.position); }
+  if (sim.stage3Active) {
+    cam.occluder.active = sim.gauntlet.y < 1.0; if (cam.occluder.active) gview.CHEST.getWorldPosition(cam.occluder.position);
+    gview.HEAD.getWorldPosition(_a); cam.cineFocus.copy(gview.root.position).lerp(_a, 0.5); cam.cineFocus.y = Math.max(1.4, cam.cineFocus.y);
+    if (cam.cineKind === CINE.FINISHER) cam.cineFocus.copy(gview.root.position);
+  }
   if (sim.bossActive) {
     HEAD.getWorldPosition(_a); cam.cineFocus.copy(boss.root.position).lerp(_a, 0.5); cam.cineFocus.y = Math.max(1.4, cam.cineFocus.y);
     if (cam.cineKind === CINE.FINISHER) cam.cineFocus.copy(boss.root.position);
   }
+  // gauntlet finisher: same beats as the wyvern (GauntletBrain FINISHER_HIT_F 60, 180 damage)
+  const gFin = H.state === HERO_STATE.FINISHER && sim.stage3Active;
+  if (gFin && !gstat.wasFin) cam.cine(CINE.FINISHER);
+  if (gFin && sim.gauntlet.finisherF >= 60 && !gstat.finHit) {
+    gstat.finHit = true; gview.HEAD.getWorldPosition(_a); hud.popDamage(innerWidth * 0.5, innerHeight * 0.42, 180, 'fin', 0);
+    hud.flash(reducedMotion ? 0.2 : 0.7); fx.shockwave(gview.root.position.x, colliders.terrainY(gview.root.position.z) + 0.25, gview.root.position.z, 6.5, 0x9fe8ff, 1.2, 0.6);
+    _n.set(0, 1, 0); fx.burstSparks(_a, _n, 1.6); gview.hit(H.facingX(), H.facingZ(), 1.4);
+  }
+  if (!gFin) gstat.finHit = false;
+  gstat.wasFin = gFin;
   const fin = H.state === HERO_STATE.FINISHER && sim.bossActive;
   if (fin && !wasFinisher) cam.cine(CINE.FINISHER);
   // finisher blow lands on brain frame 60 (WyvernBrain FINISHER_HIT_F): flash + giant number, once per finisher
@@ -1200,7 +1331,8 @@ function update(realDt, alpha, presentDt, noRender = false) {
 }
 
 // ------------------------------------------------------------------ HUD, pause, screens
-const credit = 'Boss model: ' + bossManifest.provenance.attribution.replace(/CC-BY-(\d)\.(\d)/g, 'CC BY $1.$2').replace(/\.+\s*$/, '') + '. Three.js (MIT).';
+const ccby = (s) => s.replace(/CC-BY-(\d)\.(\d)/g, 'CC BY $1.$2').replace(/\.+\s*$/, '');
+const credit = 'Boss model: ' + ccby(bossManifest.provenance.attribution) + '. Stage 3 boss model: ' + ccby(gauntletManifest.provenance.attribution) + '. Three.js (MIT).';
 // Fullscreen: corner button + F key always; BEGIN (a user gesture) also enters it unless ?fs=0. Hidden while recording.
 const fullscreen = new Fullscreen().init({ visible: !recMode });
 const FS_ON_BEGIN = !recMode && qs.get('fs') !== '0';
@@ -1224,7 +1356,8 @@ function syncScreen() {
   if (scr && document.pointerLockElement) document.exitPointerLock();
 }
 function setPaused(v) {
-  const can = sim.state === GameState.INTRO || sim.state === GameState.WAVE || sim.state === GameState.WAVE_CLEAR || sim.state === GameState.BOSS;
+  const can = sim.state === GameState.INTRO || sim.state === GameState.WAVE || sim.state === GameState.WAVE_CLEAR || sim.state === GameState.BOSS
+    || sim.state === GameState.DOOR || sim.state === GameState.STAGE3;
   v = v && can;
   if (loop.paused === v) return;
   loop.paused = v;
@@ -1253,6 +1386,10 @@ function resetPresentation() {
   heroSteel.emissive.setRGB(0, 0, 0); for (const m of bossMats) if (m.emissive) m.emissive.setRGB(0, 0, 0);
   for (let i = 0; i < slots.length; i++) { if (slots[i].actorId >= 0) { fx.streakEnd(slots[i].actorId); fx.clearTelegraph(slots[i].actorId); } streak.d[i] = false; }
   bindSlots(); boss.root.visible = sim.bossActive;
+  { const G = sim.gauntlet, gp = gview.prev; gp.x = G.x; gp.y = G.y; gp.z = G.z; gp.yaw = G.yaw; }
+  gview.root.visible = sim.stage3Active; gview.hideHazards(); if (gview.inert) gview.inert.reset();
+  gview.react.amp = 0; gview.react.flash = 0; gview.seen.dome = false; gview.seen.wave = false; gview.seen.struck.fill(-1);
+  fx.clearTelegraph(GAUNTLET_ID); for (const k in G_STREAK_ID) { fx.streakEnd(G_STREAK_ID[k]); gStreak[k] = false; } gstat.wasFin = false; gstat.finHit = false;
   setHeroWeapon(H.weapon); pickupGlow.t = 0; pickupGlow.ping = -1; pickupRoot.visible = sim.pickup.active && sim.bossActive;
   input.consumeLook(_look);                       // drop look delta accumulated on the end screen
   cam.reset(H.yaw); camHero.position.set(H.x, colliders.terrainY(H.z), H.z); camHero.yaw = H.yaw;
@@ -1279,9 +1416,10 @@ function lateUpdate(dt) {
   const alive = sim.duelists.reduce((n, d) => n + (d.alive ? 1 : 0), 0);
   hud.update({
     hp: H.hp, hpMax: SIM.HP_PLAYER, stamina: H.stamina, staminaMax: SIM.STAMINA_MAX, staminaFail: H.stamina < 12,
-    boss: sim.bossActive ? { hp: B.hp, max: BOSS.HP, posture: B.posture, postureMax: BOSS.POSTURE_MAX } : null,
+    boss: sim.bossActive ? { hp: B.hp, max: BOSS.HP, posture: B.posture, postureMax: BOSS.POSTURE_MAX }
+      : sim.stage3Active ? { name: 'CHROME GAUNTLET', hp: sim.gauntlet.hp, max: GAUNTLET.HP, posture: sim.gauntlet.posture, postureMax: GAUNTLET.POSTURE_MAX } : null,
     waveLabel: S === GameState.WAVE ? 'WAVE ' + (sim.wave + 1) + ' / ' + WAVES.length + '<small>' + alive + ' FOE' + (alive === 1 ? '' : 'S') + ' REMAIN</small>'
-      : S === GameState.BOSS ? 'THE FORD WYVERN' : '',
+      : S === GameState.BOSS ? 'THE FORD WYVERN' : S === GameState.STAGE3 ? 'THE CHROME GAUNTLET' + (sim.gauntlet.phase >= 2 ? '<small>ENRAGED</small>' : '') : '',
     finisher: sim.finisherReady(), touch: touch.visible, flash: H.flash,
   }, dt);
   hudFrame = loop.simFrame;
@@ -1306,15 +1444,22 @@ const loop = new Loop({ fixedUpdate, update, lateUpdate, reducedMotion });
   for (const s of slots) s.root.visible = true; boss.root.visible = true;
   fx.prewarmBegin();
   for (const m of poolMeshes) m.visible = true; orbMesh.visible = true;
+  gview.root.visible = true; gview.root.position.set(4, 0, -10); gview.prewarmShow(true);
+  for (let i = 0; i < 3; i++) { gview.cols[i].position.set(-3 + i * 3, 0, -6); gview.markers[i].position.set(-3 + i * 3, 0.05, -5); }
+  gview.dome.position.set(0, 0, -10); gview.dome.scale.setScalar(3); gview.wave.position.set(0, 0.08, -8); gview.wave.scale.setScalar(3);
   pickupRoot.visible = true; pickupRoot.position.set(4.2, 1.4, -4.6); heroGreat.socket.visible = true;
   lbTop.style.transform = 'scaleY(0)';
   renderer.setRenderTarget(null);
+  const arena0 = arena;
+  foundry.setVisible(true);
   await renderer.compileAsync(scene, camera, scene);
   renderer.shadowMap.needsUpdate = true;
   renderer.render(scene, camera);
   await world.water.prewarm(renderer, scene, camera);
+  foundry.setVisible(arena0 === 'foundry');
   fx.prewarmEnd();
   for (const m of poolMeshes) m.visible = false; orbMesh.visible = false;
+  gview.hideHazards(); gview.root.visible = sim.stage3Active;
   setHeroWeapon(H.weapon); pickupRoot.visible = sim.pickup.active && sim.bossActive;
   for (const s of slots) s.root.visible = !!s.bound;
   boss.root.visible = sim.bossActive;
@@ -1356,8 +1501,48 @@ window.__ember = {
     return { bones: out, hero: [+(hx * fx + hz * fz).toFixed(2), +(hx * -fz + hz * fx).toFixed(2)], heroDist: +Math.hypot(hx, hz).toFixed(2),
       verb: sim.brain.verb, f: sim.brain.f, state: sim.brain.state, stance: sim.brain.stance, y: +sim.brain.y.toFixed(2) };
   },
+  programs() { return { start: progStart, now: renderer.info.programs.length }; },
+  // QA: gauntlet blade sockets in world space (base, tip, length, visible) plus head/paw bone positions
+  dbgBlades() {
+    const r = (v) => [+v.x.toFixed(2), +v.y.toFixed(2), +v.z.toFixed(2)], a = new THREE.Vector3(), b = new THREE.Vector3(), o = {};
+    gview.root.updateMatrixWorld(true);
+    for (const k of ['crest', 'bladeL', 'bladeR']) { const s = gview[k]; s.base.getWorldPosition(a); s.tip.getWorldPosition(b);
+      let vis = true; for (let n = s.blade; n; n = n.parent) if (!n.visible) vis = false;
+      o[k] = { base: r(a), tip: r(b), len: +a.distanceTo(b).toFixed(2), vis }; }
+    for (const k of ['HEAD', 'PAW_L', 'PAW_R']) { gview[k].getWorldPosition(a); o[k] = r(a); }
+    o.root = r(gview.root.position); o.headAhead = gview.headAhead; return o;
+  },
+  // QA: every DEF bone of the gauntlet in root space (forward = toward +Z of the sim, right, up)
+  dbgGBones(re) {
+    const R = gview.root, p = new THREE.Vector3(), out = [], rx = new RegExp(re || '^DEF-');
+    R.updateMatrixWorld(true); const yaw = R.rotation.y, fx = Math.sin(yaw), fz = Math.cos(yaw);
+    R.traverse((o) => { if (!o.isBone || !rx.test(o.name)) return; o.getWorldPosition(p); const dx = p.x - R.position.x, dz = p.z - R.position.z;
+      out.push([o.name, +(dx * fx + dz * fz).toFixed(2), +(dx * fz - dz * fx).toFixed(2), +(p.y - R.position.y).toFixed(2)]); });
+    return out;
+  },
+  // QA: mean / p95 luminance of the drawn frame (0-255), read back from the canvas
+  lum() {
+    renderer.render(scene, camera);
+    const gl = renderer.getContext(), w = gl.drawingBufferWidth, h = gl.drawingBufferHeight, px = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const hist = new Uint32Array(256); let sum = 0, n = 0;
+    for (let i = 0; i < px.length; i += 64) { const l = Math.round(0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2]); hist[l]++; sum += l; n++; }
+    let c = 0, p95 = 0, p50 = 0; for (let i = 0; i < 256; i++) { c += hist[i]; if (!p50 && c >= n * 0.5) p50 = i; if (c >= n * 0.95) { p95 = i; break; } }
+    return { mean: +(sum / n).toFixed(1), p50, p95, arena };
+  },
+  // QA pick: first visible mesh under an NDC point, with its owner chain and distance from the camera
+  pick(nx, ny) {
+    const rc = new THREE.Raycaster(); rc.setFromCamera(new THREE.Vector2(nx, ny), camera);
+    const hits = rc.intersectObjects(scene.children, true).filter((h) => { for (let o = h.object; o; o = o.parent) if (!o.visible) return false; return true; });
+    return hits.slice(0, 3).map((h) => { const chain = []; for (let o = h.object; o && chain.length < 4; o = o.parent) chain.push(o.name || o.type);
+      return { d: +h.distance.toFixed(2), chain, p: [+h.point.x.toFixed(2), +h.point.y.toFixed(2), +h.point.z.toFixed(2)] }; })
+      .concat([{ cam: [+camera.position.x.toFixed(2), +camera.position.y.toFixed(2), +camera.position.z.toFixed(2)], hero: [+H.x.toFixed(2), +H.z.toFixed(2)] }]);
+  },
+  killBoss() { if (sim.bossActive) sim.brain.takeHit(99999, 0, 'body', false, true); else if (sim.stage3Active) sim.gauntlet.takeHit(99999, 0, 'body', true); return GAME_STATE_NAMES[sim.state]; },
+  lights() { let n = 0; scene.traverse((o) => { if (o.isLight && o.visible) n++; }); return n; },
   state() {
-    return { frame: loop.simFrame, simFrame: sim.frame, state: GAME_STATE_NAMES[sim.state], wave: sim.wave, paused: loop.paused,
+    return { frame: loop.simFrame, simFrame: sim.frame, state: GAME_STATE_NAMES[sim.state], wave: sim.wave, paused: loop.paused, arena,
+      gauntlet: sim.stage3Active ? { hp: sim.gauntlet.hp, state: sim.gauntlet.state, x: sim.gauntlet.x, z: sim.gauntlet.z } : null,
       screen: hud._screen, hash: sim.hash(), heroHp: H.hp, heroState: H.state, stamina: H.stamina, bossHp: sim.brain.hp,
       duelists: sim.duelists.map((d) => ({ hp: d.hp, alive: d.alive })), stats: { ...sim.stats }, run: { ...runStats },
       backDot: H.maxBackwardDot, camMin: cam.minClearance, camResets, quickstep: Object.keys(QUICKSTEP.clips),
@@ -1416,6 +1601,15 @@ window.__ember = {
       out.push({ f, l: l.map((v) => +v.toFixed(3)), r: r.map((v) => +v.toFixed(3)), sh: sh.map((v) => +v.toFixed(3)) });
     }
     return out;
+  },
+  // QA: sword-tip world speed (m/s) per clip frame on the hero rig, standard blade (used to author strike windows)
+  tipScan(clip) {
+    const a = hero.actions[clip]; if (!a) return null;
+    const n = Math.floor(a.getClip().duration * 60), out = [], p = new THREE.Vector3(), q = new THREE.Vector3(), r0 = hero.root.position.clone();
+    hero.root.position.set(0, 0, 0); hero.root.rotation.y = 0; hero.root.updateMatrixWorld(true);
+    for (let f = 0; f <= n; f++) { pose(hero, 1, clip, 1, f / 60); hero.root.updateMatrixWorld(true); heroSwordStd.tip.getWorldPosition(p);
+      out.push([f, +(f ? p.distanceTo(q) * 60 : 0).toFixed(2), +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)]); q.copy(p); }
+    hero.root.position.copy(r0); return out;
   },
   forceBossVerb(name) { const v = BossVerb[name]; if (v === undefined) return false; sim.brain.forceNext = v; return true; },
   advance(n = 1) { for (let i = 0; i < n; i++) { loop.advance(1 / 60); } return { state: GAME_STATE_NAMES[sim.state], frame: sim.frame, cine: CINE_NAMES[cam.cineKind] }; },

@@ -119,7 +119,7 @@ export class Hud {
     const t = (f) => { const sec = Math.round(f / 60); return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0'); };
     this.el[kind].querySelector('.ec-stats').innerHTML = 'TIME ' + t(s.totalF) + '<br>FOES FELLED ' + s.kills
       + '<br>PERFECT DEFLECTS ' + s.perfects + ' &nbsp; PHANTOM STEPS ' + s.phantoms + '<br>FINISHERS ' + s.finishers
-      + (kind === 'defeat' && s.bossHp !== undefined && s.reachedBoss ? '<br>WYVERN ' + Math.round(100 * s.bossHp / s.bossMax) + '% REMAINING' : '');
+      + (kind === 'defeat' && s.bossHp !== undefined && s.reachedBoss ? '<br>' + (s.bossName || 'WYVERN') + ' ' + Math.round(100 * s.bossHp / s.bossMax) + '% REMAINING' : '');
   }
 
   // view: { hp, hpMax, stamina, staminaMax, staminaFail, boss: null | { hp, max, posture, postureMax }, wave, waveCount,
@@ -135,6 +135,8 @@ export class Hud {
     E.st.classList.toggle('low', view.staminaFail);
     if (view.boss) {
       E.boss.style.display = 'block';
+      const nm = view.boss.name || 'FORD WYVERN';
+      if (nm !== this._bossName) { this._bossName = nm; E.boss.firstElementChild.textContent = nm; this._bhpLag = 1; }
       const b = Math.max(0, view.boss.hp / view.boss.max);
       E.bhpI.style.transform = 'scaleX(' + b.toFixed(4) + ')';
       this._bhpLag = this._bhpLag > b ? Math.max(b, this._bhpLag - dt * 0.25) : b;

@@ -18,11 +18,14 @@ Play: https://ade5791.github.io/ember-court/
 - Gamepad is supported; touch controls appear automatically on phones and tablets.
 
 URL options: `?q=low|medium|high` quality preset, `?seed=N` for a reproducible run.
+`?stage3=1` (preview): after the wyvern falls, a door opens into Stage 3, the Frozen Foundry, against the Chrome
+Gauntlet - just-guard its swings, dodge the red lightning columns, and get clear of the dome discharge.
+`?stage3=1&start=stage3` jumps straight to that fight.
 
 ## Credits
 
 - Engine: Three.js (MIT), see `vendor/three/LICENSE`.
-- Boss model: CC BY 4.0, see `ATTRIBUTION.md`.
+- Boss models (Ford Wyvern, Chrome Gauntlet): CC BY 4.0, see `ATTRIBUTION.md`.
 - Hero and duelist models were generated and rigged for this project.
 
 This repository contains the runtime build only.

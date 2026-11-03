@@ -1,0 +1,38 @@
+{
+  "space": "game (three.js Y-up, metres, north = -Z)",
+  "source": "hand-authored from docs/STAGE3_SPEC.md section 1 (Frozen Foundry)",
+  "stage": "foundry-32m",
+  "ground": {
+    "y": 0.0,
+    "playable": { "minX": -16.0, "maxX": 16.0, "minZ": -16.0, "maxZ": 16.0 },
+    "heightProfile": { "axis": "abs(z)", "points": [[0.0, 0.0], [30.0, 0.0]], "interp": "linear" },
+    "surface": "METAL_PLATE",
+    "zones": [ { "shape": "diag", "halfWidth": 1.5, "limit": 13.8, "surface": "GRATING" } ]
+  },
+  "arena": { "half": 16.0, "size": 32.0, "flightCeiling": 11.0, "bossSpawn": [0.0, 0.0, -6.0], "bossScale": 1.0, "hoverMinY": 0.0, "playerSpawn": [0.0, 0.0, 9.0] },
+  "foundry": {
+    "lightSlots": [[-14.6, 1.5, -14.6], [14.6, 1.5, -14.6], [-14.6, 1.5, 14.6], [14.6, 1.5, 14.6]],
+    "roofY": 15.3,
+    "shafts": [-8.0, 0.0, 8.0],
+    "shaftWidth": 2.4,
+    "borderRing": [13.8, 15.0]
+  },
+  "colliders": [
+    { "name": "COL_column_0", "kind": "cyl", "center": [-11.0, 7.25, -11.0], "radius": 0.9, "halfHeight": 7.25, "surface": "STEEL_BEAM" },
+    { "name": "COL_column_1", "kind": "cyl", "center": [11.0, 7.25, -11.0], "radius": 0.9, "halfHeight": 7.25, "surface": "STEEL_BEAM" },
+    { "name": "COL_column_2", "kind": "cyl", "center": [-11.0, 7.25, 11.0], "radius": 0.9, "halfHeight": 7.25, "surface": "STEEL_BEAM" },
+    { "name": "COL_column_3", "kind": "cyl", "center": [11.0, 7.25, 11.0], "radius": 0.9, "halfHeight": 7.25, "surface": "STEEL_BEAM" },
+    { "name": "COL_column_4", "kind": "cyl", "center": [0.0, 7.25, -14.5], "radius": 0.9, "halfHeight": 7.25, "surface": "STEEL_BEAM" },
+    { "name": "COL_column_5", "kind": "cyl", "center": [0.0, 7.25, 14.5], "radius": 0.9, "halfHeight": 7.25, "surface": "STEEL_BEAM" },
+    { "name": "COL_column_6", "kind": "cyl", "center": [-14.5, 7.25, 0.0], "radius": 0.9, "halfHeight": 7.25, "surface": "STEEL_BEAM" },
+    { "name": "COL_column_7", "kind": "cyl", "center": [14.5, 7.25, 0.0], "radius": 0.9, "halfHeight": 7.25, "surface": "STEEL_BEAM" },
+    { "name": "COL_wall_n", "kind": "obb", "center": [0.0, 0.55, -16.3], "halfExtents": [16.6, 0.55, 0.3], "yaw": 0.0, "surface": "STEEL_BEAM" },
+    { "name": "COL_wall_s", "kind": "obb", "center": [0.0, 0.55, 16.3], "halfExtents": [16.6, 0.55, 0.3], "yaw": 0.0, "surface": "STEEL_BEAM" },
+    { "name": "COL_wall_w", "kind": "obb", "center": [-16.3, 0.55, 0.0], "halfExtents": [0.3, 0.55, 16.0], "yaw": 0.0, "surface": "STEEL_BEAM" },
+    { "name": "COL_wall_e", "kind": "obb", "center": [16.3, 0.55, 0.0], "halfExtents": [0.3, 0.55, 16.0], "yaw": 0.0, "surface": "STEEL_BEAM" },
+    { "name": "COL_crystal_0", "kind": "cyl", "center": [-14.6, 0.7, -14.6], "radius": 0.55, "halfHeight": 0.7, "surface": "ICE" },
+    { "name": "COL_crystal_1", "kind": "cyl", "center": [14.6, 0.7, -14.6], "radius": 0.55, "halfHeight": 0.7, "surface": "ICE" },
+    { "name": "COL_crystal_2", "kind": "cyl", "center": [-14.6, 0.7, 14.6], "radius": 0.55, "halfHeight": 0.7, "surface": "ICE" },
+    { "name": "COL_crystal_3", "kind": "cyl", "center": [14.6, 0.7, 14.6], "radius": 0.55, "halfHeight": 0.7, "surface": "ICE" }
+  ]
+}

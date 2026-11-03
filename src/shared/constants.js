@@ -38,6 +38,21 @@ export const BOSS = Object.freeze({
   CAMERA_WALL_MARGIN: 0.25 // C5
 });
 
+// Stage 3 boss "Chrome Gauntlet" (docs/STAGE3_SPEC.md section 3). Sim-only numbers; the asset manifest owns
+// presentation scale/facing.
+export const GAUNTLET = Object.freeze({
+  SPAWN: Object.freeze([0, 0, -6]),
+  HERO_SPAWN: Object.freeze([0, 9]),
+  HP: 1100,
+  POSTURE_MAX: 320,
+  ENRAGE_FRAC: 0.5,
+  BODY_RADIUS: 2.0,
+  HEAD_AHEAD: 3.4, HEAD_RADIUS: 0.9,     // mask head hurt point (x1.5 dmg, x2 posture)
+  CORE_AHEAD: 1.6, CORE_RADIUS: 0.8,     // chest core, open during REAR and after G_DOME (x1.25 dmg)
+  CLAMP: 11.0,
+  WALK_SPEED: 2.6, TURN_RATE: 2.0,
+});
+
 // Input layer constants (COMBAT_SPEC section 1 + control layer plan).
 export const INPUT = Object.freeze({
   BUFFER_FRAMES: 10,       // attack/heavy/block/dodge presses live 10 f, newest only
