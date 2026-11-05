@@ -9,7 +9,7 @@
 import * as THREE from 'three';
 import { Outcome, Surface, FxKind } from '../shared/enums.js';
 
-export const FX_CAPS = Object.freeze({ streaks: 4, streakSamples: 10, sparkBursts: 3, sparksPerBurst: 24,
+export const FX_CAPS = Object.freeze({ streaks: 4, streakSamples: 12, sparkBursts: 3, sparksPerBurst: 24,
   bloodBursts: 6, bloodPerBurst: 20, splashRings: 24, dropsPerSplash: 8, auras: 4, afterimagesPerActor: 4 });
 export const TELEGRAPH = Object.freeze({ NORMAL: 0, RED: 1, BLUE: 2 });
 export const TELEGRAPH_COLORS = Object.freeze([0xffd84a, 0xff2414, 0x2f7dff]);
@@ -20,8 +20,11 @@ const QUAD_OFF = new Int8Array([0, 3, 9, 0, 9, 6]);
 const QUAD_NEXT = new Uint8Array([0, 0, 1, 0, 1, 1]);
 const QUAD_EDGE = new Uint8Array([0, 1, 1, 0, 1, 0]);   // 1 = tip side of the ribbon (offsets 3 and 9)
 // v2.9 ink mist presets (rgb + peak alpha): WHITE dodge puff, VIOLET kill dissolve, JADE phantom vanish
-export const MIST = Object.freeze({ WHITE: 0, VIOLET: 1, JADE: 2 });
-const MIST_RGBA = new Float32Array([0.86, 0.89, 0.91, 0.40, 0.40, 0.20, 0.62, 0.55, 0.42, 0.86, 0.78, 0.34]);
+// v2.15 CRIMSON: Ember Trigger aura - deep red, low alpha, so it frames the hero instead of washing the silhouette out
+export const MIST = Object.freeze({ WHITE: 0, VIOLET: 1, JADE: 2, EMBER: 3, CRIMSON: 4 });
+// v2.15: VIOLET darkened to an ink (0.40,0.20,0.62 a0.55 -> 0.26,0.11,0.40 a0.36): the old value read as a pale
+// lavender wash over a hero standing next to the kill, measured +54 luminance on the hero box
+const MIST_RGBA = new Float32Array([0.86, 0.89, 0.91, 0.40, 0.26, 0.11, 0.40, 0.36, 0.42, 0.86, 0.78, 0.34, 0.95, 0.30, 0.14, 0.42, 0.62, 0.06, 0.08, 0.30]);
 
 // soft round sprite with per-particle colour/alpha/size (one program for blood and droplets)
 const SPRITE_VS = `
@@ -31,7 +34,10 @@ uniform float uScale;
 void main(){
   vColor = aColor;
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  gl_PointSize = aSize * uScale / max(0.1, -mv.z);
+  // v2.15 near fade: a puff within ~1.8 m of the lens fades out instead of filling the screen with a clipped,
+  // hard-edged sprite (the QA "pale rectangle"); size is also capped so it never hits the GPU point-size clamp
+  vColor.a *= smoothstep(0.7, 1.8, -mv.z);
+  gl_PointSize = min(aSize * uScale / max(0.1, -mv.z), 360.0);
   gl_Position = projectionMatrix * mv;
 }`;
 const SPRITE_FS = `
@@ -44,15 +50,109 @@ void main(){
   #include <colorspace_fragment>
 }`;
 
-// fire breath: additive flame sprites (hot core -> orange -> deep red) + normal-blended smoke, fixed pools
-const FLAME_N = 320, SMOKE_N = 112, FLAME_LIFE = 0.55, SMOKE_LIFE = 1.4;
-const FLAME_FS = `
-varying vec4 vColor;
+// v2.17 shared value noise (no textures, no clock: animation comes from a per-particle seed the CPU drifts)
+const NOISE_GLSL = `
+float fxh(vec2 p){ p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float fxn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(fxh(i), fxh(i + vec2(1.0, 0.0)), f.x), mix(fxh(i + vec2(0.0, 1.0)), fxh(i + vec2(1.0, 1.0)), f.x), f.y); }
+`;
+
+// v2.17 sword ribbon: Catmull-Rom subdivided (RIB_SUB per raw sample) so fast swings draw a curved arc instead of
+// facets; brush fibres along the stroke and a dry-brush tail that breaks up as the stroke ages
+const RIB_SUB = 4;
+const RIBBON_VS = `
+attribute float aA; attribute vec3 aC; attribute float aE; attribute float aU;
+varying float vA; varying vec3 vC; varying float vE; varying float vU;
+void main(){ vA = aA; vC = aC; vE = aE; vU = aU; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`;
+const RIBBON_FS = `
+varying float vA; varying vec3 vC; varying float vE; varying float vU;
+${NOISE_GLSL}
 void main(){
-  vec2 d = gl_PointCoord - 0.5; float r = dot(d, d) * 4.0;
+  if (!(vA > 0.0)) discard;
+  float ve = clamp(vE, 0.0, 1.0), e = ve * ve;
+  // bristle streaks run ALONG the stroke (low freq in vU, high freq across the width ve), so the wash reads as
+  // separate hair lines; the dry-brush mask bites in from the tail and from the guard edge
+  // v2.17c: coarser fibres and a filled wash body. At 0.35 hair floor / 34-83 freq the stroke read as a few hair
+  // lines around an empty middle; now the body is a solid ink wash with soft bristle variation on top
+  float fib = fxn(vec2(vU * 4.0, ve * 16.0)) * 0.6 + fxn(vec2(vU * 9.0 + 3.1, ve * 38.0)) * 0.4;
+  float dry = smoothstep(0.0, 0.22, fib + 0.70 - vU * 1.2 - (1.0 - ve) * 0.25);
+  float core = pow(ve, 10.0), rim = smoothstep(0.80, 0.97, ve) * (1.0 - smoothstep(0.97, 1.0, ve));
+  float hair = 0.68 + 0.32 * smoothstep(0.25, 0.75, fib);
+  vec3 c = vC * (0.5 + 0.5 * e) * (0.75 + 0.45 * fib) + mix(vC, vec3(1.0), 0.55) * (core * 0.9 + rim * 0.25);
+  // v2.17e: the guard-side edge kept 42% alpha, so the inner border of the stroke was a hard straight line and the
+  // ribbon read as a flat panel; feather it to 0 and let the ink body build from the middle outward
+  float inner = smoothstep(0.0, 0.45, ve) * (0.8 + 0.2 * fib);
+  float a = vA * (0.42 + 0.58 * e) * dry * hair * inner;
+  gl_FragColor = vec4(c * a, a);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}`;
+
+// fire breath: additive flame sprites (blackbody ramp) + normal-blended smoke, fixed pools.
+// v2.17: each sprite carries a seed; the fragment erodes the disc with noise into a ragged tongue / billow, and the
+// CPU drifts the seed so the shape boils. Flame pool also carries embers (flameJet 2). Aged breath tongues shed
+// soot puffs into the smoke pool, so the stream leaves a dark rolling trail instead of vanishing.
+const FLAME_N = 384, SMOKE_N = 192, FLAME_LIFE = 0.55, SMOKE_LIFE = 1.4, EMBER_LIFE = 1.3;
+const FIRE_VS = `
+attribute vec4 aColor; attribute float aSize; attribute float aSeed;
+varying vec4 vColor; varying float vSeed;
+uniform float uScale;
+void main(){
+  vColor = aColor; vSeed = aSeed;
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  vColor.a *= smoothstep(0.7, 1.8, -mv.z);
+  gl_PointSize = min(aSize * uScale / max(0.1, -mv.z), 360.0);
+  gl_Position = projectionMatrix * mv;
+}`;
+const FLAME_FS = `
+varying vec4 vColor; varying float vSeed;
+${NOISE_GLSL}
+void main(){
+  vec2 p = gl_PointCoord - 0.5; float r = dot(p, p) * 4.0;
   if (r > 1.0 || vColor.a <= 0.0) discard;
-  float k = (1.0 - r); k *= k;
-  gl_FragColor = vec4(vColor.rgb * vColor.a * k, 1.0);
+  float an = vSeed * 6.2831, cs = cos(an), sn = sin(an);
+  vec2 q = mat2(cs, -sn, sn, cs) * p;
+  // embers carry a negative seed: plain hot disc, no erosion (they are 2-6 px and must stay a clean point)
+  float n = 1.0;
+  // stretch the erosion upward (q.y * 0.6) so tongues read as vertical licks, and bite harder at the rim so the
+  // disc outline never shows; the dense centre of each tongue gets a white-gold hot core on top of the ramp
+  vec2 qs = vec2(q.x, q.y * 0.6);
+  // v2.17d: harder erosion (1.6 -> 2.3) and finer second octave so each sprite breaks into 2-3 licks instead of a
+  // soft billow; the stream gets gaps and tongues instead of reading as one cloud
+  if (vSeed >= 0.0) n = fxn(qs * 6.0 + vec2(vSeed * 41.0, vSeed * 17.0)) * 0.6 + fxn(qs * 21.0 - vec2(vSeed * 23.0, vSeed * 31.0)) * 0.4;
+  float k = clamp((1.0 - r) * 2.4 - (1.0 - n) * 2.3, 0.0, 1.0);
+  if (k <= 0.002) discard;
+  // v2.17b: dense additive overlap was saturating the stream to a peach-white smear. Each tongue now only adds a
+  // little light, its thin eroded edges are deep red, and only the very core of a tongue is gold, so the stream
+  // keeps a red rim / orange body / gold core read even where 30+ tongues stack
+  float hot = smoothstep(0.55, 1.0, k);
+  // v2.17c: frames still read pastel peach (gold 62%, red 0%). Hot core cut to a small gold kick, wider deep-red
+  // edge band, less light per tongue so overlap stays orange instead of climbing to white
+  vec3 col = mix(vec3(0.80, 0.07, 0.01), vColor.rgb, smoothstep(0.18, 0.75, k)) + vec3(0.55, 0.28, 0.04) * hot * hot;
+  // v2.17d: premultiplied "glow with a backing": rgb adds light, alpha dims what is behind (ONE, ONE_MINUS_SRC_ALPHA).
+  // Pure additive over the grey-beige ford fog read peach no matter the ramp; dimming the fog under each tongue lets
+  // the orange body stay saturated. Embers keep alpha 0 (pure additive points).
+  gl_FragColor = vec4(col * vColor.a * k * (vSeed < 0.0 ? 1.0 : 0.42), vSeed < 0.0 ? 0.0 : k * vColor.a * 0.45);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}`;
+const SMOKE_FS = `
+varying vec4 vColor; varying float vSeed;
+${NOISE_GLSL}
+void main(){
+  vec2 p = gl_PointCoord - 0.5; float r = dot(p, p) * 4.0;
+  if (r > 1.0 || vColor.a <= 0.0) discard;
+  float an = vSeed * 6.2831, cs = cos(an), sn = sin(an);
+  vec2 q = mat2(cs, -sn, sn, cs) * p;
+  float n = fxn(q * 3.5 + vec2(vSeed * 13.0, vSeed * 7.0)) * 0.6 + fxn(q * 7.5 + vec2(vSeed * 29.0, -vSeed * 11.0)) * 0.4;
+  // v2.17e: dense soot overlap made a hard-edged dark dome; each puff now feathers to 0 well inside the sprite and
+  // the noise bites deeper, so the envelope of many puffs stays ragged instead of tracing one ellipse
+  float k = smoothstep(0.0, 0.6, (1.0 - r) - (0.6 - n) * 1.1) * (1.0 - smoothstep(0.35, 1.0, r));
+  if (k <= 0.002) discard;
+  // light from above (gl_PointCoord y grows downward): tops brighter, undersides shadowed; mean stays below 1 so
+  // the v2.15 hero-wash budget for mist is not exceeded
+  float lit = 0.72 - p.y * 0.5 + (n - 0.5) * 0.3;
+  gl_FragColor = vec4(vColor.rgb * lit, vColor.a * k);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }`;
@@ -74,10 +174,10 @@ export class FxPool {
     this.dropsPerSplash = Math.max(4, Math.floor(C.dropsPerSplash * k));
     this.group = new THREE.Group(); this.group.name = 'fx';
     scene.add(this.group);
-    this._initSparks(); this._initSprites(); this._initStreaks(); this._initAuras(); this._initShock(); this._initFlame();
+    this._initSparks(); this._initSprites(); this._initStreaks(); this._initAuras(); this._initShock(); this._initChevrons(); this._initFlame(); this._initFlares(); this._initRifts();
     this.ghostOwners = [];               // { meshes:[{src, ghosts:[...]}], next, life:Float32Array, tint }
-    this.stats = { sparks: 0, blood: 0, drops: 0, streaks: 0, ghosts: 0, auras: 0, stains: 0, ripples: 0, flame: 0 };
-    this.maxSeen = { sparkBursts: 0, bloodBursts: 0, splashes: 0, streaks: 0, ghostsPerActor: 0, auras: 0, flame: 0 };
+    this.stats = { sparks: 0, blood: 0, drops: 0, streaks: 0, ghosts: 0, auras: 0, stains: 0, ripples: 0, flame: 0, chevrons: 0 };
+    this.maxSeen = { sparkBursts: 0, bloodBursts: 0, splashes: 0, streaks: 0, ghostsPerActor: 0, auras: 0, flame: 0, chevrons: 0 };
     const bus = ctx && ctx.get ? ctx.get('bus') : null;
     this.bus = bus;
     if (bus) {
@@ -248,9 +348,11 @@ export class FxPool {
     this.stHist = new Float32Array(n * S * 6);   // per sample: guard xyz, tip xyz
     this.stCount = new Uint8Array(n); this.stLife = new Float32Array(n); this.stActive = new Uint8Array(n);
     this.stOwner = new Int32Array(n).fill(-1);
-    const verts = n * (S - 1) * 6;              // 2 tris per segment
+    const SEG = (S - 1) * RIB_SUB;             // v2.17: smoothed sub-segments per streak
+    const verts = n * SEG * 6;                  // 2 tris per sub-segment
+    this.stSm = new Float32Array(n * (SEG + 1) * 6);   // Catmull-Rom smoothed guard/tip points (scratch, reused)
     this.stPos = new Float32Array(verts * 3); this.stAlpha = new Float32Array(verts);
-    this.stCol = new Float32Array(verts * 3); this.stEdge = new Float32Array(verts);
+    this.stCol = new Float32Array(verts * 3); this.stEdge = new Float32Array(verts); this.stU = new Float32Array(verts);
     this.stTint = new Float32Array(n * 3); this.stLifeMax = new Float32Array(n).fill(STREAK_LIFE);
     for (let v = 0; v < verts; v++) this.stEdge[v] = QUAD_EDGE[v % 6];
     const g = new THREE.BufferGeometry();
@@ -258,11 +360,12 @@ export class FxPool {
     g.setAttribute('aA', new THREE.BufferAttribute(this.stAlpha, 1).setUsage(THREE.DynamicDrawUsage));
     g.setAttribute('aC', new THREE.BufferAttribute(this.stCol, 3).setUsage(THREE.DynamicDrawUsage));
     g.setAttribute('aE', new THREE.BufferAttribute(this.stEdge, 1));
+    g.setAttribute('aU', new THREE.BufferAttribute(this.stU, 1).setUsage(THREE.DynamicDrawUsage));
     g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 64);
     // v2.9 ink ribbon: per-owner tint, hot leading (tip) edge, soft wash fading toward the guard
+    // v2.17: smoothed arc, brush fibres, dry-brush tail (RIBBON_VS / RIBBON_FS)
     const m = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-      vertexShader: 'attribute float aA; attribute vec3 aC; attribute float aE; varying float vA; varying vec3 vC; varying float vE; void main(){ vA = aA; vC = aC; vE = aE; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
-      fragmentShader: 'varying float vA; varying vec3 vC; varying float vE; void main(){ if (vA <= 0.0) discard; float e = vE * vE; float core = pow(vE, 14.0); vec3 c = vC * (0.35 + 0.65 * e) + mix(vC, vec3(1.0), 0.5) * core * 0.8; float a = vA * (0.2 + 0.8 * e); gl_FragColor = vec4(c * a, a);\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}' });
+      vertexShader: RIBBON_VS, fragmentShader: RIBBON_FS });
     this.streakMesh = new THREE.Mesh(g, m); this.streakMesh.frustumCulled = false; this.streakMesh.name = 'fx_streaks'; this.streakMesh.renderOrder = 11;
     this.group.add(this.streakMesh);
   }
@@ -293,31 +396,49 @@ export class FxPool {
   streakEnd(ownerId) { for (let i = 0; i < FX_CAPS.streaks; i++) if (this.stActive[i] && this.stOwner[i] === ownerId) this.stActive[i] = 0; }
 
   _updateStreaks(dt) {
-    const S = FX_CAPS.streakSamples, H = this.stHist, P = this.stPos, A = this.stAlpha, C = this.stCol, T = this.stTint;
+    const S = FX_CAPS.streakSamples, SEG = (S - 1) * RIB_SUB, H = this.stHist, M = this.stSm;
+    const P = this.stPos, A = this.stAlpha, C = this.stCol, T = this.stTint, U = this.stU;
     let v = 0, live = 0;
     for (let s = 0; s < FX_CAPS.streaks; s++) {
       if (!this.stActive[s]) this.stLife[s] -= dt;
-      const on = this.stLife[s] > 0 && this.stCount[s] >= 2;
+      const c = this.stCount[s], on = this.stLife[s] > 0 && c >= 2;
       if (on) live++;
       // ease-out fade: the ink wash hangs, then dissolves
       const u = on ? Math.min(1, this.stLife[s] / this.stLifeMax[s]) : 0, fade = u * (2 - u);
       const tr = T[s * 3], tg = T[s * 3 + 1], tb = T[s * 3 + 2];
-      for (let k = 0; k < S - 1; k++) {
-        const a = s * S * 6 + k * 6, valid = on && k + 1 < this.stCount[s];
+      const hb = s * S * 6, mb = s * (SEG + 1) * 6, lastJ = (c - 1) * RIB_SUB;
+      // v2.17 Catmull-Rom through the raw guard/tip history: a fast swing that moved 40 deg between two samples now
+      // draws a curved arc instead of a flat facet (endpoints clamped, so the curve passes through every sample)
+      if (on) for (let j = 0; j <= lastJ; j++) {
+        const k = Math.min(c - 2, (j / RIB_SUB) | 0), t = (j - k * RIB_SUB) / RIB_SUB, t2 = t * t, t3 = t2 * t;
+        const i0 = hb + Math.max(0, k - 1) * 6, i1 = hb + k * 6, i2 = hb + (k + 1) * 6, i3 = hb + Math.min(c - 1, k + 2) * 6, o = mb + j * 6;
+        for (let q = 0; q < 6; q++) {
+          const p0 = H[i0 + q], p1 = H[i1 + q], p2 = H[i2 + q], p3 = H[i3 + q];
+          M[o + q] = 0.5 * (2 * p1 + (p2 - p0) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (3 * p1 - p0 - 3 * p2 + p3) * t3);
+        }
+      }
+      const inv = lastJ > 0 ? 1 / lastJ : 0;
+      for (let j = 0; j < SEG; j++) {
+        const a = mb + j * 6, valid = on && j < lastJ;
         // quadratic falloff along the history so the tail tapers like a brush stroke
-        const q0 = 1 - k / (S - 1), q1 = 1 - (k + 1) / (S - 1);
+        const u0 = j * inv, u1 = (j + 1) * inv;   // 0 at the blade, 1 at the oldest live sample (dry-brush tail)
+        // v2.17e: taper over the LIVE history (u), not the full buffer: a short stroke (charge wind-up, first frames
+        // of a swing) used to end at ~50% alpha and showed a hard straight tail edge, so the ribbon read as a card
+        const q0 = 1 - u0, q1 = 1 - u1;
         const al0 = valid ? fade * q0 * q0 : 0, al1 = valid ? fade * q1 * q1 : 0;
         // quad (g0, t0, t1) (g0, t1, g1); offsets from a: g0 0, t0 3, g1 6, t1 9 (static tables, no allocation)
-        for (let j = 0; j < 6; j++) {
-          const src = a + QUAD_OFF[j]; P[v * 3] = H[src]; P[v * 3 + 1] = H[src + 1]; P[v * 3 + 2] = H[src + 2];
-          A[v] = QUAD_NEXT[j] ? al1 : al0; C[v * 3] = tr; C[v * 3 + 1] = tg; C[v * 3 + 2] = tb; v++;
+        for (let jj = 0; jj < 6; jj++) {
+          const src = valid ? a + QUAD_OFF[jj] : a;   // dead quads collapse to one point (no stray overdraw)
+          P[v * 3] = M[src]; P[v * 3 + 1] = M[src + 1]; P[v * 3 + 2] = M[src + 2];
+          const nx = QUAD_NEXT[jj]; A[v] = nx ? al1 : al0; U[v] = nx ? u1 : u0;
+          C[v * 3] = tr; C[v * 3 + 1] = tg; C[v * 3 + 2] = tb; v++;
         }
       }
     }
     this.stats.streaks = live;
     if (live > this.maxSeen.streaks) this.maxSeen.streaks = live;
     this.streakMesh.visible = live > 0;
-    if (live > 0) { const at = this.streakMesh.geometry.attributes; at.position.needsUpdate = true; at.aA.needsUpdate = true; at.aC.needsUpdate = true; }
+    if (live > 0) { const at = this.streakMesh.geometry.attributes; at.position.needsUpdate = true; at.aA.needsUpdate = true; at.aC.needsUpdate = true; at.aU.needsUpdate = true; }
   }
 
   // ---------- telegraph auras: additive ground ring + inner disc per actor slot, colour = art ----------
@@ -377,6 +498,141 @@ export class FxPool {
       s.r.scale.setScalar(0.2 + s.rad * e);
       s.m.opacity = 1.6 * s.k * (1 - u) * (1 - u);
     }
+  }
+
+  // ---------- just-guard chevrons (Stage 3 spec section 6): cyan double-V that punches in on the hero's guard
+  // point, billboarded to the camera at spawn, cap 4 round-robin. Built at init so the prewarm compiles it.
+  _initChevrons() {
+    this.chevrons = [];
+    // one V = two bars meeting at the bottom point; a second, smaller V nested above reads as a chevron stack
+    const p = [], idx = []; let n = 0;
+    const bar = (x0, y0, x1, y1, w) => {
+      const dx = x1 - x0, dy = y1 - y0, l = Math.hypot(dx, dy), nx = -dy / l * w, ny = dx / l * w;
+      p.push(x0 + nx, y0 + ny, 0, x0 - nx, y0 - ny, 0, x1 - nx, y1 - ny, 0, x1 + nx, y1 + ny, 0);
+      idx.push(n, n + 1, n + 2, n, n + 2, n + 3); n += 4;
+    };
+    bar(-0.5, 0.42, 0, -0.08, 0.07); bar(0, -0.08, 0.5, 0.42, 0.07);
+    bar(-0.32, 0.62, 0, 0.3, 0.045); bar(0, 0.3, 0.32, 0.62, 0.045);
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3)); g.setIndex(idx);
+    this._chevGeo = g; this._auraGeos.push(g);
+    for (let i = 0; i < 4; i++) {
+      const m = new THREE.MeshBasicMaterial({ color: 0x40e0ff, transparent: true, depthWrite: false, depthTest: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, opacity: 0 });
+      const mesh = new THREE.Mesh(g, m); mesh.name = 'fx_chevron_' + i; mesh.visible = false; mesh.renderOrder = 12;
+      this.group.add(mesh); this.chevrons.push({ g: mesh, m, t: -1, life: 0.42, k: 1 });
+    }
+    this.chevNext = 0;
+  }
+  // pos = guard point (world), quat = camera quaternion at the contact frame, perfect = brighter + larger
+  chevron(pos, quat, perfect = false) {
+    const c = this.chevrons[this.chevNext]; this.chevNext = (this.chevNext + 1) % this.chevrons.length;
+    c.t = 0; c.life = perfect ? 0.5 : 0.4; c.k = perfect ? 1.6 : 1.0;
+    c.g.position.copy(pos); c.g.quaternion.copy(quat); c.g.visible = true;
+    c.m.color.setHex(perfect ? 0x9ff4ff : 0x40e0ff);
+  }
+  _updateChevrons(dt) {
+    let n = 0;
+    for (const c of this.chevrons) {
+      if (c.t < 0) continue;
+      c.t += dt; const u = c.t / c.life;
+      if (u >= 1) { c.t = -1; c.g.visible = false; continue; }
+      n++;
+      const pop = this.reducedMotion ? 1 : u < 0.18 ? 1.5 - 2.6 * u : 1.03 + 0.25 * u;   // punch in, then drift open
+      c.g.scale.setScalar(0.55 * c.k * pop);
+      c.g.position.y += dt * 0.6;
+      c.m.opacity = 2.2 * (1 - u) * (1 - u);
+    }
+    this.stats.chevrons = n;
+    if (n > this.maxSeen.chevrons) this.maxSeen.chevrons = n;
+  }
+
+  // ---------- v2.13 contact flares: a short HDR star-burst billboard at every blade contact (4-slot ring).
+  // Gives outgoing hits and deflects the brightest, sharpest read on screen (FX hierarchy: contact > telegraph > floor).
+  _initFlares() {
+    this.flares = []; this.flareNext = 0;
+    const g = new THREE.PlaneGeometry(1, 1); this._flareGeo = g;
+    for (let i = 0; i < 4; i++) {
+      const m = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
+        uniforms: { uC: { value: new THREE.Color(1, 0.6, 0.3) }, uA: { value: 0 }, uRot: { value: 0 } },
+        vertexShader: 'varying vec2 vUv; void main(){ vUv = uv - 0.5; vec4 mv = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);' +
+          ' vec3 s = vec3(length(modelMatrix[0].xyz), length(modelMatrix[1].xyz), 1.0); mv.xy += position.xy * s.xy; gl_Position = projectionMatrix * mv; }',
+        fragmentShader: 'uniform vec3 uC; uniform float uA, uRot; varying vec2 vUv; void main(){' +
+          ' float c = cos(uRot), s = sin(uRot); vec2 p = mat2(c, -s, s, c) * vUv * 2.0; float r = length(p);' +
+          ' float core = exp(-r * r * 40.0); float halo = exp(-r * 5.0) * 0.35;' +
+          ' float star = exp(-abs(p.x) * 38.0) * exp(-abs(p.y) * 2.4) + exp(-abs(p.y) * 38.0) * exp(-abs(p.x) * 2.4);' +
+          ' float k = core * 3.0 + halo + star * 1.4; if (k < 0.004) discard; vec3 col = mix(uC, vec3(1.0), clamp(core, 0.0, 1.0)) * k * uA;' +
+          ' gl_FragColor = vec4(col, clamp(k * uA, 0.0, 1.0));\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}' });
+      const mesh = new THREE.Mesh(g, m); mesh.name = 'fx_flare_' + i; mesh.visible = false; mesh.frustumCulled = false; mesh.renderOrder = 13;
+      this.group.add(mesh); this.flares.push({ g: mesh, m, t: -1, life: 0.16, k: 1 });
+    }
+  }
+  flare(pos, k = 1, color = 0xff9040) {
+    if (!pos) return;
+    const f = this.flares[this.flareNext]; this.flareNext = (this.flareNext + 1) % this.flares.length;
+    f.t = 0; f.k = k; f.life = 0.12 + 0.06 * Math.min(k, 2);
+    f.g.position.copy(pos); f.g.visible = true; f.m.uniforms.uC.value.setHex(color);
+    f.m.uniforms.uRot.value = this.rng.range(-0.5, 0.5);
+  }
+  // ---------- v2.21 rift slashes (Ember Rift space-cuts): 16 view-aligned hairline blades, round-robin. Each one
+  // snaps open along its length in ~40 ms (white core, coloured edge), holds, then thins out. One program, built at
+  // init so prewarm compiles it. Reduced motion: shorter, dimmer, no length overshoot.
+  _initRifts() {
+    this.rifts = []; this.riftNext = 0;
+    const g = new THREE.PlaneGeometry(1, 1); this._riftGeo = g;
+    const mat = (i) => new THREE.ShaderMaterial({ transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
+      uniforms: { uC: { value: new THREE.Color(0.6, 0.9, 1.0) }, uA: { value: 0 }, uRot: { value: 0 }, uOpen: { value: 0 }, uW: { value: 1 } },
+      vertexShader: 'uniform float uRot, uOpen; varying vec2 vUv; void main(){ vUv = uv - 0.5; vec4 mv = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);' +
+        ' vec3 s = vec3(length(modelMatrix[0].xyz), length(modelMatrix[1].xyz), 1.0); vec2 q = position.xy * s.xy; q.x *= uOpen;' +
+        ' float c = cos(uRot), n = sin(uRot); mv.xy += vec2(c * q.x - n * q.y, n * q.x + c * q.y); gl_Position = projectionMatrix * mv; }',
+      fragmentShader: 'uniform vec3 uC; uniform float uA, uW; varying vec2 vUv; void main(){' +
+        ' float ax = abs(vUv.x) * 2.0; float taper = 1.0 - ax * ax; float y = abs(vUv.y) * 2.0 / max(0.05, uW * taper);' +
+        ' float core = exp(-y * y * 30.0); float edge = exp(-y * 3.2) * 0.45; float k = (core * 2.4 + edge) * taper; if (k < 0.004) discard;' +
+        ' vec3 col = mix(uC, vec3(1.0), clamp(core, 0.0, 1.0)) * k * uA;' +
+        ' gl_FragColor = vec4(col, clamp(k * uA, 0.0, 1.0));\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}' });
+    for (let i = 0; i < 16; i++) {
+      const m = mat(i), mesh = new THREE.Mesh(g, m); mesh.name = 'fx_rift_' + i; mesh.visible = false; mesh.frustumCulled = false; mesh.renderOrder = 14;
+      this.group.add(mesh); this.rifts.push({ g: mesh, m, t: -1, life: 0.32, len: 4, delay: 0 });
+    }
+  }
+  // pos = blade centre (world), len = blade length (m), rot = screen-space angle (rad), delay = seconds before it opens
+  riftSlash(pos, len = 4, rot = 0, color = 0x9fe8ff, delay = 0, life = 0.32) {
+    if (!pos) return;
+    const r = this.rifts[this.riftNext]; this.riftNext = (this.riftNext + 1) % this.rifts.length;
+    r.t = -delay - 1e-4; r.delay = delay; r.len = this.reducedMotion ? len * 0.8 : len; r.life = this.reducedMotion ? life * 0.7 : life;
+    r.g.position.copy(pos); r.g.visible = false; r.m.uniforms.uC.value.setHex(color); r.m.uniforms.uRot.value = rot; r.m.uniforms.uA.value = 0;
+    r.live = true;
+  }
+  clearRifts() { for (const r of this.rifts) { r.live = false; r.t = -1; r.g.visible = false; } }
+  _updateRifts(dt) {
+    let n = 0;
+    for (const r of this.rifts) {
+      if (!r.live) continue;
+      r.t += dt;
+      if (r.t < 0) continue;
+      const u = r.t / r.life;
+      if (u >= 1) { r.live = false; r.g.visible = false; continue; }
+      n++; r.g.visible = true;
+      const open = Math.min(1, r.t / 0.04), U = r.m.uniforms;
+      U.uOpen.value = this.reducedMotion ? open : open * (1 + 0.08 * Math.max(0, 1 - u * 3));
+      U.uW.value = Math.max(0.15, 1 - u * 0.85);
+      U.uA.value = (u < 0.15 ? 3.0 : 3.0 * (1 - (u - 0.15) / 0.85)) * (this.reducedMotion ? 0.55 : 1);
+      r.g.scale.set(r.len, 0.09 * r.len, 1);
+    }
+    this.stats.rifts = n;
+  }
+
+  _updateFlares(dt) {
+    let n = 0;
+    for (const f of this.flares) {
+      if (f.t < 0) continue;
+      f.t += dt; const u = f.t / f.life;
+      if (u >= 1) { f.t = -1; f.g.visible = false; continue; }
+      n++;
+      const grow = this.reducedMotion ? 1 : 0.7 + 0.6 * Math.sqrt(u);
+      f.g.scale.set(1.5 * f.k * grow, 1.5 * f.k * grow, 1);
+      f.m.uniforms.uA.value = 2.4 * (1 - u) * (1 - u) * (this.reducedMotion ? 0.6 : 1);
+    }
+    this.stats.flares = n;
   }
 
   _updateAuras(dt) {
@@ -461,20 +717,24 @@ export class FxPool {
   // ---------- fire breath: flame cone + embers + smoke (two Points objects, ring-allocated, no per-frame alloc) ----------
   _initFlame() {
     const mk = (n, fs, additive, name, order) => {
-      const pos = new Float32Array(n * 3), col = new Float32Array(n * 4), size = new Float32Array(n);
+      const pos = new Float32Array(n * 3), col = new Float32Array(n * 4), size = new Float32Array(n), seed = new Float32Array(n);
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
       g.setAttribute('aColor', new THREE.BufferAttribute(col, 4).setUsage(THREE.DynamicDrawUsage));
       g.setAttribute('aSize', new THREE.BufferAttribute(size, 1).setUsage(THREE.DynamicDrawUsage));
+      g.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1).setUsage(THREE.DynamicDrawUsage));
       g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 64);
-      const m = new THREE.ShaderMaterial({ vertexShader: SPRITE_VS, fragmentShader: fs, transparent: true, depthWrite: false,
-        blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending, uniforms: { uScale: this.spriteMat.uniforms.uScale } });
+      const m = new THREE.ShaderMaterial({ vertexShader: FIRE_VS, fragmentShader: fs, transparent: true, depthWrite: false,
+        blending: additive ? THREE.CustomBlending : THREE.NormalBlending, uniforms: { uScale: this.spriteMat.uniforms.uScale } });
+      // flame: premultiplied glow with backing (see FLAME_FS); blend factors are GL state, not part of the program key
+      if (additive) { m.blendSrc = THREE.OneFactor; m.blendDst = THREE.OneMinusSrcAlphaFactor; m.blendSrcAlpha = THREE.ZeroFactor; m.blendDstAlpha = THREE.OneFactor; }
       const p = new THREE.Points(g, m); p.frustumCulled = false; p.name = name; p.renderOrder = order; p.visible = false;
       this.group.add(p);
-      return { p, pos, col, size, vel: new Float32Array(n * 3), life: new Float32Array(n), max: new Float32Array(n).fill(1), n, next: 0 };
+      return { p, pos, col, size, seed, vel: new Float32Array(n * 3), life: new Float32Array(n), max: new Float32Array(n).fill(1), n, next: 0 };
     };
     this.flame = mk(FLAME_N, FLAME_FS, true, 'fx_flame', 12);
-    this.smoke = mk(SMOKE_N, SPRITE_FS, false, 'fx_smoke', 6);
+    this.smoke = mk(SMOKE_N, SMOKE_FS, false, 'fx_smoke', 6);
+    this.flameSoot = new Uint8Array(FLAME_N);  // 1 once a breath tongue has shed its soot puff
     this.flameAcc = 0; this.smokeAcc = 0; this.breathHeat = 0;
     // per-particle smoke tint (rgb + peak alpha); breath/pool smoke writes the soot default, mist() writes presets
     this.smokeTint = new Float32Array(SMOKE_N * 4);
@@ -501,7 +761,9 @@ export class FxPool {
       F.pos[o] = origin.x + r.range(-0.1, 0.1); F.pos[o + 1] = origin.y + r.range(-0.1, 0.1); F.pos[o + 2] = origin.z + r.range(-0.1, 0.1);
       F.vel[o] = ex / l * sp; F.vel[o + 1] = ey / l * sp; F.vel[o + 2] = ez / l * sp;
       const life = FLAME_LIFE * r.range(0.7, 1.0); F.life[i] = life; F.max[i] = life;
-      F.size[i] = r.range(0.16, 0.28) * size; this.flameJet[i] = 1;
+      F.size[i] = r.range(0.16, 0.28) * size; this.flameJet[i] = 1; F.seed[i] = r.range(0.05, 8); this.flameSoot[i] = 0;
+      // v2.17 embers: ~1 in 9 stream particles is a long-lived hot point thrown wide off the cone
+      if (r.float() < 0.11) this._ember(F.pos[o], F.pos[o + 1], F.pos[o + 2], F.vel[o] * 0.55 + r.range(-1.5, 1.5), F.vel[o + 1] * 0.55 + r.range(0.5, 2.5), F.vel[o + 2] * 0.55 + r.range(-1.5, 1.5));
     }
     // embers at the mouth (velocity-stretched spark lines, shared spark pool)
     if (r.float() < dt * 8) { _ex.set(dx * 0.6, dy * 0.6 + 0.3, dz * 0.6); this.burstSparks(origin, _ex, 0.45); }
@@ -519,6 +781,8 @@ export class FxPool {
       F.pos[o] = x + Math.cos(a) * d; F.pos[o + 1] = y + 0.05; F.pos[o + 2] = z + Math.sin(a) * d;
       F.vel[o] = r.range(-0.2, 0.2); F.vel[o + 1] = r.range(1.2, 2.4); F.vel[o + 2] = r.range(-0.2, 0.2);
       const life = 0.55 * r.range(0.6, 1.0); F.life[i] = life; F.max[i] = life; F.size[i] = r.range(0.25, 0.5); this.flameJet[i] = 0;
+      F.seed[i] = r.range(0.05, 8); this.flameSoot[i] = 1;
+      if (r.float() < 0.25) this._ember(F.pos[o], F.pos[o + 1] + 0.1, F.pos[o + 2], r.range(-0.6, 0.6), r.range(1.5, 3.2), r.range(-0.6, 0.6));
     }
     while (this.smokeAcc >= 1) {
       this.smokeAcc -= 1;
@@ -526,7 +790,7 @@ export class FxPool {
       const a = r.float() * Math.PI * 2, d = Math.sqrt(r.float()) * radius * 0.7;
       S.pos[o] = x + Math.cos(a) * d; S.pos[o + 1] = y + 0.4; S.pos[o + 2] = z + Math.sin(a) * d;
       S.vel[o] = r.range(-0.15, 0.15); S.vel[o + 1] = r.range(0.6, 1.1); S.vel[o + 2] = r.range(-0.15, 0.15);
-      const life = SMOKE_LIFE * r.range(0.7, 1.0); S.life[i] = life; S.max[i] = life; S.size[i] = r.range(0.8, 1.4);
+      const life = SMOKE_LIFE * r.range(0.7, 1.0); S.life[i] = life; S.max[i] = life; S.size[i] = r.range(0.8, 1.4); S.seed[i] = r.range(0.05, 8);
       const o4 = i * 4; this.smokeTint[o4] = 0.09; this.smokeTint[o4 + 1] = 0.07; this.smokeTint[o4 + 2] = 0.065; this.smokeTint[o4 + 3] = 0.45; this.smokeDrag[i] = 0;
     }
   }
@@ -542,21 +806,55 @@ export class FxPool {
       S.pos[o] = x + Math.cos(a) * d; S.pos[o + 1] = y + h; S.pos[o + 2] = z + Math.sin(a) * d;
       const out = r.range(0.8, 2.2);
       S.vel[o] = Math.cos(a) * out; S.vel[o + 1] = up * r.range(0.6, 1.4); S.vel[o + 2] = Math.sin(a) * out;
-      const life = r.range(0.7, 1.15); S.life[i] = life; S.max[i] = life; S.size[i] = r.range(0.5, 0.9) * (0.6 + radius);
+      const life = r.range(0.7, 1.15); S.life[i] = life; S.max[i] = life; S.size[i] = r.range(0.5, 0.9) * (0.6 + radius); S.seed[i] = r.range(0.05, 8);
       T[o4] = MIST_RGBA[p4]; T[o4 + 1] = MIST_RGBA[p4 + 1]; T[o4 + 2] = MIST_RGBA[p4 + 2]; T[o4 + 3] = MIST_RGBA[p4 + 3]; this.smokeDrag[i] = 1;
     }
     this.mistLive++;
+    if (this.mistCalls) this.mistCalls[preset] += n;   // QA attribution: puffs emitted per preset since boot
+  }
+
+  // v2.17 ember: a hot point in the flame pool (flameJet 2, negative seed = no erosion), gravity + drag, long life
+  _ember(x, y, z, vx, vy, vz) {
+    const F = this.flame, r = this.rng, i = F.next; F.next = (F.next + 1) % F.n; const o = i * 3;
+    F.pos[o] = x; F.pos[o + 1] = y; F.pos[o + 2] = z; F.vel[o] = vx; F.vel[o + 1] = vy; F.vel[o + 2] = vz;
+    const life = EMBER_LIFE * r.range(0.5, 1.0); F.life[i] = life; F.max[i] = life;
+    F.size[i] = r.range(0.07, 0.12); F.seed[i] = -1; this.flameJet[i] = 2; this.flameSoot[i] = 1;
+  }
+
+  // v2.17 soot: one dark puff shed from an aged breath tongue (normal-blended, so it occludes rather than glows)
+  _soot(x, y, z, vx, vy, vz, sz) {
+    const S = this.smoke, r = this.rng, T = this.smokeTint, i = S.next; S.next = (S.next + 1) % S.n; const o = i * 3, o4 = i * 4;
+    S.pos[o] = x; S.pos[o + 1] = y; S.pos[o + 2] = z; S.vel[o] = vx * 0.35; S.vel[o + 1] = Math.max(0.5, vy * 0.35) + 0.4; S.vel[o + 2] = vz * 0.35;
+    // v2.17c: soot hangs ~2-2.5 s (was ~1 s, gone before the aftermath read) and is a touch denser
+    const life = SMOKE_LIFE * r.range(1.4, 1.8); S.life[i] = life; S.max[i] = life; S.size[i] = Math.max(0.85, sz * 1.5); S.seed[i] = r.range(0.05, 8);
+    // v2.17e: per-puff density varies (0.32-0.55) and puffs rise a little faster so the trail thins and breaks up
+    T[o4] = 0.06; T[o4 + 1] = 0.045; T[o4 + 2] = 0.04; T[o4 + 3] = r.range(0.32, 0.55); this.smokeDrag[i] = 1;
+    S.vel[o + 1] += r.range(0.2, 0.7);
   }
 
   _updateFlame(dt) {
     const F = this.flame, S = this.smoke;
     let nf = 0;
-    const dJet = Math.exp(-1.1 * dt), dLick = Math.exp(-2.8 * dt);   // time-based drag (frame-rate independent)
+    const dJet = Math.exp(-1.1 * dt), dLick = Math.exp(-2.8 * dt), dEmb = Math.exp(-0.9 * dt);   // time-based drag
+    const sootOK = !this.reducedMotion;
     for (let i = 0; i < F.n; i++) {
       const o = i * 3, o4 = i * 4;
       if (F.life[i] <= 0) { F.col[o4 + 3] = 0; continue; }
       F.life[i] -= dt;
+      if (this.flameJet[i] === 2) {                  // ember: ballistic, flickers, cools white-gold -> deep red
+        F.vel[o] *= dEmb; F.vel[o + 2] *= dEmb; F.vel[o + 1] = F.vel[o + 1] * dEmb - 2.4 * dt;
+        F.pos[o] += F.vel[o] * dt; F.pos[o + 1] += F.vel[o + 1] * dt; F.pos[o + 2] += F.vel[o + 2] * dt;
+        if (F.pos[o + 1] < 0.05) { F.pos[o + 1] = 0.05; F.vel[o + 1] = 0; F.life[i] -= dt * 3; }
+        const t = Math.max(0, F.life[i] / F.max[i]), fl = 0.75 + 0.25 * Math.sin(F.life[i] * 47 + i);
+        F.col[o4] = 2.2 * fl; F.col[o4 + 1] = (0.25 + 0.9 * t) * fl; F.col[o4 + 2] = 0.08 * t; F.col[o4 + 3] = Math.min(1, t * 3);
+        if (F.life[i] <= 0) { F.col[o4 + 3] = 0; F.size[i] = 0; } else nf++;
+        continue;
+      }
+      F.seed[i] += dt * 2.6;                         // boil: the noise field slides through the sprite
       const jet = this.flameJet[i], dr = jet ? dJet : dLick, ag = 1 - Math.max(0, F.life[i] / F.max[i]);
+      // aged breath tongues shed a soot puff at ~70% age (max one per tongue, ~1 in 2 tongues)
+      // v2.17d: shed earlier (0.62 -> 0.4) so dark soot sits along the stream and backs the flame against the fog
+      if (sootOK && !this.flameSoot[i] && ag > 0.4) { this.flameSoot[i] = 1; if ((i % 3) !== 0) this._soot(F.pos[o], F.pos[o + 1], F.pos[o + 2], F.vel[o], F.vel[o + 1], F.vel[o + 2], F.size[i]); }
       F.vel[o] *= dr; F.vel[o + 2] *= dr; F.vel[o + 1] = F.vel[o + 1] * dr + (jet ? (ag > 0.45 ? 3.0 : 0.4) : 2.2) * dt;   // drag + late buoyancy
       F.pos[o] += F.vel[o] * dt; F.pos[o + 1] += F.vel[o + 1] * dt; F.pos[o + 2] += F.vel[o + 2] * dt;
       if (F.pos[o + 1] < 0.25) {                     // flame hits the ford: spreads flat, licks upward
@@ -564,9 +862,16 @@ export class FxPool {
         F.vel[o + 1] = Math.max(F.vel[o + 1], 0.8); if (sp > 4) { F.vel[o] *= 1.15; F.vel[o + 2] *= 1.15; }
       }
       const t = Math.max(0, F.life[i] / F.max[i]), age = 1 - t;
-      // white-yellow core -> orange -> deep red, HDR so the grade and bloom read it as a light source
-      F.col[o4] = 1.5 - 0.6 * age; F.col[o4 + 1] = Math.max(0.05, 0.7 - 1.1 * age); F.col[o4 + 2] = Math.max(0.0, 0.16 - 0.5 * age);
-      F.col[o4 + 3] = Math.min(1, t * 2.0) * Math.min(1, age * 6 + 0.35) * 0.55;
+      // v2.17 blackbody ramp: white-gold at the mouth -> orange -> deep red, then cooled to near-black at the
+      // end of life (soot takes over the read), HDR so bloom treats the young flame as a light source
+      const hot = Math.max(0, 1 - age * 2.2);
+      // v2.17c: green/blue pulled down so the body sits in orange and the tail in red (was peach/gold at mid-stream)
+      // v2.17d: additive orange over the grey-beige fog still read peach; the body now drops to red by mid-life
+      // (G 0.36 -> 0 by age 0.45) so it stays saturated after the fog lifts it
+      F.col[o4] = 1.7 - 0.8 * age; F.col[o4 + 1] = Math.max(0.0, 0.36 - 0.8 * age) + 0.24 * hot; F.col[o4 + 2] = 0.06 * hot * hot;
+      // v2.17e: per-tongue flicker (seed drifts, so it pulses) breaks the uniform tube into brighter and dimmer licks
+      const flick = 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(F.seed[i] * 4.7 + i * 1.37));
+      F.col[o4 + 3] = Math.min(1, t * 2.0) * Math.min(1, age * 6 + 0.35) * 0.6 * flick;
       F.size[i] = F.size[i] + dt * (jet ? 2.6 : 1.2);  // jet widens down the cone, licks billow gently
       if (F.life[i] <= 0) { F.col[o4 + 3] = 0; F.size[i] = 0; } else nf++;
     }
@@ -574,7 +879,7 @@ export class FxPool {
     for (let i = 0; i < S.n; i++) {
       const o = i * 3, o4 = i * 4;
       if (S.life[i] <= 0) { S.col[o4 + 3] = 0; continue; }
-      S.life[i] -= dt;
+      S.life[i] -= dt; S.seed[i] += dt * 0.7;       // slow roll: billows turn over as they rise
       if (this.smokeDrag[i]) { const dr = Math.exp(-3.2 * dt); S.vel[o] *= dr; S.vel[o + 2] *= dr; S.vel[o + 1] *= Math.exp(-1.2 * dt); }
       S.pos[o] += S.vel[o] * dt; S.pos[o + 1] += S.vel[o + 1] * dt; S.pos[o + 2] += S.vel[o + 2] * dt;
       const t = Math.max(0, S.life[i] / S.max[i]), T = this.smokeTint;
@@ -585,8 +890,8 @@ export class FxPool {
     this.breathHeat = Math.max(0, this.breathHeat - dt * 4);
     this.stats.flame = nf; if (nf > this.maxSeen.flame) this.maxSeen.flame = nf;
     F.p.visible = nf > 0; S.p.visible = ns > 0;
-    if (nf > 0) { const a = F.p.geometry.attributes; a.position.needsUpdate = true; a.aColor.needsUpdate = true; a.aSize.needsUpdate = true; }
-    if (ns > 0) { const a = S.p.geometry.attributes; a.position.needsUpdate = true; a.aColor.needsUpdate = true; a.aSize.needsUpdate = true; }
+    if (nf > 0) { const a = F.p.geometry.attributes; a.position.needsUpdate = true; a.aColor.needsUpdate = true; a.aSize.needsUpdate = true; a.aSeed.needsUpdate = true; }
+    if (ns > 0) { const a = S.p.geometry.attributes; a.position.needsUpdate = true; a.aColor.needsUpdate = true; a.aSize.needsUpdate = true; a.aSeed.needsUpdate = true; }
   }
 
   // ---------- event routing ----------
@@ -594,7 +899,7 @@ export class FxPool {
     if (p.outcome === Outcome.HIT || p.outcome === Outcome.GUARDBREAK) {
       if (p.surface === Surface.BLADE || p.surface === Surface.ARMOR) this.burstSparks(p.pos, p.normal, 0.6);
       else this.burstBlood(p.pos, p.normal, p.damage >= 25 ? 1.3 : 1);
-      if (p.pos && p.pos.y < 1.2 && Math.abs(p.pos.z) < 6.7) this.splash(p.pos.x, p.pos.z, 0.6);
+      if (this.wet !== false && p.pos && p.pos.y < 1.2 && Math.abs(p.pos.z) < 6.7) this.splash(p.pos.x, p.pos.z, 0.6);
     } else if (p.outcome === Outcome.BLOCKED) this.burstSparks(p.pos, p.normal, 0.5);
   }
 
@@ -611,7 +916,7 @@ export class FxPool {
   // dt = presentation dt (Loop passes dt * presentScale)
   update(dt) {
     if (dt <= 0) return;
-    this._updateSparks(dt); this._updateSprites(dt); this._updateStreaks(dt); this._updateAuras(dt); this._updateShock(dt); this._updateGhosts(dt);
+    this._updateSparks(dt); this._updateSprites(dt); this._updateStreaks(dt); this._updateAuras(dt); this._updateShock(dt); this._updateChevrons(dt); this._updateFlares(dt); this._updateRifts(dt); this._updateGhosts(dt);
     this._updateFlame(dt);
   }
 
@@ -620,6 +925,9 @@ export class FxPool {
     for (const P of [this.flame, this.smoke]) { P.life.fill(0); P.col.fill(0); P.p.visible = false; }
     this.flameAcc = this.smokeAcc = 0; this.breathHeat = 0;
     for (const s of this.shocks) { s.t = -1; s.r.visible = false; }
+    for (const c of this.chevrons) { c.t = -1; c.g.visible = false; }
+    for (const f of this.flares) { f.t = -1; f.g.visible = false; }
+    this.clearRifts();
   }
 
   // Make every pooled object visible for one compileAsync pass (three compiles only traverseVisible), then restore.
@@ -629,7 +937,7 @@ export class FxPool {
   }
   prewarmEnd() { for (let i = 0; i < this._pw.length; i += 2) this._pw[i].visible = this._pw[i + 1]; this._pw = null; }
 
-  counts() { return { ...this.stats, maxSeen: { ...this.maxSeen } }; }
+  counts() { if (!this.mistCalls) this.mistCalls = new Int32Array(5); return { ...this.stats, maxSeen: { ...this.maxSeen }, mist: Array.from(this.mistCalls) }; }
   resetMax() { for (const k in this.maxSeen) this.maxSeen[k] = 0; }
 
   dispose() {
@@ -641,6 +949,9 @@ export class FxPool {
     for (const m of [this.sparkMesh, this.sprites, this.streakMesh, this.flame.p, this.smoke.p]) { geos.add(m.geometry); mats.add(m.material); }
     for (const a of this.auras) { mats.add(a.rm); mats.add(a.dm); }
     for (const s of this.shocks || []) mats.add(s.m);
+    for (const c of this.chevrons || []) mats.add(c.m);
+    for (const f of this.flares || []) mats.add(f.m); if (this._flareGeo) geos.add(this._flareGeo);
+    for (const r of this.rifts || []) mats.add(r.m); if (this._riftGeo) geos.add(this._riftGeo);
     for (const o of this.ghostOwners) for (const set of o.ghosts) for (const e of set) { mats.add(e.mat); if (e.skel.boneTexture) e.skel.boneTexture.dispose(); }
     geos.forEach((g) => g.dispose()); mats.forEach((m) => m.dispose());
     this.scene.remove(this.group);

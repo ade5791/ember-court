@@ -5,7 +5,7 @@
 // iPhone Safari has no element fullscreen: there the buttons open an "Add to Home Screen" tip instead (the web app
 // manifest launches the home-screen copy full screen). Installed home-screen copies hide both (already full screen).
 const CSS = `
-.ec-fs{position:fixed;z-index:30;left:calc(env(safe-area-inset-left,0px) + 18px);top:calc(env(safe-area-inset-top,0px) + 44px);
+.ec-fs{position:fixed;z-index:30;left:calc(env(safe-area-inset-left,0px) + 18px);top:calc(env(safe-area-inset-top,0px) + 66px);
   width:40px;height:40px;padding:0;display:flex;align-items:center;justify-content:center;cursor:pointer;
   background:rgba(20,8,4,.72);border:1px solid rgba(255,190,120,.85);border-radius:4px;color:#fff1de;touch-action:manipulation;
   box-shadow:0 0 12px rgba(196,58,26,.45)}

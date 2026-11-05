@@ -29,6 +29,9 @@ export const CAMERA_LIMITS = Object.freeze({
 });
 // C13 boss occlusion: when the wyvern's body sits on the camera->hero line, swing the orbit (and lift) so the hero
 // stays readable. Decided from the UN-swung pose, so the decision cannot oscillate with its own correction.
+// v2.16 authored-shot guards: hand back when the clearance solve pulls the shot in more than pullMax metres, and keep
+// the hero chest within `cone` radians of the look axis (0.38 rad ~ 22 deg, inside the 27.5 deg half-FOV).
+export const CINE_GUARD = Object.freeze({ pullMax: 2.0, lagIn: 0.12, cone: 0.38 });
 export const OCCLUSION = Object.freeze({ radius: 2.3, swing: 0.75, lift: 1.4, lag: 0.30, heroY: 1.1 });
 
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _pivot = new THREE.Vector3(), _desired = new THREE.Vector3();
@@ -82,7 +85,7 @@ export class CameraDirector extends BaseCameraRig {
     this.clock = 0;
     this.minClearance = Infinity; // running C5 stat (harness reads and resets)
     this.lastClearance = Infinity;
-    this.pulledIn = 0;
+    this.pulledIn = 0; this.cineBlock = 0; this.cineGuardFrames = 0;
     this.cineKind = CINE.NONE; this.cineT = 0; this.cineW = 0; this.cineYaw0 = 0; this.cineCount = 0;
     this.cineFocus = new THREE.Vector3();   // owner (main) writes the subject point each frame
     this.cineLog = [0, 0, 0, 0, 0];
@@ -116,6 +119,8 @@ export class CameraDirector extends BaseCameraRig {
   }
   onParry(p) { if (p && p.perfect) this.deflect(); }
   deflect() { if (this.push > 0.05) return; this.push = 1; this.pushT = 0; this.pushDist = 0.18; this.pushIn = 0.10; this.pushOut = 0.45; }
+  // v2.15 Ember Trigger activation: quick push toward the hero (in ~0.1 s, out ~0.4 s), never cuts a stronger push
+  triggerPush() { if (this.push > 0.3) return; this.push = 1; this.pushT = 0; this.pushDist = 0.55; this.pushIn = 0.1; this.pushOut = 0.4; }
   onBossPhase() { this.push = 1; this.pushT = 0; this.pushDist = 0.8; this.pushIn = 0.5; this.pushOut = 1.4; }
   phantomStep(frames = 18) { this.phantom = 1; this.phantomT = frames / 60; }
 
@@ -126,7 +131,7 @@ export class CameraDirector extends BaseCameraRig {
     if (this.cineKind !== CINE.NONE && this.cineT < CINE_SHOT[this.cineKind].dur && pri[kind] < pri[this.cineKind]) return;
     // start from where the gameplay camera already looks from, so the shot grows out of the current view
     if (this.cineKind === CINE.NONE || this.cineW < 0.05) this.cineYaw0 = Math.atan2(this.position.x - this.cineFocus.x, this.position.z - this.cineFocus.z);
-    this.cineKind = kind; this.cineT = 0; this.cineCount++; this.cineLog[kind]++;
+    this.cineKind = kind; this.cineT = 0; this.cineCount++; this.cineLog[kind]++; this.cineLatch = false;
     this.push = 0; this.trauma = Math.min(this.trauma, 0.2);
   }
   get cineActive() { return this.cineKind !== CINE.NONE; }
@@ -244,7 +249,8 @@ export class CameraDirector extends BaseCameraRig {
     }
     let cw = 0;
     if (this.cineKind !== CINE.NONE) {
-      cw = this._cinePose(dt);
+      // v2.16 blocked-shot handback: an authored shot the walls pull in hard fades back to the gameplay rig
+      cw = this._cinePose(dt) * (1 - this.cineBlock);
       if (cw > 0) {
         _desired.lerp(_cPos, cw); _look.lerp(_cLook, cw); _pivot.lerp(_cPiv, cw);
         // gameplay orbit follows the shot so the hand-back has no whip
@@ -253,6 +259,28 @@ export class CameraDirector extends BaseCameraRig {
     }
     this._cw = cw;
     this._resolveClearance(_pivot, _desired);
+    if (this.cineKind !== CINE.NONE) {
+      // latched per shot: fading the shot shrinks the pull, which would otherwise un-block it and oscillate
+      if (this.pulledIn > CINE_GUARD.pullMax && this.cineW > 0.3) this.cineLatch = true;
+      this.cineBlock += ((this.cineLatch ? 1 : 0) - this.cineBlock) * smoothingAlpha(CINE_GUARD.lagIn, dt);
+    } else { this.cineBlock = 0; this.cineLatch = false; }
+    // v2.16 hero-in-frame guard (authored shots only): if the hero chest sits more than CINE_GUARD.cone off the
+    // look axis, turn the look toward the hero just enough to bring it back inside. Gameplay shots already frame it.
+    if (cw > 0 && this.hero) {
+      const hp = this.hero.position;
+      _w.set(hp.x - _desired.x, hp.y + OCCLUSION.heroY - _desired.y, hp.z - _desired.z);
+      _v.subVectors(_look, _desired);
+      const lh = _w.length(), ll = _v.length();
+      if (lh > 1e-3 && ll > 1e-3) {
+        const ang = Math.acos(clamp(_w.dot(_v) / (lh * ll), -1, 1));
+        if (ang > CINE_GUARD.cone) {
+          const t = (1 - CINE_GUARD.cone / ang) * cw;
+          _v.multiplyScalar(1 / ll).lerp(_w.multiplyScalar(1 / lh), t).normalize();
+          _look.copy(_desired).addScaledVector(_v, ll);
+          this.cineGuardFrames++;
+        }
+      }
+    }
     if (this.occluder.active && cw === 0 && this._segOcc(this.occluder.position, _desired.x, _desired.y, _desired.z, this.hero.position) !== 0) this.occFrames++;
 
     // FOV kick (6 f in/out envelope), deflect push-in FOV, phantom FOV +4
@@ -326,7 +354,10 @@ export class CameraDirector extends BaseCameraRig {
     const L = CAMERA_LIMITS;
     let lim = p.y < L.wallTop + L.margin ? L.innerClamp : L.outerClamp;
     if (this._cw > 0) lim += (Math.min(lim, L.cineClamp) - lim) * Math.min(1, this._cw * 1.5);
-    p.x = clamp(p.x, -lim, lim); p.z = clamp(p.z, -lim, lim);
+    // v2.20: limits are authored for the 16 m square arenas; other arenas (the 9 x 60 m road) keep the same offsets
+    // from their own wall faces, per axis. Square arenas: hx = hz = 16 -> identical to before.
+    const C = this.colliders, off = lim - 16, lx = (C && C.halfX ? C.halfX : 16) + off, lz = (C && C.halfZ ? C.halfZ : 16) + off;
+    p.x = clamp(p.x, -lx, lx); p.z = clamp(p.z, -lz, lz);
     if (p.y > L.ceiling) p.y = L.ceiling;
   }
 
@@ -334,7 +365,7 @@ export class CameraDirector extends BaseCameraRig {
   // next update onto whatever shot the new situation calls for.
   reset(heroYaw = 0) {
     this.trauma = 0; this.kick = 0; this.kickT = 0; this.push = 0; this.pushT = 0; this.pushDist = 0;
-    this.phantom = 0; this.phantomT = 0; this.pulledIn = 0; this.occYaw = 0; this.occSign = 0; this._cw = 0;
+    this.phantom = 0; this.phantomT = 0; this.pulledIn = 0; this.occYaw = 0; this.occSign = 0; this._cw = 0; this.cineBlock = 0;
     this.cineKind = CINE.NONE; this.cineT = 0; this.cineW = 0;
     this.orbitYaw = heroYaw; this.orbitPitch = 0;
     this.target = null; this.lockOn = false; this.shot = this.prevShot = SHOT.EXPLORE;

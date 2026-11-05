@@ -13,19 +13,29 @@ const VERB_STATS = {
   E_SLASH: { dmg: 14, posture: 22, lunge: 0.3, half: 0.9 },
   E_THRUST: { dmg: 18, posture: 26, lunge: 0.8, half: 0.45 },
   E_COMBO: { dmg: 12, posture: 18, lunge: 0.6, half: 0.8 },
+  // Stage 2 Shadow Warden only. C_CHARGED is a RED (unblockable, undeflectable) lunge: dodge it. C_SLAM is a
+  // wide ground slam with a 2.1 m shock radius: deflectable, punishes standing at the ring.
+  C_CHARGED: { dmg: 30, posture: 40, lunge: 2.2, half: 0.7, art: ART.RED },
+  C_SLAM: { dmg: 26, posture: 34, lunge: 0.5, half: 1.6, reach: 2.1 },
 };
-const VERB_ENUM = { E_SLASH: Verb.E_SLASH, E_THRUST: Verb.E_THRUST, E_COMBO: Verb.E_COMBO };
+const VERB_ENUM = { E_SLASH: Verb.E_SLASH, E_THRUST: Verb.E_THRUST, E_COMBO: Verb.E_COMBO, C_CHARGED: Verb.C_CHARGED, C_SLAM: Verb.C_GROUND_SLAM };
+// Stage 2 elite profile (docs/STAGE2_SPEC.md). Phase 2 below half HP: shorter waits, follow-up chains.
+export const WARDEN = Object.freeze({ HP: 420, RING: 3.4, POSTURE: 150, ENRAGE_FRAC: 0.5, GUARD_P: 0.45, CHAIN_P: 0.5,
+  VERBS: ['E_SLASH', 'E_THRUST', 'E_COMBO', 'C_CHARGED', 'C_SLAM'], SPAWN: [0, -6], SCALE: 1.12 });
 export const DUELIST = Object.freeze({ HP: 70, POSTURE: 60, RADIUS: SIM.CAPSULE_RADIUS, RING: 2.6, WALK: 1.5, RUN: 3.4,
   HIT_F: 18, STAGGER_F: 100, DEATH_F: 110, TURN: 4.0 });
 const TAU = Math.PI * 2;
 function wrap(a) { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI; }
 
 export class DuelistSim {
-  constructor({ id, timing, rng, colliders = null, x = 0, z = 0, aggression = 1 }) {
+  constructor({ id, timing, rng, colliders = null, x = 0, z = 0, aggression = 1, elite = false }) {
     this.id = id; this.rng = rng; this.colliders = colliders; this.aggression = aggression;
+    this.elite = elite; this.phase = 1; this.phaseSink = null;
+    this.ring = elite ? WARDEN.RING : DUELIST.RING;
+    this.hpMax = elite ? WARDEN.HP : DUELIST.HP; this.postureMax = elite ? WARDEN.POSTURE : DUELIST.POSTURE;
     this.verbs = {};
-    for (const k of ['E_SLASH', 'E_THRUST', 'E_COMBO']) {
-      const t = timing.verbs[k], v = { name: k, clip: t.clip, reach: t.contactDistM || 1.4, ...VERB_STATS[k] };
+    for (const k of (elite ? WARDEN.VERBS : ['E_SLASH', 'E_THRUST', 'E_COMBO'])) {
+      const t = timing.verbs[k], v = { name: k, clip: t.clip, reach: t.contactDistM || 1.4, art: ART.NORMAL, ...VERB_STATS[k] };
       v.phases = t.phases.map((p) => ({ ...p })); let f = 0; v.active = [];
       for (const p of v.phases) { p.start = f; if (p.phase.startsWith('ACTIVE')) v.active.push([f, f + p.specF]); f += p.specF; }
       v.total = f; v.startup = v.phases[0].specF;
@@ -33,7 +43,8 @@ export class DuelistSim {
     }
     this.radius = DUELIST.RADIUS;
     this.x = x; this.z = z; this.yaw = 0; this.prevX = x; this.prevZ = z; this.prevYaw = 0;
-    this.hp = DUELIST.HP; this.posture = 0;
+    this.hp = this.hpMax; this.posture = 0;
+    this.knockX = 0; this.knockZ = 0; this.knockF = 0;   // v2.22 sweep knockback (metres per frame, frames left)
     this.state = DUEL_STATE.APPROACH; this.f = 0; this.verb = null; this.actionId = 0; this.hitSeg = -1;
     this.spaceDir = rng.float() < 0.5 ? 1 : -1; this.spaceF = 0; this.waitF = 40 + (rng.float() * 40 | 0);
     this.wantsToken = false; this.hasToken = false; this.speed = 0; this.guard = false;
@@ -87,7 +98,7 @@ export class DuelistSim {
         break;
       case DUEL_STATE.APPROACH: {
         this._turn(hero.x, hero.z, DUELIST.TURN);
-        if (dist > DUELIST.RING + 0.4) { const s = DUELIST.RUN / 60; mx = this.forwardX() * s; mz = this.forwardZ() * s; anim = 'e_run'; this.speed = DUELIST.RUN; }
+        if (dist > this.ring + 0.4) { const s = DUELIST.RUN / 60; mx = this.forwardX() * s; mz = this.forwardZ() * s; anim = 'e_run'; this.speed = DUELIST.RUN; }
         else { this.state = DUEL_STATE.SPACE; this.f = 0; }
         break;
       }
@@ -98,11 +109,12 @@ export class DuelistSim {
         if (this.hasToken && this.wantsToken) {
           // close in, then commit
           const v = this._pickVerb(dist);
-          if (dist <= v.reach + 0.9) { this._startAttack(v.name); break; }
+          // the red charge is a lunge: it commits from lunge range, everything else closes to reach first
+          if (dist <= v.reach + 0.9 + (v.name === 'C_CHARGED' ? v.lunge : 0)) { this._startAttack(v.name); break; }
           const s = DUELIST.RUN / 60; mx = nx * s; mz = nz * s; anim = 'e_run';
         } else {
           // circle at the ring; drift radially toward the ring distance
-          const radial = (dist - DUELIST.RING) * 0.04;
+          const radial = (dist - this.ring) * 0.04;
           if (++this.spaceF > 150 + (this.id % 3) * 30) { this.spaceF = 0; this.spaceDir = -this.spaceDir; }
           const s = DUELIST.WALK / 60;
           mx = (-nz * this.spaceDir) * s + nx * Math.max(-s, Math.min(s, radial));
@@ -126,14 +138,21 @@ export class DuelistSim {
       }
       case DUEL_STATE.RECOVER:
         this._turn(hero.x, hero.z, DUELIST.TURN * 0.5);
-        if (this.f >= 20) { this.state = DUEL_STATE.SPACE; this.f = 0; this.waitF = (50 + this.rng.float() * 60) / this.aggression | 0; }
+        if (this.f >= 20) {
+          // phase-2 warden: a follow-up (thrust or the red charge) straight out of recovery, still telegraphed
+          if (this.elite && this.phase >= 2 && !heroDead && this.rng.float() < WARDEN.CHAIN_P && dist < 4.5) {
+            this._startAttack(dist > 2.4 ? 'C_CHARGED' : 'E_THRUST'); this.hasToken = true; break;
+          }
+          this.state = DUEL_STATE.SPACE; this.f = 0; this.waitF = (50 + this.rng.float() * 60) / this.aggression | 0;
+        }
         break;
     }
     // integrate + collide (boulders and walls); hero push-out is handled by the director (actor separation)
+    if (this.knockF > 0) { const k = this.knockF / 10; mx += this.knockX * k; mz += this.knockZ * k; this.knockF--; }
     this.x += mx; this.z += mz;
     if (this.colliders) { const r = this.colliders.resolveCapsule(this.x, this.z, this.radius, 0.0, SIM.ACTOR_HEIGHT); this.x = r.x; this.z = r.z; }
-    const lim = SIM.ARENA_HALF - this.radius;
-    this.x = Math.max(-lim, Math.min(lim, this.x)); this.z = Math.max(-lim, Math.min(lim, this.z));
+    const C = this.colliders, limX = (C ? C.halfX : SIM.ARENA_HALF) - this.radius, limZ = (C ? C.halfZ : SIM.ARENA_HALF) - this.radius;
+    this.x = Math.max(-limX, Math.min(limX, this.x)); this.z = Math.max(-limZ, Math.min(limZ, this.z));
     if (this.state !== DUEL_STATE.APPROACH) this.speed = Math.hypot(this.x - this.prevX, this.z - this.prevZ) * 60;
     // animation selection for presentation (clip + time); attack clips are time-warped from the table
     const A = this.anim;
@@ -144,6 +163,12 @@ export class DuelistSim {
   }
 
   _pickVerb(dist) {
+    if (!this._next && this.elite) {
+      const r = this.rng.float();
+      // far: the red charge closes distance; near: slam or the strings
+      this._next = dist > 3.0 ? (r < 0.55 ? 'C_CHARGED' : 'E_THRUST')
+        : (r < 0.25 ? 'E_SLASH' : r < 0.5 ? 'E_COMBO' : r < 0.72 ? 'C_SLAM' : r < 0.88 ? 'E_THRUST' : 'C_CHARGED');
+    }
     if (!this._next) {
       const r = this.rng.float();
       this._next = dist > 2.2 ? (r < 0.6 ? 'E_THRUST' : 'E_COMBO') : (r < 0.45 ? 'E_SLASH' : r < 0.75 ? 'E_COMBO' : 'E_THRUST');
@@ -153,6 +178,8 @@ export class DuelistSim {
 
   _startAttack(name) {
     this.state = DUEL_STATE.ATTACK; this.verb = name; this.f = 0; this.actionId++; this.hitSeg = -1; this._next = null;
+    // per-verb start counts (QA reads these instead of sampling state; not hashed, no gameplay effect)
+    (this.verbCounts || (this.verbCounts = {}))[name] = (this.verbCounts[name] || 0) + 1;
     if (this.telegraphSink) this.telegraphSink(this, this.verbs[name]);
   }
 
@@ -163,8 +190,8 @@ export class DuelistSim {
     if (Math.acos(Math.max(-1, Math.min(1, fwd))) > v.half) return;
     this.hitSeg = seg;
     h.stepToward = 0;
-    const res = resolveDefence(ART.NORMAL, h, false);
-    const R = this.rec;
+    const res = resolveDefence(v.art, h, false);
+    const R = this.rec; R.art = v.art;
     R.actionId = this.id * 100000 + this.actionId * 4 + seg; R.targetId = h.id; R.verb = VERB_ENUM[v.name];
     R.outcome = res.outcome; R.perfect = res.perfect; R.effect = res.effect; R.frame = frame;
     R.damage = res.outcome === Outcome.HIT ? v.dmg : 0;
@@ -173,8 +200,8 @@ export class DuelistSim {
     R.normal.x = -dx / dist; R.normal.y = 0.2; R.normal.z = -dz / dist; R.tx = h.x; R.tz = h.z;
     if (res.outcome === Outcome.PARRIED) {
       // deflected: posture damage to the duelist, perfect deflect staggers outright
-      this.posture += res.perfect ? DUELIST.POSTURE : 30;
-      if (this.posture >= DUELIST.POSTURE) { this.state = DUEL_STATE.STAGGER; this.f = 0; this.hasToken = false; }
+      this.posture += res.perfect ? (this.elite ? 48 : DUELIST.POSTURE) : 30;
+      if (this.posture >= this.postureMax) { this.state = DUEL_STATE.STAGGER; this.f = 0; this.hasToken = false; }
       else { this.state = DUEL_STATE.RECOVER; this.f = -12; this.hasToken = false; }
     }
     if (this.heroSink) this.heroSink(R);
@@ -186,15 +213,25 @@ export class DuelistSim {
     // guard: a spacing duelist facing the hero blocks the first light hit of a string (posture still builds)
     const toHx = hero.x - this.x, toHz = hero.z - this.z, l = Math.hypot(toHx, toHz) || 1;
     const facing = (toHx * this.forwardX() + toHz * this.forwardZ()) / l > 0.5;
-    const blocks = this.state === DUEL_STATE.SPACE && facing && v.name === 'LIGHT_1' && this.rng.float() < 0.5;
+    // warden: guards any light from the front while spacing (not just the opener) - break posture or flank him
+    const guardable = this.elite ? v.name !== 'HEAVY' : v.name === 'LIGHT_1';
+    const blocks = this.state === DUEL_STATE.SPACE && facing && guardable && this.rng.float() < (this.elite ? WARDEN.GUARD_P : 0.5);
     const stag = this.state === DUEL_STATE.STAGGER;
     let dmg = blocks ? 0 : Math.round(v.dmg * (stag ? 2 : 1));
     this.posture += blocks ? v.posture * 1.5 : v.posture;
     this.hp = Math.max(0, this.hp - dmg);
     this.lastHitBlocked = blocks;
+    if (v.knock > 0 && !blocks && this.hp > 0) {   // sweep shove away from the hero: sum of k/10 over 10 frames = 5.5 x per-frame
+      this.knockX = -toHx / l * v.knock / 5.5; this.knockZ = -toHz / l * v.knock / 5.5; this.knockF = 10;
+    }
     if (this.hp <= 0) { this.state = DUEL_STATE.DEAD; this.f = 0; this.hasToken = false; return dmg; }
-    if (!stag && this.posture >= DUELIST.POSTURE) { this.state = DUEL_STATE.STAGGER; this.f = 0; this.hasToken = false; }
-    else if (!stag && !blocks && (this.state !== DUEL_STATE.ATTACK || v.name === 'HEAVY')) { this.state = DUEL_STATE.HIT; this.f = 0; this.hasToken = false; }
+    if (this.elite && this.phase === 1 && this.hp <= this.hpMax * WARDEN.ENRAGE_FRAC) {
+      this.phase = 2; this.aggression *= 1.6; if (this.phaseSink) this.phaseSink(this);
+    }
+    // hyper armour: the warden's C_ verbs do not flinch (only posture break stops them)
+    const armoured = this.elite && this.state === DUEL_STATE.ATTACK && this.verb && this.verb.startsWith('C_');
+    if (!stag && this.posture >= this.postureMax) { this.state = DUEL_STATE.STAGGER; this.f = 0; this.hasToken = false; }
+    else if (!stag && !blocks && !armoured && (this.state !== DUEL_STATE.ATTACK || v.name === 'HEAVY')) { this.state = DUEL_STATE.HIT; this.f = 0; this.hasToken = false; }
     return dmg;
   }
 }

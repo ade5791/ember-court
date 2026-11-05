@@ -1,4 +1,4 @@
-﻿// main - the shipped game page (index.html). Owner: game. Wires GameSim (deterministic run) to the render stack,
+// main - the shipped game page (index.html). Owner: game. Wires GameSim (deterministic run) to the render stack,
 // input layer, touch overlay, camera director, fx pool and HUD. Visuals stay downstream of sim events.
 // Query: ?seed=N  ?q=low|medium|high  ?start=title|wave1|wave2|boss  ?god=1  ?bot=1 (autopilot)  ?touch=0|1  ?rm=1
 import * as THREE from 'three';
@@ -15,17 +15,29 @@ import { World } from '../world/World.js';
 import { Colliders } from '../world/Colliders.js';
 import { FoundryStage } from '../world/FoundryStage.js';
 import { makeFoundryEnvironment, setFoundryLook, restoreGorgeLook } from '../render/FoundryLook.js';
+import { ShrineStage } from '../world/ShrineStage.js';
+import { makeShrineEnvironment, setShrineLook } from '../render/ShrineLook.js';
 import { CameraDirector, CINE, CINE_NAMES } from '../camera/CameraDirector.js';
 import { BossVerb, ActorKind } from '../shared/enums.js';
-import { FxPool, TELEGRAPH, MIST } from '../fx/FxPool.js';
+import { FxPool, TELEGRAPH, MIST, FX_CAPS } from '../fx/FxPool.js';
+import { WardenMotion } from './WardenMotion.js';
+import { AmbientMotes } from '../fx/AmbientMotes.js';
+import { PostStack } from '../render/PostStack.js';
+import { STAGE_RIM, makeRimUniform, addRimToModel } from '../render/Rim.js';
 import { Input } from '../player/Input.js';
 import { TouchOverlay } from '../ui/TouchOverlay.js';
 import { Hud } from '../ui/Hud.js';
 import { Fullscreen } from '../ui/Fullscreen.js';
-import { GameSim, GameState, HERO_STATE, DUEL_STATE, BRAIN_STATE, ART, WAVES, GAME_STATE_NAMES } from './GameSim.js';
-import { HERO_DODGE, HERO_FINISHER_F, HERO_FINISHER_CLIP, STEP_DIR, STEP_CLIP, HERO_CHARGE, GREATSWORD, scalePhases } from './HeroSim.js';
+import { GameSim, GameState, HERO_STATE, DUEL_STATE, BRAIN_STATE, ART, WAVES, GAME_STATE_NAMES, WARDEN_ID, ROUTE, FLOW_F } from './GameSim.js';
+import { RoadMap } from '../ui/RoadMap.js';
+import { RoadStage } from '../world/RoadStage.js';
+import { makeRoadEnvironment, setRoadLook, roadSunDir, ROAD_LOOK } from '../render/RoadLook.js';
+import { ROAD, ROAD_AMBUSH, roadX, makeRoadDoc } from '../shared/road.js';
+import { HERO_DODGE, HERO_FINISHER_F, HERO_FINISHER_CLIP, STEP_DIR, STEP_CLIP, HERO_CHARGE, GREATSWORD, scalePhases, HERO_SNATCH, HERO_TRIGGER, HERO_RIFT, WEAPONS, HERO_SWEEP } from './HeroSim.js';
+import { STYLE_RANKS, STYLE_TITLES } from './StyleMeter.js';
+const SNATCH_SPAN = HERO_SNATCH.STARTUP + HERO_SNATCH.TRAVEL_MAX + HERO_SNATCH.RECOVER;
 import { buildQuickstep, quickstepClipTime } from '../shared/quickstep.js';
-import { DUELIST } from './DuelistSim.js';
+import { DUELIST, WARDEN } from './DuelistSim.js';
 import { Inertializer, PoseJerk } from './Inertia.js';
 import { smoothClips } from './ClipSmooth.js';
 import { buildWarp } from './TimeWarp.js';
@@ -85,25 +97,48 @@ const foundryDoc = await (await fetch(ROOT + 'assets/foundry-colliders.json')).j
 const foundryColliders = new Colliders(foundryDoc);
 const foundry = new FoundryStage().build({ scene, quality, rng: rootRng, doc: foundryDoc });
 scene.add(foundry.root);
+// Stage 2 Dusk Shrine: same pattern (built hidden at load, own colliders, own look on the same light slots).
+const shrineDoc = await (await fetch(ROOT + 'assets/shrine-colliders.json')).json();
+const shrineColliders = new Colliders(shrineDoc);
+const shrine = new ShrineStage().build({ scene, quality, rng: rootRng, doc: shrineDoc });
+scene.add(shrine.root);
+// v2.20 road between bosses: CC-BY Sketchfab kit packed in Blender (tools/road/bl_pack.py), built hidden at load.
+// ?road=0 keeps the old direct stage jump (sim never enters ROAD without the road colliders).
+const ROAD_ON = qs.get('road') !== '0';
+const roadColliders = ROAD_ON ? new Colliders(makeRoadDoc()) : null;
+let roadStage = null;
+if (ROAD_ON) {
+  const roadKit = await new GLTFLoader().loadAsync(ROOT + 'assets/road/road-kit.glb');
+  const roadSpire = await new GLTFLoader().loadAsync(ROOT + 'assets/road/spire.glb').catch(() => null);   // v2.22 S5
+roadStage = new RoadStage().build({ scene, quality, rng: rootRng.stream('road-art'), kit: roadKit, spire: roadSpire });
+  if (roadStage.missing.length) console.warn('road kit nodes missing', roadStage.missing);
+}
 const arenaRig = { scene, renderer, sun: look.sun, hemi: look.hemi, points: world.lights, slots: foundryDoc.foundry.lightSlots,
-  sky: look.sky, envRT: makeFoundryEnvironment(renderer) };
+  shrineSlots: shrineDoc.shrine.lightSlots, sky: look.sky, envRT: makeFoundryEnvironment(renderer), shrineEnv: makeShrineEnvironment(renderer),
+  roadEnv: ROAD_ON ? makeRoadEnvironment(renderer) : null };
+const ARENA_COLLIDERS = { ford: fordColliders, shrine: shrineColliders, foundry: foundryColliders, road: roadColliders };
 let colliders = fordColliders, arena = 'ford';
+var stageFinish = null;   // set once the post stack + rim exist (v2.13 finish)
+const STAGE_FILL = { ford: [0xffe2c4, 0.55], shrine: [0xd6d2ff, 0.34], foundry: [0xffe6cc, 0.46], road: [0xffe8d0, 0.42] };
 function setArena(name) {
   if (name === arena) return;
-  arena = name; const fd = name === 'foundry';
-  world.root.visible = !fd; if (world.water) world.water.mesh.visible = !fd; if (world.props) world.props.group.visible = !fd;
-  foundry.setVisible(fd); colliders = fd ? foundryColliders : fordColliders;
+  arena = name; const fd = name === 'foundry', sh = name === 'shrine', ford = name === 'ford', rd = name === 'road';
+  world.root.visible = ford; if (world.water) world.water.mesh.visible = ford; if (world.props) world.props.group.visible = ford;
+  foundry.setVisible(fd); shrine.setVisible(sh); if (roadStage) roadStage.setVisible(rd); colliders = ARENA_COLLIDERS[name];
   cam.colliders = colliders;   // camera clearance must test the active arena (setArena is only called after cam init)
-  if (fd) setFoundryLook(arenaRig); else { restoreGorgeLook(arenaRig); for (const L of world.lights) L.position.copy(L.userData.fordPos); }
+  if (typeof fx !== 'undefined') fx.wet = ford;   // no river splashes on stone or steel
+  restoreGorgeLook(arenaRig); for (const L of world.lights) L.position.copy(L.userData.fordPos);
+  if (fd) setFoundryLook(arenaRig); else if (sh) setShrineLook(arenaRig); else if (rd) setRoadLook(arenaRig);
   renderer.shadowMap.needsUpdate = true;
+  if (stageFinish) stageFinish(name);   // var (not a hoisted function): post/rim do not exist yet during early setArena
 }
 for (const L of world.lights) L.userData.fordPos = L.position.clone();
 progress(0.35);
 
 // ------------------------------------------------------------------ actors
 const loader = new GLTFLoader();
-const [heroGltf, enemyGltf, bossGltf, bossManifest, timing, heroCombat, heroLunge, gauntletGltf, gauntletManifest] = await Promise.all([
-  loader.loadAsync(ROOT + 'characters/hero/out/character_gs.glb'),
+const [heroGltf, enemyGltf, bossGltf, bossManifest, timing, heroCombat, heroLunge, gauntletGltf, gauntletManifest, heroAttacks] = await Promise.all([
+  loader.loadAsync(ROOT + 'characters/hero/out/character_v222.glb'),   // v2.22: gs set + Blender-authored gs_sweep / gs_sweep_rev / gs_rift
   loader.loadAsync(ROOT + 'characters/enemy/out/character.glb'),
   loader.loadAsync(ROOT + 'characters/boss/wyvern.glb'),
   fetch(ROOT + 'characters/boss/wyvern.manifest.json').then((r) => r.json()),
@@ -112,6 +147,7 @@ const [heroGltf, enemyGltf, bossGltf, bossManifest, timing, heroCombat, heroLung
   fetch(ROOT + 'motion/mb/hero.lunge.json').then((r) => (r.ok ? r.json() : null)).catch(() => null),
   loader.loadAsync(ROOT + 'characters/gauntlet/gauntlet.glb'),
   fetch(ROOT + 'characters/gauntlet/gauntlet.manifest.json').then((r) => r.json()),
+  fetch(ROOT + 'motion/mb/hero.v222.attacks.json').then((r) => (r.ok ? r.json() : null)).catch(() => null),
 ]);
 // C16: authored clips are 30 Hz LINEAR keys -> resample to 60 Hz monotone cubic (keys/extremes/holds kept exactly,
 // velocity continuous through every key). ?smooth=0 keeps the raw tracks for A/B.
@@ -227,7 +263,26 @@ function addGreatSword(parent, s, bladeMat = steel) {
   for (const m of [blade, inlay, point, guard, grip, pommel]) { m.castShadow = true; socket.add(m); }
   const tip = new THREE.Object3D(); tip.position.y = 1.6; socket.add(tip);
   const hilt = new THREE.Object3D(); hilt.position.y = 0.12; socket.add(hilt);
-  return { tip, hilt, socket };
+  return { tip, hilt, socket, blade, inlay, point, guard };
+}
+// v2.19 boss-drop blades: the same great-sword rig (same grip, same left-hand IK target, same programs) re-dressed
+// per weapon - blade length follows the sim's REACH delta, colours only (no new maps, so no new program keys).
+// len: blade metres; steel/inlay/guard: albedo / emissive colours. Index = HeroSim WEAPON id.
+const BLADE_LOOK = [
+  null,
+  { len: 1.36, width: 1.0, steel: 0xc9ccd2, inlay: 0xff5a1a, guard: 0xb8863b },   // GREAT SWORD
+  { len: 1.41, width: 1.18, steel: 0x8c8a86, inlay: 0xff3010, guard: 0x5a2a1c },  // WYVERN FANG: scorched bone-grey, hotter core
+  { len: 1.66, width: 0.72, steel: 0xd8dce4, inlay: 0xa070ff, guard: 0x2a1a30 },  // DUSK ODACHI: long thin blade, violet edge
+  { len: 1.51, width: 1.05, steel: 0xe4eef8, inlay: 0x58c8ff, guard: 0x8aa0b8 },  // FROSTBRAND: chrome, ice-blue core
+];
+function dressGreatSword(s, w, steelMat, inlayMat, guardMat) {
+  const L = BLADE_LOOK[w] || BLADE_LOOK[1], k = L.len / 1.36;
+  s.blade.scale.set(L.width, k, 1); s.blade.position.y = 0.12 + 0.68 * k;
+  s.inlay.scale.set(1, k, 1); s.inlay.position.y = 0.12 + 0.64 * k;
+  s.point.position.y = 0.12 + 1.48 * k; s.point.scale.x = L.width; s.tip.position.y = 0.12 + 1.48 * k;
+  if (steelMat) steelMat.color.setHex(L.steel);
+  if (inlayMat) inlayMat.emissive.setHex(L.inlay);
+  if (guardMat) guardMat.color.setHex(L.guard);
 }
 
 // hero: pivot PI faces engine -Z
@@ -300,25 +355,81 @@ const CARRY_BONES = ['Spine02', 'Spine01', 'Spine', 'LeftShoulder', 'LeftArm', '
     else console.warn('gs_carry dropped (unresolved arm tracks):', tracks.length);
   }
 }
+// v2.22 layered attacks (MotionBricks contact-IK lower body + Blender-authored two-handed upper body), full skeleton
+// at 60 Hz. Hips.position carries the bake's vertical only (rootXZ is applied by the sim via src/shared/attackFoot.js,
+// so the bones carry no XZ travel). Every track must resolve, else the clip is dropped and the verb uses its gs_* clip.
+const AT_OK = {};
+if (heroAttacks && heroAttacks.clips) {
+  const bn = {}; heroGltf.scene.traverse((o) => { if (o.isBone) bn[o.name] = o; });
+  for (const name in heroAttacks.clips) {
+    const c = heroAttacks.clips[name], F = c.frames, fps = c.fps || 60;
+    const times = Float32Array.from({ length: F }, (_, i) => i / fps), tracks = [];
+    let bad = 0;
+    for (const b in c.tracks) { if (!bn[b]) { bad++; continue; } tracks.push(new THREE.QuaternionKeyframeTrack(b + '.quaternion', times, c.tracks[b])); }
+    if (c.hipsPos) tracks.push(new THREE.VectorKeyframeTrack('Hips.position', times, c.hipsPos));   // XZ already 0 in the bake
+    if (bad || !bn.Hips) { console.warn('v222 attack clip dropped (unresolved tracks):', name, bad); continue; }
+    mbClips.push(new THREE.AnimationClip(name, (F - 1) / fps, tracks)); AT_OK[name] = (F - 1) / fps;
+  }
+}
 makeActions(hero, heroGltf.animations.concat(mbClips)); markLoops(hero);
 // C15 inertialization: every clip switch decays the old pose into the new one (presentation only, ?inert=0 disables)
 const INERT_ON = qs.get('inert') !== '0';
 const INERT_MODE = qs.get('inert') === 'decay' ? 'decay' : 'spring';
 const INERT_HL = +(qs.get('ihl') || 0.6);
 hero.inert = new Inertializer(hero.model, heroGltf.animations.concat(mbClips)); hero.inert.enabled = INERT_ON; hero.inert.mode = INERT_MODE; hero.inert.hlScale = INERT_HL;
+if (qs.get('plant') !== '0') hero.inert.setPlant(['at_sweep', 'at_sweep_rev', 'at_rift_plant'],
+  ['Hips', 'LeftUpLeg', 'LeftLeg', 'LeftFoot', 'LeftToeBase', 'RightUpLeg', 'RightLeg', 'RightFoot', 'RightToeBase']);
 const HERO_SOCKET = { position: [-0.3366, 7.6967, -1.1561], quaternion: [0.00031, 0.23882, 0.6183, 0.74878], scale: 100 };
 const heroSwordStd = addSword(heroBones.RightHand, HERO_SOCKET, heroSteel);
 const heroGreat = addGreatSword(heroBones.RightHand, HERO_SOCKET, heroSteel); heroGreat.socket.visible = false;
 let heroSword = heroSwordStd;
-function setHeroWeapon(w) { heroSword = w === 1 ? heroGreat : heroSwordStd; heroSwordStd.socket.visible = w !== 1; heroGreat.socket.visible = w === 1; }
+// hero two-hander gets its own inlay + guard materials (same program keys as emberInlay / brass) so the pickup
+// pulse and the boss-drop colours never bleed into each other
+const heroInlay = emberInlay.clone(), heroGuard = brass.clone();
+heroGreat.inlay.material = heroInlay; heroGreat.guard.material = heroGuard;
+function setHeroWeapon(w) {
+  heroSword = w >= 1 ? heroGreat : heroSwordStd; heroSwordStd.socket.visible = w < 1; heroGreat.socket.visible = w >= 1;
+  dressGreatSword(heroGreat, w >= 1 ? w : 1, heroSteel, heroInlay, heroGuard);
+}
+// v2.19 boss drop in the world: a second great-sword rig planted blade-down at sim.drop, own materials, no light.
+const dropRoot = new THREE.Group(); dropRoot.visible = false; scene.add(dropRoot);
+const dropSteel = steel.clone(), dropInlay = emberInlay.clone(), dropGuard = brass.clone();
+const dropSword = addGreatSword(dropRoot, { position: [0, 0, 0], quaternion: [0, 0, 0, 1], scale: 1 }, dropSteel);
+dropSword.inlay.material = dropInlay; dropSword.guard.material = dropGuard;
+dropSword.socket.rotation.set(Math.PI - 0.1, 0.4, -0.06);
+const dropGlow = { t: 0, ping: -1, w: 0 };
 // planted pickup: the same great sword, blade down in the ford beside the wyvern's landing, with a pulsing ember
 // column so it reads from the hero spawn. No light (constant light count); additive basic material only.
 const pickupRoot = new THREE.Group(); pickupRoot.visible = false; scene.add(pickupRoot);
 const pickupSword = addGreatSword(pickupRoot, { position: [0, 0, 0], quaternion: [0, 0, 0, 1], scale: 1 }, steel);
 pickupSword.socket.rotation.set(Math.PI + 0.14, 0.6, 0.08);
 const pickupBeamMat = new THREE.MeshBasicMaterial({ color: 0xff7a30, transparent: true, opacity: 0.15, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
-const pickupBeam = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.7, 7, 20, 1, true), pickupBeamMat); pickupBeam.position.y = 2.2; pickupRoot.add(pickupBeam);
+// v2.17c: vertical fade baked into vertex colours (additive, so black = no light): bright at the sword, gone by the
+// top. A uniform-opacity open cylinder read as a hard orange slab in the wyvern frames
+// v2.17d: a cylinder silhouette is always a hard vertical line, so the beam is now 3 crossed planes faded to black
+// at both sides as well as the top (soft from every view angle). Same MeshBasicMaterial, same program.
+const pickupBeamGeo = (() => {
+  const parts = [];
+  for (let j = 0; j < 3; j++) {
+    const g = new THREE.PlaneGeometry(1.3, 7, 6, 8); g.rotateY(j * Math.PI / 3);
+    const P = g.attributes.position, C = new Float32Array(P.count * 3);
+    for (let i = 0; i < P.count; i++) {
+      const t = (P.getY(i) + 3.5) / 7, side = Math.hypot(P.getX(i), P.getZ(i)) / 0.65;
+      const k = Math.pow(Math.max(0, 1 - t), 1.6) * Math.min(1, t * 8 + 0.3) * Math.pow(Math.max(0, 1 - side), 1.5);
+      C[i * 3] = C[i * 3 + 1] = C[i * 3 + 2] = k;
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(C, 3)); parts.push(g);
+  }
+  const out = new THREE.BufferGeometry(); let n = 0; for (const g of parts) n += g.attributes.position.count;
+  const pos = new Float32Array(n * 3), col = new Float32Array(n * 3), idx = []; let o = 0;
+  for (const g of parts) { pos.set(g.attributes.position.array, o * 3); col.set(g.attributes.color.array, o * 3); for (const v of g.index.array) idx.push(v + o); o += g.attributes.position.count; g.dispose(); }
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3)); out.setAttribute('color', new THREE.BufferAttribute(col, 3)); out.setIndex(idx);
+  pickupBeamMat.vertexColors = true; return out;
+})();
+const pickupBeam = new THREE.Mesh(pickupBeamGeo, pickupBeamMat); pickupBeam.position.y = 2.2; pickupRoot.add(pickupBeam);
 const pickupGlow = { t: 0, ping: -1 };
+const dropBeamMat = pickupBeamMat.clone();
+const dropBeam = new THREE.Mesh(pickupBeamGeo, dropBeamMat); dropBeam.position.y = 2.2; dropRoot.add(dropBeam);
 // fist centres in hand-bone space: centroid of the bind-pose vertices skinned mostly to each hand bone
 const FIST = { L: new THREE.Vector3(), R: new THREE.Vector3() };
 {
@@ -364,9 +475,24 @@ for (let i = 0; i < MAX_DUELISTS; i++) {
   const bones = prepModel(s.model);
   makeActions(s, enemyGltf.animations); markLoops(s);
   s.inert = new Inertializer(s.model, enemyGltf.animations); s.inert.enabled = INERT_ON; s.inert.mode = INERT_MODE; s.inert.hlScale = INERT_HL;
-  s.sword = addSword(bones.RightHand, ENEMY_SOCKET);
+  s.sword = addSword(bones.RightHand, ENEMY_SOCKET); s.bones = bones;
   s.root.visible = false;
   slots.push(s);
+}
+// Stage 2 Shadow Warden: slot 0 restyled while he is bound (scale x1.12, ink-dark tint). Materials are cloned once
+// per slot here so the tint never leaks to the shared wave duelist materials; colour change is a uniform, no recompile.
+// QA frame review: an ink-dark warden vanished against the dusk stone, so he reads as pale ash with a faint cold
+// emissive lift instead (emissive colour is a uniform on the standard material - no new program).
+// v2.13 A/B: a mid-ash retint (0.80,0.76,0.88) sank him into the pillar shadow bands - pale ash stays.
+const wardenTint = new THREE.Color(1.05, 1.0, 1.12), wardenGlow = new THREE.Color(0.035, 0.045, 0.08);
+const slot0Mats = [];
+slots[0].model.traverse((o) => { if (o.isMesh && o.material && o.material.color) { o.material = o.material.clone(); slot0Mats.push({ m: o.material, base: o.material.color.clone(), em: o.material.emissive ? o.material.emissive.clone() : null }); } });
+function styleWarden(on) {
+  const s = slots[0]; s.root.scale.setScalar(on ? WARDEN.SCALE : 1);
+  for (const e of slot0Mats) {
+    e.m.color.copy(e.base); if (on) e.m.color.multiply(wardenTint);
+    if (e.em) { e.m.emissive.copy(e.em); if (on) e.m.emissive.add(wardenGlow); }
+  }
 }
 
 // boss: scale/rot/albedo per constants, rest-pose normalisation identical to the S6 gate
@@ -424,7 +550,35 @@ fx.init(ctx, { scene, quality, water: world.water, reducedMotion, rng: rootRng.s
 fx.setViewportHeight(renderer.domElement.height);
 fx.registerAfterimages(HERO_ID, hero.root);
 fx.registerAfterimages(BOSS_ID, boss.root);
+
+// v2.13 finish: post chain (bloom + per-stage grade), stage atmosphere motes, character rim light.
+// All three only move uniforms when the stage changes; programs are built by the prewarm below.
+const post = new PostStack(renderer, scene, camera, quality, { enabled: qs.get('post') !== 'off' });
+const motesRng = rootRng.stream('motes');
+const motes = { shrine: new AmbientMotes('shrine', { rng: motesRng, quality, reducedMotion }),
+  foundry: new AmbientMotes('foundry', { rng: motesRng, quality, reducedMotion }),
+  road: new AmbientMotes('road', { rng: motesRng, quality, reducedMotion }) };
+shrine.root.add(motes.shrine.points); foundry.root.add(motes.foundry.points);
+if (roadStage) roadStage.root.add(motes.road.points);
+for (const k in motes) motes[k].setViewportHeight(renderer.domElement.height);
+const heroRim = makeRimUniform(), foeRim = makeRimUniform();
+const RIM_ON = qs.get('rim') !== '0';
+if (RIM_ON) { addRimToModel(hero.model, heroRim); for (const s of slots) addRimToModel(s.model, foeRim); }
+stageFinish = function applyStageFinish(name) {
+  post.setStage(name);
+  const R = STAGE_RIM[name] || STAGE_RIM.ford;
+  heroRim.value.setRGB(R.hero[0], R.hero[1], R.hero[2]); foeRim.value.setRGB(R.foe[0], R.foe[1], R.foe[2]);
+  // art review: the warm camera fill flattened the dusk duel - cooler and weaker there so the rim carries separation
+  const F = STAGE_FILL[name] || STAGE_FILL.ford; camFill.color.setHex(F[0]); camFill.intensity = F[1];
+};
+stageFinish(arena);
 fx.registerAfterimages(GAUNTLET_ID, gview.root);
+// v2.18: warden attack layer (authored torso channels + violet ink afterimages, slot 0 only, presentation only)
+const WARDEN_GHOST_ID = 9001; fx.registerAfterimages(WARDEN_GHOST_ID, slots[0].root);
+const WMO_ON = qs.get('wmo') !== '0';
+const WMO_HOLD = qs.get('wmohold') === '1', WMO_STRIKE = { E_SLASH: 22, E_THRUST: 28, E_COMBO: 39, C_CHARGED: 40, C_SLAM: 46 }, wmoHeld = {};
+window.__wmoRelease = () => { window.__wmoHold = null; loop.paused = false; };
+const wardenMotion = new WardenMotion({ fx, mistPreset: MIST.VIOLET, reducedMotion, colliders: { terrainY: (z) => colliders.terrainY(z) } });
 systems.set('fx', fx);
 const cam = new CameraDirector();
 cam.init(ctx, { camera, colliders, reducedMotion });
@@ -442,9 +596,10 @@ touch.init(ctx, tq === null ? { sink: input } : { sink: input, visible: tq === '
 systems.set('touch', touch);
 
 // ------------------------------------------------------------------ simulation
-const sim = new GameSim({ seed, timing, colliders: fordColliders, stage3Colliders: foundryColliders, bus, god: qs.get('god') === '1',
-  startAt: qs.get('start') || 'title', dodgeProfile: QUICKSTEP, stage3: qs.get('stage3') === '1' });
-if (sim.stage3Active) setArena('foundry');
+const sim = new GameSim({ seed, timing, colliders: fordColliders, stage3Colliders: foundryColliders, stage2Colliders: shrineColliders, roadColliders, bus, god: qs.get('god') === '1',
+  startAt: qs.get('start') || 'title', dodgeProfile: QUICKSTEP, stage3: qs.get('stage3') === '1', weapon: +(qs.get('wpn') || 0) });
+const arenaFor = () => sim.roadActive ? 'road' : sim.stage3Active ? 'foundry' : sim.stage2Active ? 'shrine' : 'ford';
+setArena(arenaFor());
 const H = sim.hero;
 const prev = { hx: H.x, hz: H.z, hyaw: H.yaw, bx: 0, by: 0, bz: 0, byaw: 0 };
 const dPrev = []; for (let i = 0; i < MAX_DUELISTS; i++) dPrev.push({ x: 0, z: 0, yaw: 0 });
@@ -456,8 +611,10 @@ const _p = new THREE.Vector3(), _n = new THREE.Vector3();
 sim.onHeroContact = (R) => {
   runStats.contacts++;
   _p.set(H.x, 1.15, H.z); _n.set(R.normal ? R.normal.x : 0, 0.3, R.normal ? R.normal.z : 1);
+  if (R.effect === 'jg' || (sim.stage3Active && (R.effect === 'chip' || R.effect === 'break'))) { gauntletGuardFx(R); return; }
   if (R.outcome === Outcome.PARRIED) {
     fx.burstSparks(_p, _n, R.perfect ? 1.4 : 0.7);
+    if (!reducedMotion) { post.kick(R.perfect ? 0.32 : 0.12, 0xbfe6ff); if (R.perfect) post.impactBlur(_p, 0.6); } fx.flare(_p, R.perfect ? 1.6 : 0.9, 0x9fd8ff);
     if (R.perfect) { runStats.perfect++; loop.dilate(0.25, 12); cam.deflect(); hud.cue('PERFECT DEFLECT', 'perfect'); fx.shockwave(H.x, colliders.terrainY(H.z) + 0.22, H.z, 2.6, 0x9fd8ff, 0.9, 0.4); }
     else hud.cue('DEFLECT', 'perfect');
   } else if (R.effect === 'slip' || R.effect === 'behind' || R.effect === 'phantom') {
@@ -466,13 +623,35 @@ sim.onHeroContact = (R) => {
     if (INK_ON) fx.mist(H.x, colliders.terrainY(H.z) + 1.0, H.z, 0.6, MIST.JADE, 12, 0.5);
     hud.cue(R.effect === 'behind' ? 'PHANTOM STEP - BEHIND' : 'PHANTOM STEP', 'phantom');
   } else if (R.outcome === Outcome.HIT) {
+    if (!reducedMotion) { post.kick(R.damage >= 22 ? 0.2 : 0.1, 0xff3020); if (R.damage >= 22) post.impactBlur(_p, 0.4); }
     runStats.hits++; fx.burstBlood(_p, _n, R.damage >= 25 ? 1.5 : 1); cam.impact(R.damage >= 30 ? 'slam' : R.damage >= 22 ? 'heavy' : 'light');
     if (R.damage >= 22) loop.dilate(0.3, 2);       // hit-stop on big incoming hits (time only; sim outcomes unchanged)
     heroReact.amp = Math.min(1.5, 0.6 + R.damage / 30); heroReact.t = 0;
     heroReact.dx = R.normal ? -R.normal.x : -H.facingX(); heroReact.dz = R.normal ? -R.normal.z : -H.facingZ();
-    if (Math.abs(H.z) < 6.7) fx.splash(H.x, H.z, 0.6);
+    if (arena === 'ford' && Math.abs(H.z) < 6.7) fx.splash(H.x, H.z, 0.6);
   } else if (R.outcome === Outcome.BLOCKED) { fx.burstSparks(_p, _n, 0.5); cam.impact('light'); }
 };
+// Stage 3 guard feedback (spec section 5/6): JG = cyan chevron on the guard point + white sparks + 6 f hit-stop,
+// perfect JG adds the deflect push-in; late/held block = chip cue + small sparks; dome on a held block = guard break.
+const _gfx = new THREE.Vector3();
+function gauntletGuardFx(R) {
+  _gfx.set(H.x + H.facingX() * 0.55, colliders.terrainY(H.z) + 1.3, H.z + H.facingZ() * 0.55);
+  if (R.effect === 'jg') {
+    runStats.jg = (runStats.jg || 0) + 1;
+    fx.chevron(_gfx, camera.quaternion, R.perfect);
+    if (!reducedMotion) post.kick(R.perfect ? 0.34 : 0.14, 0xa8f4ff); fx.flare(_gfx, R.perfect ? 1.7 : 1.0, 0x40e0ff);
+    fx.burstSparks(_gfx, _n, R.perfect ? 1.5 : 0.9);
+    loop.dilate(0.12, R.perfect ? 8 : 6);
+    if (R.perfect) { runStats.perfect++; if (!reducedMotion) cam.deflect(); fx.shockwave(H.x, colliders.terrainY(H.z) + 0.22, H.z, 2.8, 0x40e0ff, 1.0, 0.4); hud.cue('PERFECT JUST GUARD', 'perfect'); }
+    else { cam.impact('light'); hud.cue('JUST GUARD', 'perfect'); }
+    gview.hit(-H.facingX(), -H.facingZ(), R.perfect ? 0.9 : 0.5);
+  } else if (R.effect === 'chip') {
+    fx.burstSparks(_gfx, _n, 0.5); cam.impact('light'); hud.cue('BLOCKED - TOO LATE', 'hit');
+  } else {
+    fx.burstSparks(_gfx, _n, 1.1); cam.impact('heavy'); hud.cue('GUARD BROKEN', 'hit');
+    heroReact.amp = 1.2; heroReact.t = 0; heroReact.dx = R.normal ? -R.normal.x : -H.facingX(); heroReact.dz = R.normal ? -R.normal.z : -H.facingZ();
+  }
+}
 // v2.7 MH-style damage numbers: project the contact point to CSS px (presentation only, deterministic drift)
 const _dproj = new THREE.Vector3(); let dmgSeq = 0;
 function popDamageAt(p, amount, kind) {
@@ -485,10 +664,11 @@ sim.onHeroHit = (t, dealt, v) => {
   const gH = t.id === GAUNTLET_ID, bHead = gH ? gview.HEAD : HEAD, bRoot = gH ? gview.root : boss.root;
   { const hv = v.name === 'HEAVY', c = v.charge || 0; _a.set(t.x, 1.6, t.z); if (t.isBoss) { bHead.getWorldPosition(_a); _a.lerp(bRoot.position, 0.4); _a.y = Math.max(_a.y, 1.8); }
     popDamageAt(_a, dealt, c > 0.5 || dealt >= 40 ? 'big' : hv ? '' : dealt < 12 ? 'weak' : '');
-    if (hv && c > 0.5) hud.flash(reducedMotion ? 0.15 : 0.35); }
+    if (hv && c > 0.5) hud.flash(reducedMotion ? 0.1 : 0.16); }   // v2.17c: 0.35 -> 0.16, stacked with the grade lift it washed the frame
   _n.set(H.facingX(), 0.2, H.facingZ());
   if (t.isBoss) { bHead.getWorldPosition(_p); _p.lerp(bRoot.position, 0.5); _p.y = Math.max(_p.y, 1.2); }
   else _p.set(t.x, 1.2, t.z);
+  if (v.rift) { riftHitFx(t, v); return; }
   const heavy = v.name === 'HEAVY', ch = v.charge || 0, great = !!v.great;
   fx.burstSparks(_p, _n, (heavy ? 1.0 + 0.9 * ch : 0.6) * (great ? 1.4 : 1));
   if (heavy && !t.isBoss) fx.burstBlood(_p, _n, 0.8 + 0.6 * ch);
@@ -503,11 +683,26 @@ sim.onHeroHit = (t, dealt, v) => {
   if (heavy) { const gx = t.isBoss ? _p.x : t.x, gz = t.isBoss ? _p.z : t.z; fx.shockwave(gx, colliders.terrainY(gz) + 0.22, gz, 2.2 + 3.0 * ch, ch > 0.5 ? 0xffd080 : 0xff8a3a, 0.7 + 0.6 * ch, 0.45 + 0.2 * ch); }
   if (heavy && ch > 0.5) { _n.set(0, 1, 0); fx.burstSparks(_p, _n, 1.3); }
   if (heavy) fx.shockwave(t.x, colliders.terrainY(t.z) + 0.24, t.z, (t.isBoss ? 3.5 : 2.2) * (1 + 0.6 * ch), 0xffa040, 0.6 + 0.6 * ch, 0.4);
+  // v2.13 FX hierarchy: outgoing contact is the loudest read on screen (grade flash + hot ember flare at contact)
+  // v2.17c: grade flash on heavies lowered (0.22+0.25ch -> 0.14+0.14ch): stacked with the impact blur it washed the
+  // whole frame sepia; the blur now carries the weight, the flash is only a tint pulse
+  if (!reducedMotion) post.kick(heavy ? 0.14 + 0.14 * ch : great ? 0.11 : 0.08, ch > 0.5 ? 0xffe0a0 : 0xffb070);
+  // v2.17 impact blur: only heavies and great-sword hits smear the frame (lights stay crisp so combos read)
+  if (!reducedMotion && (heavy || great)) post.impactBlur(_p, heavy ? 0.55 + 0.45 * ch : 0.35);
+  fx.flare(_p, heavy ? 1.3 + 0.8 * ch : great ? 1.0 : 0.7, ch > 0.5 ? 0xffe0a0 : 0xff9040);
   if (t.isBoss && t.id === GAUNTLET_ID) gview.hit(H.facingX(), H.facingZ(), (heavy ? 1 : 0.5) * (1 + ch));
   else if (t.isBoss) { bossReact.amp = Math.min(1.6, bossReact.amp * 0.4 + (heavy ? 1 : 0.5) * (1 + ch)); bossReact.t = 0; bossReact.dx = H.facingX(); bossReact.dz = H.facingZ(); bossReact.flash = Math.min(1, 0.5 + 0.5 * ch + (heavy ? 0.3 : 0)); }
 };
-sim.onEquip = (w) => {
+sim.onEquip = (w, src) => {
   setHeroWeapon(w);
+  if (src === 'drop') {
+    const D = sim.drop, gy = colliders.terrainY(D.z), L = BLADE_LOOK[w];
+    _p.set(D.auto ? H.x : D.x, gy + 1.2, D.auto ? H.z : D.z); _n.set(0, 1, 0);
+    fx.burstSparks(_p, _n, 2.0); fx.shockwave(_p.x, gy + 0.22, _p.z, 4.2, L.inlay, 1.0, 0.6); fx.flare(_p, 1.4, L.inlay);
+    cam.impact('heavy'); hud.cue(WEAPONS[w].name + ' CLAIMED', 'perfect'); hud.flash(reducedMotion ? 0.08 : 0.22);
+    if (!reducedMotion) post.kick(0.12, L.inlay);
+    return;
+  }
   if (w !== 1) return;
   const P = sim.pickup, gy = colliders.terrainY(P.z);
   _p.set(P.x, gy + 1.2, P.z); _n.set(0, 1, 0);
@@ -522,18 +717,42 @@ function pickupLayer(dt) {
   pickupRoot.position.set(P.x, gy + 1.38, P.z);
   pickupGlow.t += dt;
   const k = 0.5 + 0.5 * Math.sin(pickupGlow.t * 3.2);
-  pickupBeamMat.opacity = 0.07 + 0.13 * k;
+  pickupBeamMat.opacity = 0.12 + 0.16 * k;   // v2.17c: higher peak, the vertex fade removes most of the column
   emberInlay.emissiveIntensity = 0.8 + 1.6 * k;
   // ground ping every 1.25 s so it reads even when the column is behind the camera
   if (dt > 0 && sim.frame % 75 === 0 && pickupGlow.ping !== sim.frame) {
     pickupGlow.ping = sim.frame; fx.shockwave(P.x, gy + 0.22, P.z, 2.0, 0xffa040, 0.45, 0.6);
   }
 }
+// boss drop: rises out of the corpse's blood-pool, then pulses in its weapon colour until claimed
+function dropLayer(dt) {
+  const D = sim.drop, on = D.active && sim.state === GameState.LOOT;
+  dropRoot.visible = on;
+  if (!on) return;
+  if (dropGlow.w !== D.weapon) { dropGlow.w = D.weapon; dropGlow.t = 0; dressGreatSword(dropSword, D.weapon, dropSteel, dropInlay, dropGuard); dropBeamMat.color.setHex(BLADE_LOOK[D.weapon].inlay); }
+  const gy = colliders.terrainY(D.z);
+  dropGlow.t += dt;
+  const rise = reducedMotion ? 1 : Math.min(1, dropGlow.t / 0.9), e = 1 - (1 - rise) * (1 - rise);
+  dropRoot.position.set(D.x, gy + 1.38 - 1.6 * (1 - e), D.z);
+  dropRoot.rotation.y = reducedMotion ? 0 : dropGlow.t * 0.6;
+  const k = 0.5 + 0.5 * Math.sin(dropGlow.t * 3.6);
+  dropBeamMat.opacity = (0.14 + 0.18 * k) * e;
+  dropInlay.emissiveIntensity = 1.0 + 1.8 * k;
+  if (dt > 0 && sim.frame % 60 === 0 && dropGlow.ping !== sim.frame) {
+    dropGlow.ping = sim.frame; fx.shockwave(D.x, gy + 0.22, D.z, 2.4, BLADE_LOOK[D.weapon].inlay, 0.5, 0.6);
+  }
+}
 sim.onTelegraph = (v, art, lead) => {
   fx.telegraph(BOSS_ID, art === ART.RED ? TELEGRAPH.RED : art === ART.BLUE ? TELEGRAPH.BLUE : TELEGRAPH.NORMAL, lead, boss.root, 2.6);
   if (art === ART.RED) hud.cue('RED - DODGE ASIDE', 'hit'); else if (art === ART.BLUE) hud.cue('BLUE - DODGE IN', 'phantom');
 };
-sim.onDuelistTelegraph = (d) => { const s = slotFor(d); if (s) fx.telegraph(s.actorId, TELEGRAPH.NORMAL, d.verbs[d.verb].startup, s.root, 1.1); };
+sim.onDuelistTelegraph = (d) => {
+  const s = slotFor(d); if (!s) return;
+  const v = d.verbs[d.verb], red = v.art === ART.RED;
+  fx.telegraph(s.actorId, red ? TELEGRAPH.RED : TELEGRAPH.NORMAL, v.startup, s.root, d.elite ? 1.4 : 1.1);
+  if (d.elite && red) hud.banner('', 'CHARGE - DODGE', 0.9);
+  else if (d.elite && d.verb === 'C_SLAM') hud.banner('', 'SLAM - DEFLECT OR STEP OUT', 0.9);
+};
 // Gauntlet: lightning is unguardable (red ring + cue); the dome breaks a held block (blue ring + cue)
 const G_CUES = ['', '', '', '', 'LIGHTNING - KEEP MOVING', 'DOME - DO NOT HOLD BLOCK', '', ''];
 sim.onGauntletTelegraph = (v, unguardable, lead) => {
@@ -547,7 +766,7 @@ bus.on('boss/phase', (p) => {
   cam.onBossPhase(); hud.banner('THE GAUNTLET BURNS', 'it moves faster now', 1.8);
   fx.shockwave(sim.gauntlet.x, colliders.terrainY(sim.gauntlet.z) + 0.22, sim.gauntlet.z, 7, 0xff6a4a, 1.2, 0.7);
 });
-bus.on('boss/phase', (p) => { if (p.actorId !== GAUNTLET_ID && !p.intro) { cam.onBossPhase(); hud.banner('THE WYVERN RAGES', '', 1.8); } });
+bus.on('boss/phase', (p) => { if (p.actorId === WARDEN_ID) { cam.onBossPhase(); hud.banner('THE WARDEN UNSHEATHES HIS RAGE', '', 1.8); return; } if (p.actorId !== GAUNTLET_ID && !p.intro) { cam.onBossPhase(); hud.banner('THE WYVERN RAGES', '', 1.8); } });
 
 function slotFor(d) { for (const s of slots) if (s.bound === d) return s; return null; }
 function bindSlots() {
@@ -555,14 +774,20 @@ function bindSlots() {
     const s = slots[i], d = sim.duelists[i] || null;
     if (s.bound !== d) {
       s.bound = d; s.root.visible = !!d; s.actorId = d ? d.id : -1; s.animT = 0;
+      if (i === 0) styleWarden(!!(d && d.elite));
       if (d) { fx.registerAfterimages && 0; dPrev[i].x = d.x; dPrev[i].z = d.z; dPrev[i].yaw = d.yaw; }
     }
   }
 }
 
+// v2.20 road: banner per leg, banner per ambush; the sim spawns the ambush, the view just names it
+const ROAD_TITLE = [['THE CEDAR PASS', 'the shrine lies beyond the torii'], ['THE IRON ROAD', 'the foundry lies beyond the torii']];
+sim.onAmbush = (i, A) => { bindSlots(); hud.banner('AMBUSH', A.name.toUpperCase(), 1.0, true); };
+bus.on('wave/clear', () => { if (sim.roadActive) { if (sim.roadCleared) hud.banner('THE PASS IS CLEAR', 'walk on to the torii gate', 2.2, true); else hud.banner('', 'the road goes on', 1.2, true); } });
 sim.onState = (s) => {
   bindSlots();
-  if (s === GameState.STAGE3) setArena('foundry'); else if (!sim.stage3Active) setArena('ford');
+  // GATE keeps the shrine (the warden corpse is still there); STAGE3 swaps to the foundry; title/retry resolve from flags
+  if (s !== GameState.GATE && s !== GameState.DOOR) setArena(arenaFor());
   boss.root.visible = sim.bossActive;
   gview.root.visible = sim.stage3Active; if (!sim.stage3Active) gview.hideHazards();
   if (sim.stage3Active) { const G = sim.gauntlet; gview.prev.x = G.x; gview.prev.y = G.y; gview.prev.z = G.z; gview.prev.yaw = G.yaw; }
@@ -570,10 +795,16 @@ sim.onState = (s) => {
   else if (s === GameState.WAVE) hud.banner('WAVE ' + (sim.wave + 1), WAVES[sim.wave].name.toUpperCase(), 2.0);
   else if (s === GameState.WAVE_CLEAR) hud.banner('CLEARED', sim.wave + 1 < WAVES.length ? 'more come' : 'something stirs in the gorge', 2.0);
   else if (s === GameState.BOSS) { hud.banner('FORD WYVERN', sim.pickup.active ? 'claim the great sword in the ford' : 'guardian of the crossing', 2.6); fx.clearTelegraph(BOSS_ID); cam.cine(CINE.INTRO); }
-  else if (s === GameState.DOOR) hud.banner('THE WAY OPENS', 'the foundry gate', 2.4);
+  else if (s === GameState.LOOT) { const R = ROUTE[sim.lootLeg]; hud.banner(R.boss + ' FALLS', 'claim the ' + WEAPONS[sim.drop.weapon].name.toLowerCase(), 2.6); fx.clearTelegraph(BOSS_ID); }
+  else if (s === GameState.DOOR) hud.clearBanner();
+  else if (s === GameState.STAGE2) { hud.banner('THE SHADOW WARDEN', 'a blade in the dusk', 2.6); fx.clearTelegraph(BOSS_ID); cam.cine(CINE.INTRO); }
+  else if (s === GameState.GATE) hud.clearBanner();
   else if (s === GameState.STAGE3) { hud.banner('THE FROZEN FOUNDRY', 'chrome gauntlet', 2.6); fx.clearTelegraph(BOSS_ID); }
-  else if (s === GameState.VICTORY) { hud.setStats('victory', statsView()); }
-  else if (s === GameState.DEFEAT) { hud.setStats('defeat', statsView()); }
+  else if (s === GameState.ROAD) { const T = ROAD_TITLE[sim.roadLeg] || ROAD_TITLE[0]; hud.banner(T[0], T[1], 2.6); fx.clearTelegraph(BOSS_ID); cam.snap(); }
+  else if (s === GameState.VICTORY) { hud.clearBanner(); hud.setVictoryLine(sim.lootLeg === 2 ? 'THE ROAD IS WALKED' : 'THE FORD IS QUIET'); hud.setStats('victory', statsView()); }
+  else if (s === GameState.DEFEAT) { hud.clearBanner(); hud.setStats('defeat', statsView()); }
+  if (s === GameState.DOOR || s === GameState.GATE) roadMap.show(s === GameState.DOOR ? 0 : 1, sim.claimed);
+  else roadMap.hide();
   syncScreen();
 };
 function statsView() {
@@ -587,12 +818,18 @@ function statsView() {
 const _move = new THREE.Vector3(), _look = { x: 0, y: 0 };
 let camYaw = 0, wasBlockHeld = false;
 const botRng = new Rng(seed ^ 0x5151).stream('qa-bot');
-const bot = { at: -1, kind: 0, hold: 0, swings: 0 };
+const bot = { at: -1, kind: 0, hold: 0, swings: 0, sweepN: 0 };
+// DMC verbs for the bot: on in ?rec=1 (showcase) or ?dmc=1 (QA); off otherwise so the legacy bot runs stay byte-identical
+const botDmc = recMode || qs.get('dmc') === '1';
+const botSweep = qs.get('sweep') === '1';   // v2.22 QA: the bot opens every third swing with a sweep (great sword only)
 if (useBot) {
   const prevT = sim.onTelegraph, prevD = sim.onDuelistTelegraph;
   sim.onTelegraph = (v, art, lead) => { prevT(v, art, lead); const ok = botRng.float() < 0.85;
     if (art === ART.NORMAL) { bot.at = sim.frame + lead - (ok ? 3 : 7); bot.kind = 1; } else { bot.at = sim.frame + lead - (ok ? 5 : 11); bot.kind = art === ART.BLUE ? 3 : 2; } };
-  sim.onDuelistTelegraph = (d, v) => { prevD(d, v); if (botRng.float() < 0.85) { bot.at = sim.frame + v.startup - 3; bot.kind = 1; } };
+  // red warden charge: the bot dodges it (kind 2 = sidestep), everything else it deflects
+  sim.onDuelistTelegraph = (d, v) => { prevD(d, v); const ok = botRng.float() < 0.85;
+    if (v.art === ART.RED) { bot.at = sim.frame + v.startup - (ok ? 5 : 11); bot.kind = 2; }
+    else if (ok) { bot.at = sim.frame + v.startup - 3; bot.kind = 1; } };
   // gauntlet: just-guard (block press) the guardable verbs; dodge the lightning (sideways) and the dome (away).
   // Lightning columns land 'lead' frames after each placement, the bot sidesteps the last one.
   const prevG = sim.onGauntletTelegraph;
@@ -606,6 +843,15 @@ function botCommand(c) {
   for (const d of sim.duelists) if (d.alive) { const dd = Math.hypot(d.x - H.x, d.z - H.z); if (dd < td) { td = dd; tx = d.x; tz = d.z; has = true; } }
   if (sim.bossActive && sim.brain.state !== BRAIN_STATE.DEAD) { tx = sim.brain.x; tz = sim.brain.z; td = Math.hypot(tx - H.x, tz - H.z); has = true; reach = 3.2; }
   if (sim.stage3Active && sim.gauntlet.state !== G_STATE.DEAD) { tx = sim.gauntlet.x; tz = sim.gauntlet.z; td = Math.hypot(tx - H.x, tz - H.z); has = true; reach = GAUNTLET.BODY_RADIUS + 1.2; }
+  // boss drop: walk into it (the run auto-claims it after FLOW_F.LOOT_AUTO anyway)
+  if (sim.state === GameState.LOOT && sim.drop.active) {
+    const px = sim.drop.x - H.x, pz = sim.drop.z - H.z, pl = Math.hypot(px, pz) || 1;
+    if (sim.stateF > 50) { c.mx = px / pl; c.mz = pz / pl; c.speed = SIM.RUN_SPEED; } return;
+  }
+  if (!has && sim.roadActive) {
+    const tz2 = Math.max(ROAD.GATE_Z, H.z - 4), tx2 = roadX(tz2), rx = tx2 - H.x, rz = tz2 - H.z, rl = Math.hypot(rx, rz) || 1;
+    c.mx = rx / rl; c.mz = rz / rl; c.speed = SIM.RUN_SPEED; return;
+  }
   if (!has) return;
   const dx = tx - H.x, dz = tz - H.z, l = Math.hypot(dx, dz) || 1;
   // rec tactics: never stand in a burning pool - walk out radially (only in ?rec=1; qa bot stays byte-identical)
@@ -637,17 +883,25 @@ function botCommand(c) {
     if (bot.kind === 1) c.blockPress = true;
     else if (bot.kind === 4) { c.dodge = true; c.mx = -dx / l; c.mz = -dz / l; }
     else { c.dodge = true; if (bot.kind === 3) { c.mx = dx / l; c.mz = dz / l; } else { c.mx = -dz / l; c.mz = dx / l; } }
-  } else if (td > reach + 0.6) { c.mx = dx / l; c.mz = dz / l; c.speed = SIM.RUN_SPEED; }
+  } else if (botDmc && H.gauge >= 50 && !H.triggered && H.state === HERO_STATE.LOCO && td < reach + 2) { c.trigger = true; }
+  else if (botDmc && H.triggerF >= HERO_RIFT.MIN_LEFT && H.triggerF < HERO_RIFT.MIN_LEFT + 120 && H.state === HERO_STATE.LOCO && td < HERO_RIFT.RANGE - 1) { c.trigger = true; }
+  else if (botDmc && td > reach + 2.2 && td < 10.5 && H.snatchCd === 0 && H.state === HERO_STATE.LOCO && H.stamina >= 40 && (bot.at < sim.frame || bot.at - sim.frame > 40)) { c.snatch = true; }
+  else if (botDmc && H.state === HERO_STATE.SNATCH) { c.attack = true; }
+  else if (td > reach + 0.6) { c.mx = dx / l; c.mz = dz / l; c.speed = SIM.RUN_SPEED; }
   else if ((sim.frame + 1) % 9 === 0) {
     if (sim.finisherReady()) c.heavy = true;
     else if (recMode && H.state === HERO_STATE.LOCO && H.stamina >= 60 && ++bot.swings % 5 === 0 && (bot.at < sim.frame || bot.at - sim.frame > 70)) { c.heavy = true; c.heavyHeld = true; bot.hold = 62; }
+    else if (botSweep && H.wp && H.stamina >= 40 && ++bot.sweepN % 3 === 0) c.sweep = true;
     else c.attack = true;
   }
   else if (td < reach - 0.6) { c.mx = -dx / l; c.mz = -dz / l; c.speed = SIM.WALK_SPEED; }
 }
+let qaPress = null;
 function fillCommand() {
   const c = sim.cmd;
   c.mx = 0; c.mz = 0; c.speed = 0; c.attack = false; c.heavy = false; c.heavyHeld = false; c.dodge = false; c.roll = false; c.blockHeld = false; c.blockPress = false;
+  c.snatch = false; c.trigger = false; c.sweep = false;
+  if (qaPress) { c[qaPress] = true; qaPress = null; return; }   // QA one-shot press (__ember.press), deterministic review states
   if (useBot) { botCommand(c); return; }
   input.moveIntent(camYaw, _move);
   const mag = input.moveMagnitude;
@@ -659,6 +913,9 @@ function fillCommand() {
   else if (b === A.DODGE && input.consumeBuffered(A.DODGE)) c.dodge = true;
   else if (b === A.ROLL && input.consumeBuffered(A.ROLL)) c.roll = true;
   else if (b === A.BLOCK && input.consumeBuffered(A.BLOCK)) c.blockPress = true;
+  else if (b === A.SNATCH && input.consumeBuffered(A.SNATCH)) c.snatch = true;
+  else if (b === A.TRIGGER && input.consumeBuffered(A.TRIGGER)) c.trigger = true;
+  else if (b === A.SWEEP && input.consumeBuffered(A.SWEEP)) c.sweep = true;
   c.blockHeld = input.isHeld(A.BLOCK);
   c.heavyHeld = input.isHeld(A.HEAVY);            // charge: the swing holds at the top of its wind-up while held
   wasBlockHeld = c.blockHeld;
@@ -667,7 +924,7 @@ function fillCommand() {
 function fixedUpdate() {
   if (paused) return;
   input.fixedUpdate();
-  prev.hx = H.x; prev.hz = H.z; prev.hyaw = H.yaw;
+  prev.hx = H.x; prev.hz = H.z; prev.hyaw = H.yaw; prev.pdx = H.plantDX; prev.pdz = H.plantDZ;
   const B = sim.brain; prev.bx = B.x; prev.by = B.y; prev.bz = B.z; prev.byaw = B.yaw;
   { const G = sim.gauntlet, gp = gview.prev; gp.x = G.x; gp.y = G.y; gp.z = G.z; gp.yaw = G.yaw; }
   for (let i = 0; i < slots.length; i++) { const d = slots[i].bound; if (d) { dPrev[i].x = d.x; dPrev[i].z = d.z; dPrev[i].yaw = d.yaw; } }
@@ -694,6 +951,119 @@ function inkLayer(attacking, dt) {
     if (!reducedMotion && H.actF >= 3 && H.actF <= 20 && (H.actF % 4) === 3 && ink.ghostF !== sim.frame) { ink.ghostF = sim.frame; fx.afterimage(HERO_ID, INK.GHOST, 0.55); }
   }
 }
+// v2.14 DMC layer presentation (studied from DMC5 Nero/Vergil + Shadow Zero Blade footage, docs/STYLE_SPEC.md).
+// Read-only off the sim: snatch = a red streak of afterimages along the pull plus a landing ring; Ember Trigger =
+// crimson aura motes + afterimage echoes while active, a shockwave burst on activation; rank-up = small warm flare.
+// Edges are taken from sim counters (once per sim frame), so a render-rate change can never double-spawn.
+const DMC = Object.freeze({ RED: 0xff3a20, AURA: 0xff5a2a, EMBER: 0xffb070 });
+const dmc = { snatch: 0, trig: 0, trigF: -1, flash: -999, landF: -1, ghostF: -1, rimK: 0, rift: 0, riftFin: -1, riftLb: 0 };
+const dmcView = {
+  trigger: { on: false, gauge: 0, max: HERO_TRIGGER.MAX, cost: HERO_TRIGGER.COST, left: 0 },
+  style: { rank: 0, letter: STYLE_RANKS[0], title: STYLE_TITLES[0], frac: 0, flashF: -999 },
+};
+const _dp = new THREE.Vector3();
+// v2.21 Ember Rift presentation (Jessica13007 reference: Judgment-Cut-End). Space-cuts open as hairline blades on
+// the target, crossed at deterministic angles (golden-angle walk on the cut index, no RNG); the finale is a
+// sheathe click: everything still in range splits at once. Visuals only follow resolved hits (hitSink).
+const RIFT_COL = Object.freeze({ CUT: 0x9fe8ff, EDGE: 0xff4a2a, END: 0xffffff });
+const _rv = new THREE.Vector3();
+function riftHitFx(t, v) {
+  const fin = v.name === 'RIFT_END', k = H.riftCuts;
+  const sz = t.isBoss ? 4.2 : 2.6, n = fin ? 4 : 2;
+  for (let i = 0; i < n; i++) {
+    const a = (k * 2.39996 + i * (Math.PI / n)) % Math.PI;
+    _rv.set(_p.x + Math.cos(a * 3.1) * 0.3, _p.y + (i - (n - 1) / 2) * 0.25, _p.z + Math.sin(a * 2.3) * 0.3);
+    fx.riftSlash(_rv, sz * (fin ? 1.4 : 1), a - Math.PI / 2, i === 0 ? RIFT_COL.CUT : RIFT_COL.EDGE, fin ? i * 0.02 : i * 0.03, fin ? 0.5 : 0.3);
+  }
+  _n.set(0, 1, 0);
+  fx.burstSparks(_p, _n, fin ? 1.4 : 0.5);
+  if (!t.isBoss) fx.burstBlood(_p, _n, fin ? 1.3 : 0.6);
+  fx.flare(_p, fin ? 1.8 : 0.8, fin ? RIFT_COL.END : RIFT_COL.CUT);
+  if (fin) {
+    fx.shockwave(t.x, colliders.terrainY(t.z) + 0.24, t.z, t.isBoss ? 4.5 : 2.6, RIFT_COL.CUT, 1.0, 0.5);
+    if (!reducedMotion) post.impactBlur(_p, 0.7);
+  }
+  if (t.isBoss && t.id === GAUNTLET_ID) gview.hit(H.facingX(), H.facingZ(), fin ? 1.2 : 0.35);
+}
+// state-driven layer: dark settle on activation, cut ticks, sheathe finale (flash, slam, ring, freeze), letterbox
+function riftLayer(dt) {
+  const R = HERO_RIFT, on = H.state === HERO_STATE.RIFT;
+  if (H.rifts !== dmc.rift) {
+    dmc.rift = H.rifts;
+    const gy = colliders.terrainY(H.z);
+    hud.cue('EMBER RIFT', 'perfect');
+    fx.shockwave(H.x, gy + 0.08, H.z, R.RANGE, RIFT_COL.CUT, 0.6, 0.6);
+    // v2.21 QA: a chest-height 14-puff mist washed over both targets. v2.22 QA: the low ankle puff that replaced it
+    // put its camera-facing sprites through the ground plane (hard straight bottom edge) - removed; the shockwave
+    // ring already marks the plant.
+    if (!reducedMotion) { post.kick(0.2, 0x2a3c60); loop.dilate(0.2, 8, true); cam.triggerPush(); }
+  }
+  if (on && H.riftF === R.FINALE && dmc.riftFin !== sim.frame && dt > 0) {
+    dmc.riftFin = sim.frame;
+    const gy = colliders.terrainY(H.z);
+    // the clean sheathe: a ring of cuts around the hero (reads as "everything in range splits"), one white pulse
+    for (let i = 0; i < 6; i++) {
+      const a = i * (Math.PI * 2 / 6) + 0.4, rr = R.RANGE * 0.55;
+      _rv.set(H.x + Math.cos(a) * rr, gy + 1.0 + (i % 2) * 0.6, H.z + Math.sin(a) * rr);
+      fx.riftSlash(_rv, 5.5, a * 1.7, i % 2 ? RIFT_COL.EDGE : RIFT_COL.CUT, 0.03 + i * 0.015, 0.45);
+    }
+    fx.shockwave(H.x, gy + 0.08, H.z, R.RANGE + 1, RIFT_COL.END, 1.2, 0.55);
+    hud.flash(reducedMotion ? 0.1 : 0.3);
+    if (!reducedMotion) { post.kick(0.36, 0xdff4ff); loop.dilate(0.05, 10, true); cam.impact('slam'); }
+  }
+  // letterbox weight eases in over the startup and out after the finale (read by the per-frame letterbox call)
+  const want = on && H.riftF < R.FINALE + 10 ? 1 : 0;
+  if (dt > 0) dmc.riftLb += (want - dmc.riftLb) * Math.min(1, dt * (want ? 10 : 5));
+  if (dmc.riftLb < 0.01) dmc.riftLb = 0;
+}
+function dmcLayer(dt) {
+  riftLayer(dt);
+  // HUD view (allocation-free)
+  const T = dmcView.trigger, Sm = sim.style, V = dmcView.style;
+  T.on = H.triggerF > 0; T.gauge = H.gauge;
+  if (T.on && dmc.trigF < 0) dmc.trigF = H.triggerF;           // full duration at activation, for the drain bar
+  if (!T.on) dmc.trigF = -1;
+  T.left = T.on ? H.triggerF / Math.max(1, dmc.trigF) : 0;
+  V.rank = Sm.rank; V.letter = Sm.letter; V.title = Sm.title; V.frac = Sm.frac; V.flashF = Sm.flashF;
+  if (dt <= 0) return;
+  const gy = colliders.terrainY(H.z);
+  // snatch start: a red flare at the hero, afterimage streak every 3 sim frames through the travel window
+  if (H.snatches !== dmc.snatch) { dmc.snatch = H.snatches; _dp.set(H.x, gy + 1.0, H.z); fx.flare(_dp, 0.7, DMC.RED); }
+  if (H.state === HERO_STATE.SNATCH) {
+    const tf = H.snatchF - HERO_SNATCH.STARTUP;
+    if (!reducedMotion && tf >= 0 && tf <= HERO_SNATCH.TRAVEL_MAX && (tf % 3) === 0 && dmc.ghostF !== sim.frame) { dmc.ghostF = sim.frame; fx.afterimage(HERO_ID, DMC.RED, 0.7); }
+    if (tf === HERO_SNATCH.TRAVEL_MAX + 1 && dmc.landF !== sim.frame) {
+      // landing (frame study C/E5): ground ring + white-core spark at chest height + a 4-frame presentation hitstop
+      dmc.landF = sim.frame; fx.shockwave(H.x, gy + 0.06, H.z, 1.6, DMC.RED, 0.7, 0.3);
+      _dp.set(H.x, gy + 1.2, H.z); fx.flare(_dp, 0.6, 0xff8a2a);
+      if (!reducedMotion) { loop.dilate(0.1, 4, true); cam.impact('light'); }
+    }
+  }
+  // trigger activation (frame study B/E4): white-crimson flash, 6-frame near-freeze, camera push-in, burst ring
+  if (H.triggers !== dmc.trig) {
+    dmc.trig = H.triggers;
+    fx.shockwave(H.x, gy + 0.08, H.z, HERO_TRIGGER.BURST_R + 1.3, 0xc8102e, 1.2, 0.5);
+    // flare sits behind the hero's shoulder line (not on the torso) and stays small, so the activation frame
+    // keeps the legs and stance readable; the screen kick is a short crimson tint, not a white-out
+    _dp.set(H.x, gy + 1.9, H.z); fx.flare(_dp, 0.75, 0xff9a7a);
+    if (!reducedMotion) { post.kick(0.28, 0xff6a50); loop.dilate(0.05, 6, true); cam.triggerPush(); }
+  }
+  // aura while active: sparse low-alpha crimson puffs at the hip line (cap ~1.3x hero height), so the
+  // silhouette and stance stay readable; the rim (below) carries the "powered up" read on the body itself
+  if (H.triggerF > 0) {
+    if ((sim.frame % 8) === 0 && dmc.ghostF !== sim.frame) { dmc.ghostF = sim.frame; fx.mist(H.x, gy + 1.0, H.z, 0.32, MIST.CRIMSON, 2, 0.8); }
+    if (!reducedMotion && H.speed > 2.5 && (sim.frame % 6) === 1) fx.afterimage(HERO_ID, 0xc8202e, 0.3);
+  }
+  // crimson rim on the hero while the trigger runs (uniform only - same program, no recompile)
+  const rk = H.triggerF > 0 ? 1 : 0;
+  if (RIM_ON && rk !== dmc.rimK) {
+    dmc.rimK = rk;
+    if (rk) heroRim.value.setRGB(1.1, 0.10, 0.05);
+    else { const R = (STAGE_RIM[arena] || STAGE_RIM.ford).hero; heroRim.value.setRGB(R[0], R[1], R[2]); }
+  }
+  // rank up: small warm flare over the hero's shoulder
+  if (Sm.flashF !== dmc.flash) { dmc.flash = Sm.flashF; if (Sm.rank >= 3) { _dp.set(H.x, gy + 2.0, H.z); fx.flare(_dp, 0.5 + Sm.rank * 0.1, DMC.EMBER); } }
+}
 // drunken sway: a slow, loose figure-eight in the spine and a lagging head while the hero is free (not attacking,
 // blocking, dodging or hit). Fades in over ~0.4 s and out in ~0.1 s, so it never touches a swing or a contact frame.
 function inkSway(dt, fx_, fz_) {
@@ -719,7 +1089,7 @@ const reticle = document.createElement('div'); reticle.className = 'ec-ret';
 document.body.appendChild(reticle);
 const _rp = new THREE.Vector3(); let retOn = -1;
 function reticleLayer() {
-  const show = INK_ON && (sim.state === GameState.WAVE || sim.state === GameState.BOSS) && H.alive && cam.target && (lockOn || camTarget.isBoss) && !cam.cineActive;
+  const show = INK_ON && (sim.state === GameState.WAVE || sim.state === GameState.BOSS || sim.state === GameState.STAGE2) && H.alive && cam.target && (lockOn || camTarget.isBoss) && !cam.cineActive;
   if (!show) { if (retOn !== 0) { reticle.style.opacity = '0'; retOn = 0; } return; }
   _rp.copy(camTarget.position).project(camera);
   if (_rp.z > 1) { reticle.style.opacity = '0'; retOn = 0; return; }
@@ -847,7 +1217,7 @@ function heroLayer(dt) {
     // great sword combo variety: roll the torso about the facing axis so the same two-handed chop lands as a
     // diagonal cut (LIGHT_2 right-high to left-low, LIGHT_3 the mirror). Arms and blade ride the spine; the grip IK
     // runs after this, so both hands stay on the hilt. Presentation only.
-    const g = H.weapon === 1 && GS_SET[H.verb];
+    const g = H.weapon >= 1 && GS_SET[H.verb];
     if (g && g.roll) {
       const ramp = f < a ? f / Math.max(1, a) : f < e + 6 ? 1 : Math.max(0, 1 - (f - e - 6) / 20);
       const r = g.roll * Math.sin(Math.min(1, ramp) * Math.PI * 0.5);
@@ -914,7 +1284,7 @@ function bossLayer(dt) {
   for (const m of bossMats) if (m.emissive) m.emissive.copy(BOSS_FLASH).multiplyScalar(0.55 * bossReact.flash * bossReact.flash);
 }
 
-const HERO_ACT_CLIPS = new Set(Object.values(H.verbs).map((v) => v.clip).concat(['heavy', 'mh_judgment', 'lunge_s', 'lunge_m', 'lunge_h'], Object.values(GS_SET).map((g) => g.clip)));
+const HERO_ACT_CLIPS = new Set(Object.values(H.verbs).map((v) => v.clip).concat(['heavy', 'mh_judgment', 'lunge_s', 'lunge_m', 'lunge_h', 'at_sweep', 'at_sweep_rev', 'at_rift_plant', 'gs_sweep', 'gs_sweep_rev', 'gs_rift'], Object.values(GS_SET).map((g) => g.clip)));
 const HERO_LOCO_CLIPS = new Set(['idle', 'walk', 'run', 'block', 'parry', GS_GUARD.clip]);
 // blend windows (s): attacks enter fast so startup stays readable; recovery settles slowly into stance
 function heroBlend(nc, oc) {
@@ -932,6 +1302,7 @@ function poseHero(alpha, presentDt) {
   if (trace.on && presentDt > 0) jerkRaw.sample();
   hero.inert.apply(hero.pc, hero.pt, LOOP_CLIPS.has(hero.pc), presentDt, heroBlend, contactDeadline());
   heroLayer(presentDt);
+  tipFloorGuard();
   leftGripIK(presentDt);
   if (presentDt > 0) jerk.hero.sample();
   if (trace.on && presentDt > 0) {
@@ -945,10 +1316,38 @@ function poseHero(alpha, presentDt) {
 // hero's left and down, then the hand takes the measured grip orientation. Runs last, after every additive layer,
 // so it follows the socket wherever the swing / sway put it. Nothing is read back into the sim.
 const GRIP_ON = qs.get('grip') !== '0';
+const GRIP_GROSS = 0.08;   // m past left-arm reach that justifies moving the sword arm inside a strike window
 const _ga = new THREE.Vector3(), _gb = new THREE.Vector3(), _gc = new THREE.Vector3(), _gt = new THREE.Vector3(), _ge = new THREE.Vector3();
 const _gd = new THREE.Vector3(), _gp = new THREE.Vector3(), _gu = new THREE.Vector3(), _gv = new THREE.Vector3();
 const _gq = new THREE.Quaternion(), _gq2 = new THREE.Quaternion(), _gq3 = new THREE.Quaternion();
 const _gw = new THREE.Vector3(), _gx = new THREE.Vector3();
+// v2.22 blade floor guard (presentation only, ?tipguard=0 disables): the low sweeps and the rift finale carry the
+// 1.6 m great-sword tip to within a few cm of the ground, and the hips drop of the planted-foot bake can push it under.
+// If the tip is below TIP_CLEAR the socket is pitched about the right fist by exactly the angle that lifts it back
+// (a 6 cm lift on a 1.6 m blade is about 2 degrees). Runs before leftGripIK, so the off hand follows the grip.
+const TIP_GUARD_ON = qs.get('tipguard') !== '0', TIP_CLEAR = 0.04;
+const tipGuard = { base: null, n: 0 };
+const _tg0 = new THREE.Vector3(), _tg1 = new THREE.Vector3(), _tgq = new THREE.Quaternion(), _tgp = new THREE.Quaternion(), _tgu = new THREE.Vector3(0, 1, 0);
+function tipFloorGuard() {
+  const S = heroGreat.socket;
+  if (!tipGuard.base) tipGuard.base = S.quaternion.clone();
+  S.quaternion.copy(tipGuard.base);
+  if (!TIP_GUARD_ON || H.weapon < 1) return;
+  hero.model.updateMatrixWorld(true);
+  S.getWorldPosition(_tg0); heroGreat.tip.getWorldPosition(_tg1);
+  const floor = colliders.terrainY(_tg1.z) + TIP_CLEAR;
+  if (_tg1.y >= floor) return;
+  _tg1.sub(_tg0); const L = _tg1.length(); if (L < 1e-3) return;
+  const yNow = _tg1.y / L, yWant = Math.min(1, (floor - _tg0.y) / L);
+  const a = Math.asin(Math.max(-1, Math.min(1, yWant))) - Math.asin(Math.max(-1, Math.min(1, yNow)));
+  if (!(a > 0)) return;
+  _tg0.crossVectors(_tg1, _tgu); if (_tg0.lengthSq() < 1e-8) return; _tg0.normalize().negate();   // axis lifting the tip
+  _tgq.setFromAxisAngle(_tg0, -a);
+  // world rotation about the socket origin -> local: q_local' = inv(parentWorld) * dq * parentWorld * q_local
+  S.parent.getWorldQuaternion(_tgp);
+  const dq = _tgq.premultiply(_tgp.clone().invert()).multiply(_tgp);
+  S.quaternion.premultiply(dq); tipGuard.n++;
+}
 function alignBone(bone, from, to) {   // rotate bone in world space so world direction `from` points along `to`
   _gu.copy(from).normalize(); _gv.copy(to).normalize();
   if (_gu.dot(_gv) > 0.999999) return;
@@ -960,7 +1359,7 @@ function leftGripIK(dt) {
   // the off hand lets go only for a roll / dodge, a hit reaction or death (those clips throw the arms wide);
   // loco, every swing, guard, parry and the finisher keep both hands on the hilt
   const free = H.state === HERO_STATE.DEAD || H.state === HERO_STATE.DODGE || H.state === HERO_STATE.HITSTUN;
-  const want = GRIP_ON && GRIP.on && H.weapon === 1 && !free ? 1 : 0;
+  const want = GRIP_ON && GRIP.on && H.weapon >= 1 && !free ? 1 : 0;
   GRIP.w = dt > 0 ? GRIP.w + (want - GRIP.w) * Math.min(1, dt * (want ? 14 : 4)) : GRIP.w;
   if (GRIP.w < 1e-3) return;
   const A = heroBones.LeftArm, F = heroBones.LeftForeArm, Hd = heroBones.LeftHand, S = heroBones.LeftShoulder;
@@ -976,9 +1375,18 @@ function leftGripIK(dt) {
   // arm in. Rotate RightArm about its joint so the grip point moves toward the left shoulder by the excess. Never
   // during ACTION / FINISHER, so swing paths and contact frames keep the authored blade (no sword drift).
   const RA = heroBones.RightArm;
-  if (RA && H.state !== HERO_STATE.ACTION && H.state !== HERO_STATE.FINISHER) {
+  // v2.22: the Rift's blend-in from loco (f3-11) swung the hilt 0.9 m from the left shoulder (grip miss 46 cm); the
+  // plant has no contact before the finale, so the pull-in runs there too and stops 8 f before FINALE.
+  const exactBlade = H.state === HERO_STATE.ACTION || H.state === HERO_STATE.FINISHER || (H.state === HERO_STATE.RIFT && H.riftF >= HERO_RIFT.FINALE - 8);
+  // a rotation about the RightArm joint keeps the hilt at a fixed radius from it, so one alignment undershoots a
+  // large excess; up to 3 passes converge (each re-measures the excess)
+  // v2.22: during exact-blade states only a gross miss (> GRIP_GROSS past reach: the sweep f36 / rift f54 frames that
+  // measured 15-18 cm) is pulled in. Contact is resolved in the sim, so this is presentation only; a hand off the
+  // hilt reads far worse than a few degrees of blade path on one frame.
+  for (let it = 0; RA && it < 3; it++) {
     const ex = (_ga.distanceTo(_gt) - (l1 + l2) * 0.95) * GRIP.w;
-    if (ex > 0) {
+    if (ex <= (exactBlade ? GRIP_GROSS : 0.005)) break;
+    {
       RA.getWorldPosition(_ge); _gu.subVectors(_gt, _ge);
       _gv.subVectors(_ga, _gt).normalize().multiplyScalar(ex).add(_gt).sub(_ge);
       alignBone(RA, _gu, _gv);
@@ -1027,14 +1435,21 @@ function contactDeadline() {
   if (f >= v.startup + v.active) return Infinity;
   return Math.max(0, (v.startup - f) / 60);
 }
-function heroClipT() { const w = WARP_ON && (H.weapon === 1 ? WARP_GS : WARP)[H.verb]; return w ? w.clipTime(H.actF) : H.verbClipTime(H.actF); }
+function heroClipT() { const w = WARP_ON && (H.weapon >= 1 ? WARP_GS : WARP)[H.verb]; return w ? w.clipTime(H.actF) : H.verbClipTime(H.actF); }
 // great sword equipped and its two-handed clip is present -> that clip; else null (standard set)
-function heroGsVerb() { const g = H.weapon === 1 && GS_SET[H.verb]; return g && GS_WARP[H.verb] && hero.actions[g.clip] ? g : null; }
-const heroGsGuard = () => H.weapon === 1 && !!hero.actions[GS_GUARD.clip];
+function heroGsVerb() { const g = H.weapon >= 1 && GS_SET[H.verb]; return g && GS_WARP[H.verb] && hero.actions[g.clip] ? g : null; }
+const heroGsGuard = () => H.weapon >= 1 && !!hero.actions[GS_GUARD.clip];
 function poseHeroBase(alpha, presentDt) {
   const st = H.state;
   if (st === HERO_STATE.ACTION) {
-    const v = H.verbs[H.verb], ln = LUNGE_FOR[H.verb], ld = ln && lungeOk[ln];
+    const v = H.verbs[H.verb];
+    if (v.sweep) {
+      // v2.22 sweep: the layered at_* clip at the sim frame, 1:1 (the sim walks the same root curve, feet stay planted)
+      const c = AT_OK[v.foot] !== undefined ? v.foot : hero.actions[v.clip] ? v.clip : 'heavy';
+      // root sits at lerp(actF-1, actF, alpha) on the curve, so the clip samples the same instant (else feet skate)
+      pose(hero, 1, c, 1, Math.min(Math.max(0, H.actF - 1 + alpha) / 60, hero.dur[c] - 0.001)); return;
+    }
+    const ln = LUNGE_FOR[H.verb], ld = ln && lungeOk[ln];
     const gs = heroGsVerb(), clip = gs ? gs.clip : v.clip, ct = gs ? GS_WARP[H.verb].clipTime(H.actF) : heroClipT();
     if (ld) {
       // footwork covers the sim lunge window (startup+active) and settles through early recovery
@@ -1055,10 +1470,32 @@ function poseHeroBase(alpha, presentDt) {
     }
     pose(hero, 1, 'dodge', 1, (H.actF / HERO_DODGE.total) * hero.dur.dodge * 0.8); return;
   }
+  if (st === HERO_STATE.SNATCH) {
+    // snatch: lunge footwork across the whole pull (startup crouch -> travel -> landing), clip time follows the sim frame
+    const ln = hero.actions.lunge_h ? 'lunge_h' : hero.actions.lunge_m ? 'lunge_m' : null;
+    const span = SNATCH_SPAN, u = Math.min(1, (Math.max(0, H.snatchF) + alpha) / span);
+    if (ln) pose(hero, 1, ln, 1, u * (hero.actions[ln].getClip().duration - 0.01));
+    else pose(hero, 1, 'dodge', 1, u * hero.dur.dodge * 0.8);
+    return;
+  }
+  if (st === HERO_STATE.RIFT) {
+    // Ember Rift: settle into the heavy wind-up and hold it while the cuts land (the blade is "sheathed" in the
+    // stance), then release the strike over the finale. Clip time is a pure function of the sim frame.
+    // v2.22: the Blender-authored gs_rift (layered at_rift_plant, 87 f = TOTAL + 1) plays 1:1 on the sim frame when the
+    // great sword is equipped: brace + hold f22-46 while the cuts land, release f47-54 = FINALE.
+    if (H.weapon >= 1 && AT_OK.at_rift_plant !== undefined) {
+      pose(hero, 1, 'at_rift_plant', 1, Math.min(Math.max(0, H.riftF - 1 + alpha) / 60, hero.dur.at_rift_plant - 0.001)); return;
+    }
+    const R = HERO_RIFT, f = Math.max(0, H.riftF) + alpha, d = hero.dur.heavy, hold = d * 0.32;
+    const tc = f < R.STARTUP ? hold * (f / R.STARTUP)
+      : f < R.FINALE - 8 ? hold
+      : Math.min(d - 0.01, hold + (d - hold) * Math.min(1, (f - (R.FINALE - 8)) / (R.TOTAL - (R.FINALE - 8))));
+    pose(hero, 1, 'heavy', 1, tc); return;
+  }
   if (st === HERO_STATE.HITSTUN) { pose(hero, 1, 'hit', 1, Math.min(H.actF, 40) / 60); return; }
   if (st === HERO_STATE.DEAD) { pose(hero, 1, 'death', 1, Math.min(H.actF / 60, hero.dur.death - 0.01)); return; }
   if (st === HERO_STATE.FINISHER) {
-    const fc = H.weapon === 1 && hero.actions[GS_FINISHER_CLIP.clip] ? GS_FINISHER_CLIP : HERO_FINISHER_CLIP, kn = fc.knots, f = Math.min(HERO_FINISHER_F, H.actF + alpha);
+    const fc = H.weapon >= 1 && hero.actions[GS_FINISHER_CLIP.clip] ? GS_FINISHER_CLIP : HERO_FINISHER_CLIP, kn = fc.knots, f = Math.min(HERO_FINISHER_F, H.actF + alpha);
     if (hero.actions[fc.clip]) {
       let i = 0; while (i < kn.length - 2 && f > kn[i + 1][0]) i++;
       const u = (f - kn[i][0]) / (kn[i + 1][0] - kn[i][0]);
@@ -1077,7 +1514,7 @@ function poseHeroBase(alpha, presentDt) {
   if (H.blocking) { pose(hero, 2, gg ? GS_GUARD.clip : 'block', 1 - wMove * 0.5, gg ? GS_GUARD.blockT : 0.35, 'walk', wMove * 0.5, loco.phase * hero.dur.walk); return; }
   if (H.deflectF >= 0 && H.deflectF < 20 && wMove < 0.5) { pose(hero, 1, gg ? GS_GUARD.clip : 'parry', 1, H.deflectF / 60 + (gg ? GS_GUARD.parryT0 : 0.1)); return; }
   // great sword: arms take the two-handed low-ready carry (weight 12 of 13 on the arm bones), legs keep the loco blend
-  const carry = H.weapon === 1 && hero.actions.gs_carry ? 12 : 0;
+  const carry = H.weapon >= 1 && hero.actions.gs_carry ? 12 : 0;
   pose(hero, carry ? 4 : 3, 'idle', 1 - wMove, (H.frame / 60) % hero.dur.idle,
     'walk', wMove * (1 - wRun), loco.phase * hero.dur.walk, 'run', wMove * wRun, loco.phase * hero.dur.run, 'gs_carry', carry, 0);
   // foot-slide metric: implied stride speed vs actual planar speed (only meaningful while moving)
@@ -1105,6 +1542,13 @@ function poseDuelist(s, i, alpha) {  const d = s.bound, P = dPrev[i];
     pose(s, 1, A_.clip, 1, s.locoPh * s.dur[A_.clip]);
   } else { s.lastF = sim.frame; const w = WARP_ON && d.state === DUEL_STATE.ATTACK && WARP[d.verb]; pose(s, 1, A_.clip, 1, w ? w.clipTime(d.f) : A_.time); }
   s.inert.apply(s.pc, s.pt, LOOP_CLIPS.has(s.pc), presentDtNow, duelBlend, duelDeadline(d));
+  if (i === 0 && d.elite) {
+    if (WMO_ON) wardenMotion.apply(s, d, alpha, presentDtNow, WARDEN_GHOST_ID);
+    // QA hold (?wmohold=1): freeze the loop on the first strike frame of each verb so a probe can capture it
+    if (WMO_HOLD && d.state === DUEL_STATE.ATTACK && WMO_STRIKE[d.verb] !== undefined && d.f >= WMO_STRIKE[d.verb] && !wmoHeld[d.verb]) {
+      wmoHeld[d.verb] = d.f; loop.paused = true; window.__wmoHold = d.verb;
+    }
+  }
   const attacking = d.state === DUEL_STATE.ATTACK;
   if (attacking) { s.sword.hilt.getWorldPosition(_a); s.sword.tip.getWorldPosition(_b); fx.streakSample(s.actorId, _a, _b); streak.d[i] = true; }
   else { if (streak.d[i]) { fx.streakEnd(s.actorId); streak.d[i] = false; } fx.clearTelegraph(s.actorId); }
@@ -1167,7 +1611,7 @@ const gCb = {
   slam: (x, y, z) => { fx.shockwave(x, y + 0.2, z, 4, 0xffb070, 1.2, 0.5); _p.set(x, y + 0.3, z); _n.set(0, 1, 0); fx.burstSparks(_p, _n, 1.4); if (presentDtNow > 0) cam.impact('slam'); },
 };
 function streakBlade(key, on, b) {
-  if (on) { b.base.getWorldPosition(_a); b.tip.getWorldPosition(_b); fx.streakSample(G_STREAK_ID[key], _a, _b, sim.gauntlet.phase >= 2 ? 0xff6a4a : 0x9fe8ff); gStreak[key] = true; }
+  if (on) { b.base.getWorldPosition(_a); b.tip.getWorldPosition(_b); fx.streakSample(G_STREAK_ID[key], _a, _b, sim.gauntlet.phase >= 2 ? 0xff6a4a : 0x40e0c8); gStreak[key] = true; }
   else if (gStreak[key]) { fx.streakEnd(G_STREAK_ID[key]); gStreak[key] = false; }
 }
 const gTerrainY = (z) => colliders.terrainY(z);
@@ -1182,10 +1626,24 @@ function poseGauntlet(alpha, dt) {
   streakBlade('l', act && (v === 0 || v === 2 || v === 3), gview.bladeL);
   streakBlade('r', act && (v === 1 || v === 2 || v === 3), gview.bladeR);
   if (act && v === 2 && (f % 4) === 0 && dt > 0) fx.afterimage(GAUNTLET_ID, false, 0.6);
+  // enrage: ember sparks shed off the blade tips (spec section 6, #FF5A2A); sparse and never inside an active
+  // window so it can not steal a spark slot from a contact read
+  if (G.phase >= 2 && dt > 0 && !act && G.state !== G_STATE.DEAD && sim.frame % 26 === 0 && gstat.emberF !== sim.frame) {
+    gstat.emberF = sim.frame; const b = (sim.frame / 26) % 2 ? gview.bladeL : gview.bladeR;
+    b.tip.getWorldPosition(_a); _n.set(0, 1, 0); fx.burstSparks(_a, _n, 0.3);
+  }
   gview.hazards(G, sim.frame, dt, gTerrainY, gCb);
 }
-let presentDtNow = 0;
+let presentDtNow = 0, camSimX = 0, camSimZ = 0;
 let dispYaw = null;
+const PLANT_F = 8;   // retarget_bake WARM: first frame with pinned feet on the v2.22 footwork clips
+// frames into a planted-foot clip (sweep / sweep_rev / rift plant on the great sword), or -1
+function heroPlantF() {
+  if (H.weapon < 1) return -1;
+  if (H.state === HERO_STATE.RIFT) return AT_OK.at_rift_plant !== undefined ? Math.max(0, H.riftF) : -1;
+  if (H.state === HERO_STATE.ACTION) { const v = H.verbs[H.verb]; return v && v.foot && AT_OK[v.foot] !== undefined ? H.actF : -1; }
+  return -1;
+}
 
 let wasFinisher = false, finHitShown = false;
 // cinematic letterbox: two DOM bars (no extra render pass), height follows the cine blend weight
@@ -1211,12 +1669,25 @@ bus.on('actor/death', (p) => {
     hud.banner('THE FOUNDRY FALLS SILENT', 'the chrome gauntlet is broken', 3.0);
     return;
   }
+  if (p.actorId === WARDEN_ID) {
+    cam.cine(CINE.DEATH); loop.dilate(0.4, 60, true);
+    const w = sim.warden; fx.shockwave(w.x, colliders.terrainY(w.z) + 0.22, w.z, 6, 0xb89cff, 1.2, 0.8);
+    if (INK_ON) { fx.mist(w.x, colliders.terrainY(w.z) + 1.0, w.z, 1.1, MIST.VIOLET, 18, 1.1); }
+    hud.banner('THE WARDEN YIELDS', 'his blade falls among the maple leaves', 3.0);
+    return;
+  }
   if (p.kind !== ActorKind.WYVERN) {
     // v2.9 ink kill: the duelist dissolves in violet mist; a short presentation-only slow-mo sells the final blow
     if (!INK_ON) return;
     for (const s of slots) if (s.bound && s.actorId === p.actorId) {
       const r = s.root.position, y = colliders.terrainY(r.z);
-      fx.mist(r.x, y + 1.0, r.z, 0.7, MIST.VIOLET, 14, 0.9); fx.mist(r.x, y + 0.3, r.z, 0.9, MIST.WHITE, 6, 0.3);
+      // foes die at sword range, so a dissolve centred on the corpse sat on the hero's legs for ~1 s and washed the
+      // silhouette out (v2.15 attribution: smoke pool alone lifted hero-box luminance 88 -> 142). Push the cloud
+      // up to 0.8 m away from the hero, keep it smaller and sparser; trigger kills dissolve in crimson instead.
+      let mx = r.x, mz = r.z; const ddx = r.x - H.x, ddz = r.z - H.z, dd = Math.hypot(ddx, ddz);
+      if (dd > 0.01 && dd < 3.0) { const push = 1.2 * (1 - dd / 3.0); mx += ddx / dd * push; mz += ddz / dd * push; }
+      if (H.triggerF > 0) fx.mist(mx, y + 1.0, mz, 0.4, MIST.CRIMSON, 5, 0.9);
+      else { fx.mist(mx, y + 1.1, mz, 0.5, MIST.VIOLET, 9, 0.9); fx.mist(mx, y + 0.3, mz, 0.6, MIST.WHITE, 3, 0.3); }
       if (!reducedMotion) loop.dilate(0.45, 8, true);
       break;
     }
@@ -1246,6 +1717,14 @@ function chooseCamTarget() {
     camTarget.distance = Math.hypot(sim.gauntlet.x - H.x, sim.gauntlet.z - H.z);
     cam.setTarget(camTarget, true); return;
   }
+  if (sim.stage2Active && sim.warden && sim.warden.alive) {
+    // duel: always framed on the warden (boss lens), chest height
+    const r = slots[0].root.position;
+    camTarget.position.set(r.x, r.y + 1.45 * WARDEN.SCALE, r.z);
+    camTarget.isBoss = true; camTarget.airborne = false;
+    camTarget.distance = Math.hypot(sim.warden.x - H.x, sim.warden.z - H.z);
+    cam.setTarget(camTarget, true); return;
+  }
   let best = null, bd = 1e9;
   for (const s of slots) { const d = s.bound; if (!d || !d.alive) continue; const dd = Math.hypot(d.x - H.x, d.z - H.z); if (dd < bd) { bd = dd; best = s; } }
   if (best && (lockOn || bd < 9)) {
@@ -1263,30 +1742,41 @@ function update(realDt, alpha, presentDt, noRender = false) {
 
   presentDtNow = presentDt;
   hero.root.position.set(prev.hx + (H.x - prev.hx) * alpha, colliders.terrainY(H.z), prev.hz + (H.z - prev.hz) * alpha);
+  // v2.22 plant deficit (HeroSim.plantDX/DZ): the model sits where the clip's root curve put it, so planted feet
+  // never skate when contact / walls bend the sim travel. The camera and gameplay keep the sim position.
+  camSimX = hero.root.position.x; camSimZ = hero.root.position.z;
+  hero.root.position.x += (prev.pdx || 0) + ((H.plantDX || 0) - (prev.pdx || 0)) * alpha; hero.root.position.z += (prev.pdz || 0) + ((H.plantDZ || 0) - (prev.pdz || 0)) * alpha;
   // C15: the sim snap-turns on attack assist / parry / finisher; the body turns into it over ~5 frames instead of
   // popping. Small steady turns pass straight through (no lag on locomotion).
   { const tY = lerpAngle(prev.hyaw, H.yaw, alpha);
     if (!INERT_ON || presentDt <= 0 || dispYaw === null) dispYaw = tY;
     else { let e = tY - dispYaw; e -= Math.round(e / (2 * Math.PI)) * 2 * Math.PI; const ae = Math.abs(e);
-      const k = ae < 0.12 ? 1 : 1 - Math.exp(-presentDt * (ae > 1.2 ? 26 : 34)); dispYaw += e * k; }
+      let k = ae < 0.12 ? 1 : 1 - Math.exp(-presentDt * (ae > 1.2 ? 26 : 34));
+      // v2.22 planted clips (sweeps, rift): the bake pins the feet from frame PLANT_F, so the assist turn must be fully
+      // shown by then - any body yaw left over after that rotates the planted feet (measured 1.36 m/s skate at rift f11)
+      const pf = heroPlantF();
+      if (pf >= 0) k = pf >= PLANT_F ? 1 : Math.max(k, Math.min(1, presentDt * 60 / Math.max(1, PLANT_F - pf)));
+      dispYaw += e * k; }
     hero.root.rotation.y = dispYaw; }
   poseHero(alpha, presentDt);
   for (let i = 0; i < slots.length; i++) if (slots[i].bound) poseDuelist(slots[i], i, alpha);
   if (sim.bossActive) poseBoss(alpha);
   else { for (const m of poolMeshes) m.visible = false; orbMesh.visible = false; }
   if (sim.stage3Active) poseGauntlet(alpha, presentDt);
-  pickupLayer(presentDt);
+  pickupLayer(presentDt); dropLayer(presentDt);
+  if (roadMap.on) roadMap.update(Math.min(1, (sim.stateF + alpha) / FLOW_F.ROAD));
 
-  const attacking = H.state === HERO_STATE.ACTION || H.state === HERO_STATE.FINISHER;
+  const attacking = H.state === HERO_STATE.ACTION || H.state === HERO_STATE.FINISHER || (H.state === HERO_STATE.RIFT && H.riftF >= HERO_RIFT.FINALE - 8);
   if (attacking) { heroSword.hilt.getWorldPosition(_a); heroSword.tip.getWorldPosition(_b);
     const finisher = H.state === HERO_STATE.FINISHER;
     fx.streakSample(HERO_ID, _a, _b, INK_ON ? (finisher ? INK.FIN : INK.JADE) : 0xff1f14, INK_ON ? INK.LINGER : undefined); streak.hero = true; }
   else if (streak.hero) { fx.streakEnd(HERO_ID); streak.hero = false; }
+  dmcLayer(presentDt);
   if (INK_ON) inkLayer(attacking, presentDt);
   else if (H.state === HERO_STATE.DODGE && H.actF === 3 && presentDt > 0) fx.afterimage(HERO_ID, false, 0.5);
   reticleLayer();
 
-  camHero.position.copy(hero.root.position); camHero.yaw = H.yaw;
+  camHero.position.copy(hero.root.position); camHero.position.x = camSimX; camHero.position.z = camSimZ; camHero.yaw = H.yaw;
   chooseCamTarget();
   // cinematic subject: the wyvern's body-to-head midpoint (tracks the landing, the roar and the fall)
   // C13 occluder: the wyvern body centre (pelvis->chest), only while grounded near the hero
@@ -1296,6 +1786,12 @@ function update(realDt, alpha, presentDt, noRender = false) {
     cam.occluder.active = sim.gauntlet.y < 1.0; if (cam.occluder.active) gview.CHEST.getWorldPosition(cam.occluder.position);
     gview.HEAD.getWorldPosition(_a); cam.cineFocus.copy(gview.root.position).lerp(_a, 0.5); cam.cineFocus.y = Math.max(1.4, cam.cineFocus.y);
     if (cam.cineKind === CINE.FINISHER) cam.cineFocus.copy(gview.root.position);
+  }
+  // v2.16: the shrine never set a focus, so the warden INTRO/PHASE/DEATH shots orbited a stale ford point and the
+  // DEATH pull-back drove into the halls (clearance pulled it 9 m in, hero 4x off the frame edge). Focus = warden chest.
+  if (sim.stage2Active && sim.warden) {
+    const r = slots[0].root.position; cam.cineFocus.set(r.x, r.y + 1.2 * WARDEN.SCALE, r.z);
+    if (cam.cineKind === CINE.FINISHER) cam.cineFocus.copy(r);
   }
   if (sim.bossActive) {
     HEAD.getWorldPosition(_a); cam.cineFocus.copy(boss.root.position).lerp(_a, 0.5); cam.cineFocus.y = Math.max(1.4, cam.cineFocus.y);
@@ -1321,13 +1817,18 @@ function update(realDt, alpha, presentDt, noRender = false) {
   }
   if (!fin) finHitShown = false;
   wasFinisher = fin;
-  letterbox(cam.cineActive ? cam.cineW : 0);
+  letterbox(Math.max(cam.cineActive ? cam.cineW : 0, reducedMotion ? 0 : dmc.riftLb * 0.6));
   cam.update(presentDt);
   camera.getWorldDirection(_dir); camYaw = Math.atan2(-_dir.x, -_dir.z);
   placeFill();
   fx.update(presentDt);
+  if (arena === 'shrine') motes.shrine.update(presentDt); else if (arena === 'foundry') motes.foundry.update(presentDt);
+  else if (arena === 'road' && roadStage) {
+    motes.road.points.position.set(roadX(H.z), 0, H.z - 6); motes.road.update(presentDt);
+    roadStage.update(H.z, sim.roadCleared, presentDt, arenaRig, roadSunDir(), ROAD_LOOK.sunDist);
+  }
   world.update(loop.simFrame / 60);
-  if (!noRender) renderer.render(scene, camera);
+  if (!noRender) post.render(presentDt);
 }
 
 // ------------------------------------------------------------------ HUD, pause, screens
@@ -1344,6 +1845,8 @@ const hud = new Hud().init({
   onResume: () => { setPaused(false); captureMouse(); },
 });
 systems.set('hud', hud);
+const roadMap = new RoadMap().init({ route: ROUTE, weaponNames: WEAPONS.map((w) => w ? w.name : ''), reducedMotion });
+systems.set('roadmap', roadMap);
 fullscreen.mountMenu(hud.slot('fs'));
 let touchWanted = touch.visible;
 touch.onVisibility = () => { if (hud._screen === '') touchWanted = touch.visible; };
@@ -1357,7 +1860,7 @@ function syncScreen() {
 }
 function setPaused(v) {
   const can = sim.state === GameState.INTRO || sim.state === GameState.WAVE || sim.state === GameState.WAVE_CLEAR || sim.state === GameState.BOSS
-    || sim.state === GameState.DOOR || sim.state === GameState.STAGE3;
+    || sim.state === GameState.DOOR || sim.state === GameState.STAGE3 || sim.state === GameState.STAGE2 || sim.state === GameState.GATE;
   v = v && can;
   if (loop.paused === v) return;
   loop.paused = v;
@@ -1376,7 +1879,7 @@ document.addEventListener('pointerlockchange', onLockLost);
 // toward the respawned hero, and mouse look stays dead because the end screen released pointer lock.
 function resetPresentation() {
   loop.clearDilation(); loop.accumulator = 0;
-  prev.hx = H.x; prev.hz = H.z; prev.hyaw = H.yaw;
+  prev.hx = H.x; prev.hz = H.z; prev.hyaw = H.yaw; prev.pdx = H.plantDX; prev.pdz = H.plantDZ;
   const B = sim.brain; prev.bx = B.x; prev.by = B.y; prev.bz = B.z; prev.byaw = B.yaw;
   loco.lastX = H.x; loco.lastZ = H.z; loco.phase = 0;
   fx.streakEnd(HERO_ID); streak.hero = false; fx.clearTelegraph(BOSS_ID); fx.clearFire(); wasFinisher = false; finHitShown = false; hud.clearFx(); breathOn = 0; letterbox(0);
@@ -1390,6 +1893,8 @@ function resetPresentation() {
   gview.root.visible = sim.stage3Active; gview.hideHazards(); if (gview.inert) gview.inert.reset();
   gview.react.amp = 0; gview.react.flash = 0; gview.seen.dome = false; gview.seen.wave = false; gview.seen.struck.fill(-1);
   fx.clearTelegraph(GAUNTLET_ID); for (const k in G_STREAK_ID) { fx.streakEnd(G_STREAK_ID[k]); gStreak[k] = false; } gstat.wasFin = false; gstat.finHit = false;
+  dropGlow.t = 0; dropGlow.ping = -1; dropGlow.w = 0; dropRoot.visible = false;
+  if (sim.state !== GameState.DOOR && sim.state !== GameState.GATE) roadMap.hide();
   setHeroWeapon(H.weapon); pickupGlow.t = 0; pickupGlow.ping = -1; pickupRoot.visible = sim.pickup.active && sim.bossActive;
   input.consumeLook(_look);                       // drop look delta accumulated on the end screen
   cam.reset(H.yaw); camHero.position.set(H.x, colliders.terrainY(H.z), H.z); camHero.yaw = H.yaw;
@@ -1416,17 +1921,30 @@ function lateUpdate(dt) {
   const alive = sim.duelists.reduce((n, d) => n + (d.alive ? 1 : 0), 0);
   hud.update({
     hp: H.hp, hpMax: SIM.HP_PLAYER, stamina: H.stamina, staminaMax: SIM.STAMINA_MAX, staminaFail: H.stamina < 12,
-    boss: sim.bossActive ? { hp: B.hp, max: BOSS.HP, posture: B.posture, postureMax: BOSS.POSTURE_MAX }
-      : sim.stage3Active ? { name: 'CHROME GAUNTLET', hp: sim.gauntlet.hp, max: GAUNTLET.HP, posture: sim.gauntlet.posture, postureMax: GAUNTLET.POSTURE_MAX } : null,
-    waveLabel: S === GameState.WAVE ? 'WAVE ' + (sim.wave + 1) + ' / ' + WAVES.length + '<small>' + alive + ' FOE' + (alive === 1 ? '' : 'S') + ' REMAIN</small>'
-      : S === GameState.BOSS ? 'THE FORD WYVERN' : S === GameState.STAGE3 ? 'THE CHROME GAUNTLET' + (sim.gauntlet.phase >= 2 ? '<small>ENRAGED</small>' : '') : '',
+    trigger: dmcView.trigger, style: dmcView.style,
+    // transitions (DOOR, GATE) show no boss bar: the previous foe's empty bar must not sit on the next stage's card
+    boss: S === GameState.GATE || S === GameState.DOOR || S === GameState.LOOT ? null
+      : sim.bossActive ? { hp: B.hp, max: BOSS.HP, posture: B.posture, postureMax: BOSS.POSTURE_MAX }
+      : sim.stage3Active ? { name: 'CHROME GAUNTLET', hp: sim.gauntlet.hp, max: GAUNTLET.HP, posture: sim.gauntlet.posture, postureMax: GAUNTLET.POSTURE_MAX }
+      : sim.stage2Active && sim.warden ? { name: 'SHADOW WARDEN', hp: sim.warden.hp, max: WARDEN.HP, posture: sim.warden.posture, postureMax: WARDEN.POSTURE } : null,
+    waveLabel: S === GameState.WAVE ? 'WAVE ' + (sim.wave + 1) + ' / ' + WAVES.length + '<small>' + alive + ' FOE' + (alive === 1 ? ' REMAINS' : 'S REMAIN') + '</small>'
+      : S === GameState.BOSS ? 'THE FORD WYVERN' : S === GameState.STAGE3 ? 'THE CHROME GAUNTLET' + (sim.gauntlet.phase >= 2 ? '<small>ENRAGED</small>' : '')
+      : S === GameState.STAGE2 ? 'THE SHADOW WARDEN' + (sim.warden && sim.warden.phase >= 2 ? '<small>ENRAGED</small>' : '') : '',
     finisher: sim.finisherReady(), touch: touch.visible, flash: H.flash,
+    tip: S === GameState.STAGE3 && (sim.stats.stage3F || 0) > 90 && (sim.stats.stage3F || 0) < 330
+      ? (touch.visible ? 'TAP BLOCK JUST BEFORE A HIT  -  JUST GUARD' : 'PRESS BLOCK JUST BEFORE A HIT  -  JUST GUARD')
+      : S === GameState.STAGE2 && (sim.stats.stage2F || 0) > 90 && (sim.stats.stage2F || 0) < 330
+      ? 'RED RING = DODGE  -  HE GUARDS LIGHTS, BREAK HIS POSTURE' : '',
   }, dt);
   hudFrame = loop.simFrame;
   touch.update && touch.update();
   touch.setAvailable(A.DODGE, H.stamina >= 1);
   touch.setAvailable(A.ROLL, H.stamina >= 1);
   touch.setAvailable(A.HEAVY, H.stamina >= 1);
+  touch.setAvailable(A.SNATCH, H.stamina >= HERO_SNATCH.STAMINA && H.snatchCd === 0);
+  touch.setAvailable(A.SWEEP, !!H.wp && H.stamina >= HERO_SWEEP.SWEEP.stamina);
+  touch.setAvailable(A.TRIGGER, H.triggerF > 0 || H.gauge >= HERO_TRIGGER.COST);
+  touch.setReady(A.TRIGGER, (H.triggerF === 0 && H.gauge >= HERO_TRIGGER.COST) || H.triggerF >= HERO_RIFT.MIN_LEFT);
   input.lateUpdate(dt);
 }
 
@@ -1448,19 +1966,21 @@ const loop = new Loop({ fixedUpdate, update, lateUpdate, reducedMotion });
   for (let i = 0; i < 3; i++) { gview.cols[i].position.set(-3 + i * 3, 0, -6); gview.markers[i].position.set(-3 + i * 3, 0.05, -5); }
   gview.dome.position.set(0, 0, -10); gview.dome.scale.setScalar(3); gview.wave.position.set(0, 0.08, -8); gview.wave.scale.setScalar(3);
   pickupRoot.visible = true; pickupRoot.position.set(4.2, 1.4, -4.6); heroGreat.socket.visible = true;
+  dropRoot.visible = true; dropRoot.position.set(-4.2, 1.4, -4.6);
   lbTop.style.transform = 'scaleY(0)';
   renderer.setRenderTarget(null);
   const arena0 = arena;
-  foundry.setVisible(true);
+  foundry.setVisible(true); shrine.setVisible(true); if (roadStage) roadStage.setVisible(true);
   await renderer.compileAsync(scene, camera, scene);
   renderer.shadowMap.needsUpdate = true;
   renderer.render(scene, camera);
   await world.water.prewarm(renderer, scene, camera);
-  foundry.setVisible(arena0 === 'foundry');
+  await post.prewarm();   // composer-target variants (NoToneMapping key) + bloom/grade/output programs
+  foundry.setVisible(arena0 === 'foundry'); shrine.setVisible(arena0 === 'shrine'); if (roadStage) roadStage.setVisible(arena0 === 'road');
   fx.prewarmEnd();
   for (const m of poolMeshes) m.visible = false; orbMesh.visible = false;
   gview.hideHazards(); gview.root.visible = sim.stage3Active;
-  setHeroWeapon(H.weapon); pickupRoot.visible = sim.pickup.active && sim.bossActive;
+  setHeroWeapon(H.weapon); pickupRoot.visible = sim.pickup.active && sim.bossActive; dropRoot.visible = false;
   for (const s of slots) s.root.visible = !!s.bound;
   boss.root.visible = sim.bossActive;
   loop.load(loopState);
@@ -1480,6 +2000,7 @@ loop._tick = (now) => { if (lastNow) ft[ftN++ % ft.length] = now - lastNow; last
 function onResize() {
   renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   fx.setViewportHeight(renderer.domElement.height);
+  post.setSize(innerWidth, innerHeight); for (const k in motes) motes[k].setViewportHeight(renderer.domElement.height);
 }
 addEventListener('resize', onResize);
 loop.start();
@@ -1502,6 +2023,14 @@ window.__ember = {
       verb: sim.brain.verb, f: sim.brain.f, state: sim.brain.state, stance: sim.brain.stance, y: +sim.brain.y.toFixed(2) };
   },
   programs() { return { start: progStart, now: renderer.info.programs.length }; },
+  // QA (v2.19): finish the current boss through its own damage path so LOOT / road map flow can be reviewed fast
+  qaKillBoss() {
+    if (sim.state === GameState.STAGE2 && sim.warden) { sim.warden.hp = 1; sim.warden.onHeroHit(H, { name: 'HEAVY', dmg: 999, posture: 0 }); return 'warden'; }
+    if (sim.state === GameState.STAGE3) { sim.gauntlet.hp = 1; sim.gauntlet.takeHit(999, 0, 0); return 'gauntlet'; }
+    if (sim.state === GameState.BOSS) { sim.brain.hp = 1; sim.brain.takeHit ? sim.brain.takeHit(999, 0, 0) : (sim.brain.hp = 0); return 'wyvern'; }
+    return null;
+  },
+  flow() { return { state: GAME_STATE_NAMES[sim.state], stateF: sim.stateF, drop: { ...sim.drop }, shown: dropRoot.visible, weapon: H.weapon, carry: sim.carry, claimed: sim.claimed.slice(), road: { on: roadMap.on, leg: roadMap.leg } }; },
   // QA: gauntlet blade sockets in world space (base, tip, length, visible) plus head/paw bone positions
   dbgBlades() {
     const r = (v) => [+v.x.toFixed(2), +v.y.toFixed(2), +v.z.toFixed(2)], a = new THREE.Vector3(), b = new THREE.Vector3(), o = {};
@@ -1520,9 +2049,32 @@ window.__ember = {
       out.push([o.name, +(dx * fx + dz * fz).toFixed(2), +(dx * fz - dz * fx).toFixed(2), +(p.y - R.position.y).toFixed(2)]); });
     return out;
   },
+  // QA: render the scene into a float32 target and report non-finite / over-half-float pixels and the object under them
+  dbgHdr(hide) {
+    const w = renderer.domElement.width, h = renderer.domElement.height, hid = [];
+    if (hide) { const rx = new RegExp(hide); scene.traverse((o) => { if (o.visible && (rx.test(o.name) || (o.isMesh || o.isPoints || o.isSprite) && rx.test(o.type + ':' + [].concat(o.material || []).map((m) => m.type).join(',')))) hid.push(o); }); for (const o of hid) o.visible = false; }
+    try { return this._hdr(w, h); } finally { for (const o of hid) o.visible = true; }
+  },
+  _hdr(w, h) {
+    const rt = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, samples: 4 });
+    const prev = renderer.getRenderTarget(); renderer.setRenderTarget(rt); renderer.render(scene, camera); renderer.setRenderTarget(prev);
+    const raw = new Uint16Array(w * h * 4); renderer.readRenderTargetPixels(rt, 0, 0, w, h, raw); rt.dispose();
+    const px = new Float32Array(w * h * 4); for (let i = 0; i < raw.length; i++) px[i] = THREE.DataUtils.fromHalfFloat(raw[i]);
+    let nan = 0, inf = 0, big = 0, max = 0; const hits = new Map(), rc = new THREE.Raycaster(), nd = new THREE.Vector2();
+    for (let i = 0; i < w * h; i++) {
+      let bad = 0;
+      for (let c = 0; c < 3; c++) { const v = px[i * 4 + c]; if (v !== v) { nan++; bad = 1; } else if (!isFinite(v)) { inf++; bad = 1; } else { if (v > 65000) { big++; bad = 1; } if (v > max) max = v; } }
+      if (bad && hits.size < 12) { const x = i % w, y = (i / w) | 0; nd.set((x + 0.5) / w * 2 - 1, (y + 0.5) / h * 2 - 1); rc.setFromCamera(nd, camera);
+        const shown = (o) => { for (let n = o; n; n = n.parent) if (!n.visible) return false; return true; };
+        const hit = rc.intersectObjects(scene.children, true).find((o) => o.object.isMesh && shown(o.object));
+        const key = hit ? (hit.object.name || '?') + '|' + [].concat(hit.object.material).map((m) => m.name || m.type).join(',') : 'none';
+        hits.set(key, (hits.get(key) || 0) + 1); }
+    }
+    return { w, h, nan, inf, big, max: +max.toFixed(1), hits: [...hits] };
+  },
   // QA: mean / p95 luminance of the drawn frame (0-255), read back from the canvas
   lum() {
-    renderer.render(scene, camera);
+    post.render(0);
     const gl = renderer.getContext(), w = gl.drawingBufferWidth, h = gl.drawingBufferHeight, px = new Uint8Array(w * h * 4);
     gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
     const hist = new Uint32Array(256); let sum = 0, n = 0;
@@ -1542,15 +2094,21 @@ window.__ember = {
   lights() { let n = 0; scene.traverse((o) => { if (o.isLight && o.visible) n++; }); return n; },
   state() {
     return { frame: loop.simFrame, simFrame: sim.frame, state: GAME_STATE_NAMES[sim.state], wave: sim.wave, paused: loop.paused, arena,
+      pass: sim.roadActive ? { leg: sim.roadLeg, ambush: sim.ambushIdx, live: sim.ambushLive, cleared: sim.roadCleared, hx: +H.x.toFixed(2), hz: +H.z.toFixed(2), missing: roadStage ? roadStage.missing : null } : null,
       gauntlet: sim.stage3Active ? { hp: sim.gauntlet.hp, state: sim.gauntlet.state, x: sim.gauntlet.x, z: sim.gauntlet.z } : null,
+      warden: sim.stage2Active && sim.warden ? { hp: sim.warden.hp, state: sim.warden.state, phase: sim.warden.phase, verb: sim.warden.verb, x: sim.warden.x, z: sim.warden.z, f: sim.warden.f, wmo: { applied: wardenMotion.applied, peak: wardenMotion.peak }, counts: Object.assign({}, sim.warden.verbCounts || {}) } : null,
       screen: hud._screen, hash: sim.hash(), heroHp: H.hp, heroState: H.state, stamina: H.stamina, bossHp: sim.brain.hp,
+      dmc: { gauge: +H.gauge.toFixed(2), triggerF: H.triggerF, triggers: H.triggers, snatches: H.snatches, snatchCd: H.snatchCd,
+        rifts: H.rifts, riftF: H.riftF, riftCuts: H.riftCuts, riftHits: H.riftHits, riftFx: fx.stats.rifts || 0,
+        rank: sim.style.rank, letter: sim.style.letter, peak: sim.style.peak, points: +sim.style.points.toFixed(1),
+        hud: { rank: hud.el.rankB.textContent, rankOn: hud.el.rank.classList.contains('on'), tg: hud._tgCls } },
       duelists: sim.duelists.map((d) => ({ hp: d.hp, alive: d.alive })), stats: { ...sim.stats }, run: { ...runStats },
       backDot: H.maxBackwardDot, camMin: cam.minClearance, camResets, quickstep: Object.keys(QUICKSTEP.clips),
       cam: { shot: cam.shot, trauma: cam.trauma, push: cam.push, phantom: cam.phantom, orbitYaw: cam.orbitYaw, heroYaw: H.yaw, timeScale: loop.timeScale,
         dist: Math.hypot(camera.position.x - H.x, camera.position.z - H.z), occFrames: cam.occFrames, occYaw: cam.occYaw, occOn: cam.occluder.active },
-      cine: { kind: CINE_NAMES[cam.cineKind], w: cam.cineW, log: cam.cineLog.slice() }, fx: fx.counts(), rec: recMode, lunge: Object.keys(lungeOk),
+      cine: { kind: CINE_NAMES[cam.cineKind], w: cam.cineW, log: cam.cineLog.slice() }, fx: fx.counts(), postBlur: +(post.blur || 0).toFixed(3), rec: recMode, lunge: Object.keys(lungeOk),
       step: { kind: H.stepKind, dodgeF: H.dodgeF, clip: hero.on.length ? hero.on[0].getClip().name : '', verb: H.state === HERO_STATE.ACTION ? H.verb : H.state === HERO_STATE.FINISHER ? 'FINISHER' : '', hs: H.state }, programs: { start: progStart, now: renderer.info.programs.length },
-      weapon: H.weapon, grip: { w: +GRIP.w.toFixed(3), n: GRIP.n, far: GRIP.far, errMeanMm: GRIP.n ? +(GRIP.err / GRIP.n * 1000).toFixed(2) : 0, errMaxMm: +(GRIP.errMax * 1000).toFixed(2), speed: +H.speed.toFixed(3), loco: H.state === HERO_STATE.LOCO, eMm: +((GRIP.e || 0) * 1000).toFixed(1), dbg: GRIP.dbg }, heroXZ: [+H.x.toFixed(2), +H.z.toFixed(2), +H.yaw.toFixed(3)], pickup: { x: sim.pickup.x, z: sim.pickup.z, active: sim.pickup.active, takenF: sim.pickup.takenF, shown: pickupRoot.visible },
+      weapon: H.weapon, grip: { w: +GRIP.w.toFixed(3), n: GRIP.n, far: GRIP.far, errMeanMm: GRIP.n ? +(GRIP.err / GRIP.n * 1000).toFixed(2) : 0, errMaxMm: +(GRIP.errMax * 1000).toFixed(2), speed: +H.speed.toFixed(3), loco: H.state === HERO_STATE.LOCO, eMm: +((GRIP.e || 0) * 1000).toFixed(1), dbg: GRIP.dbg }, heroXZ: [+H.x.toFixed(2), +H.z.toFixed(2), +H.yaw.toFixed(3)], pickup: { x: sim.pickup.x, z: sim.pickup.z, active: sim.pickup.active, takenF: sim.pickup.takenF, shown: pickupRoot.visible }, drop: { ...sim.drop, shown: dropRoot.visible, carry: sim.carry, claimed: sim.claimed.slice() }, road: { on: roadMap.on, leg: roadMap.leg },
       dropped: loop.droppedSteps, touch: touch.visible, fs: { supported: fullscreen.supported, mode: fullscreen.mode, active: fullscreen.active, requests: fullscreen.requests }, hud: { hp: hud.el.hpI.style.transform, boss: hud.el.boss.style.display } };
   },
   // camera framing probe (QA): hero chest in NDC + camera forward bearing, read straight off the rendered camera
@@ -1567,16 +2125,51 @@ window.__ember = {
   resetFrames() { ftN = 0; lastNow = 0; },
   layout: () => touch.layoutReport(),
   // ink probe (QA): live streak slots as owner / tint / life / sample count / guard->tip span of the newest sample
-  dbgStreaks() { const r = [], S = 10, Hh = fx.stHist; for (let s = 0; s < 4; s++) { if (fx.stLife[s] <= 0) continue; const b = s * S * 6;
+  // QA only (?god=1): fill the Ember Trigger gauge so the keyboard path can be tested without a long combo
+  grantGauge(n) { if (qs.get('god') === '1') H.gauge = Math.min(HERO_TRIGGER.MAX, n); return H.gauge; },
+  dbgStreaks() { const r = [], S = FX_CAPS.streakSamples, Hh = fx.stHist; for (let s = 0; s < 4; s++) { if (fx.stLife[s] <= 0) continue; const b = s * S * 6;
     r.push({ owner: fx.stOwner[s], hero: fx.stOwner[s] === HERO_ID, active: fx.stActive[s], life: +fx.stLife[s].toFixed(3), n: fx.stCount[s],
       tint: [+fx.stTint[s * 3].toFixed(2), +fx.stTint[s * 3 + 1].toFixed(2), +fx.stTint[s * 3 + 2].toFixed(2)],
       tipToHero: +Math.hypot(Hh[b + 3] - H.x, Hh[b + 5] - H.z).toFixed(2) }); } return r; },
   // Recorder lockstep: stop RAF, then each advance(n) runs n exact 1/60 s frames (sim + render), so captured
   // footage is a true 60 fps regardless of how slow the capture itself is.
   lockstep() { loop.stop(); return true; },
+  unlock() { loop.start(); return true; },
+  press(k) { qaPress = k; return true; },
+  place(x, z, yaw = 0) { const w = H.weapon; H.reset(x, z, yaw); if (w > 0) { H.weapon = 0; H.equip(w); } return [H.x, H.z]; },   // QA: open-ground review spot   // QA: one command flag on the next sim step (sweep / attack / heavy / trigger ...)
+  // v2.22 QA: foot bone world positions (m), sword tip height above terrain, sweep counters
+  v222() {
+    const o = { sweeps: H.sweeps, knocks: H.knocks, tipY: null, feet: null, f: H.state === HERO_STATE.ACTION ? H.actF : H.state === HERO_STATE.RIFT ? H.riftF : -1,
+      sc: +(hero.root.scale.x * hero.pivot.scale.x * hero.model.scale.x).toFixed(4), trig: H.triggerF, hs: H.state, ct: hero.pt,
+      req: H.dbgReq, push: H.dbgPush, pre: H.dbgPre, x0: H.dbgX0, lim: [colliders.halfX, colliders.halfZ],
+      x: H.x, z: H.z, yaw: H.yaw, rx: hero.root.position.x, rz: hero.root.position.z, ry: hero.root.rotation.y };
+    if (heroSword && heroSword.tip) { heroSword.tip.getWorldPosition(_a); o.tipY = +(_a.y - colliders.terrainY(_a.z)).toFixed(3); }
+    const L = hero.model.getObjectByName('LeftFoot'), R = hero.model.getObjectByName('RightFoot');
+    if (L && R) { L.getWorldPosition(_a); R.getWorldPosition(_b); const g = colliders.terrainY(H.z);
+      o.feet = { L: [+_a.x.toFixed(4), +(_a.y - g).toFixed(4), +_a.z.toFixed(4)], R: [+_b.x.toFixed(4), +(_b.y - g).toFixed(4), +_b.z.toFixed(4)] };
+      const LT = hero.model.getObjectByName('LeftToeBase'), RT = hero.model.getObjectByName('RightToeBase');
+      if (LT && RT) { LT.getWorldPosition(_a); RT.getWorldPosition(_b);
+        o.toes = { L: [+_a.x.toFixed(4), +(_a.y - g).toFixed(4), +_a.z.toFixed(4)], R: [+_b.x.toFixed(4), +(_b.y - g).toFixed(4), +_b.z.toFixed(4)] }; } }
+    return o;
+  },
+  // QA attribution: re-render the current frame with named fx children hidden (prefix match), then restore.
+  // Visibility only - no program change, no sim step. Returns the names that were hidden.
+  dbgRenderWithout(prefixes, bloomOff) {
+    const hid = [];
+    fx.group.traverse((o) => { if (o !== fx.group && o.visible && prefixes.some((p) => o.name.startsWith(p))) { o.visible = false; o.userData.__qaHid = true; hid.push(o.name); } });
+    if (bloomOff && post.bloom) { post.__qaBs = post.bloom.strength; post.bloom.strength = 0; }
+    post.render(0);
+    return hid;
+  },
+  dbgRestore() {
+    fx.group.traverse((o) => { if (o.userData.__qaHid) { o.visible = true; o.userData.__qaHid = false; } });
+    if (post.bloom && post.__qaBs !== undefined) { post.bloom.strength = post.__qaBs; post.__qaBs = undefined; }
+    post.render(0); return true;
+  },
+  dbgFxNames() { const n = []; fx.group.traverse((o) => { if (o !== fx.group && o.visible) n.push(o.name); }); return n; },
   world: () => ({ stats: world.stats, programs: renderer.info.programs.length, calls: renderer.info.render.calls, tris: renderer.info.render.triangles }),
   // review camera (QA screenshots only): stops the loop, places the camera, renders one frame
-  reviewCam(p, t) { loop.stop(); camera.position.set(p[0], p[1], p[2]); camera.lookAt(t[0], t[1], t[2]); placeFill(); renderer.render(scene, camera); return true; },
+  reviewCam(p, t) { loop.stop(); camera.position.set(p[0], p[1], p[2]); camera.lookAt(t[0], t[1], t[2]); placeFill(); post.render(0); return true; },
   // QA: hold the hero in one clip frame (optionally with the grip IK applied) and frame a close-up of the hands
   holdPose(clip, f, ik = true, view = 'left', dist = 1.4) {
     loop.stop(); setHeroWeapon(1); heroSword = heroGreat;
@@ -1585,8 +2178,17 @@ window.__ember = {
     const c = new THREE.Vector3(), r = new THREE.Vector3(); heroBones.LeftHand.getWorldPosition(c); heroBones.RightHand.getWorldPosition(r); c.add(r).multiplyScalar(0.5);
     const yaw = H.yaw, fx = -Math.sin(yaw), fz = -Math.cos(yaw), sx = view === 'left' ? -1 : view === 'right' ? 1 : 0;
     const dx = view === 'front' ? fx : -fz * sx, dz = view === 'front' ? fz : fx * sx;
-    camera.position.set(c.x + dx * dist, c.y + 0.25, c.z + dz * dist); camera.lookAt(c); placeFill(); renderer.render(scene, camera);
+    camera.position.set(c.x + dx * dist, c.y + 0.25, c.z + dz * dist); camera.lookAt(c); placeFill(); post.render(0);
     return true;
+  },
+  // QA: raw-clip grip residual (mm) at one frame with the IK applied and no presentation layers
+  dbgHeroPose() { const r = {}; hero.model.traverse((o) => { if (o.isBone) { const q = o.quaternion, p = o.position; r[o.name] = [q.x, q.y, q.z, q.w, p.x, p.y, p.z].map((v) => +v.toFixed(4)); } }); const s = heroGreat.socket.quaternion; return { pc: hero.pc, pt: hero.pt, bones: r, sock: [s.x, s.y, s.z, s.w].map((v) => +v.toFixed(4)), rs: hero.model.scale.toArray(), rp: hero.model.position.toArray() }; },
+  handWorld() { const q = new THREE.Quaternion(); heroBones.RightHand.getWorldQuaternion(q); return [q.x, q.y, q.z, q.w]; },
+  gripAt(clip, f) {
+    pose(hero, 1, clip, 1, f / 60); hero.model.updateMatrixWorld(true);
+    const saveW = H.weapon; H.weapon = 1; GRIP.w = 1; leftGripIK(0); H.weapon = saveW; hero.model.updateMatrixWorld(true);
+    const a = new THREE.Vector3().copy(FIST.L).applyMatrix4(heroBones.LeftHand.matrixWorld), t = new THREE.Vector3().copy(GRIP.fist);
+    heroGreat.socket.localToWorld(t); return { eMm: +(a.distanceTo(t) * 1000).toFixed(1), dbg: GRIP.dbg };
   },
   heroClips: () => Object.keys(hero.actions),
   // QA: left / right FIST centres (skin-weighted hand vertices) in great-sword socket space per clip frame
@@ -1618,7 +2220,7 @@ window.__ember = {
   dispose() {
     loop.dispose(); removeEventListener('resize', onResize);
     document.removeEventListener('visibilitychange', onVisPause); document.removeEventListener('pointerlockchange', onLockLost);
-    sim.dispose(); hud.dispose(); fullscreen.dispose(); touch.dispose(); input.dispose(); fx.dispose(); cam.dispose(); world.dispose(); look.dispose(); bus.dispose();
+    sim.dispose(); hud.dispose(); roadMap.dispose(); fullscreen.dispose(); touch.dispose(); input.dispose(); fx.dispose(); cam.dispose(); world.dispose(); look.dispose(); bus.dispose();
     for (const a of [hero, boss, ...slots]) a.mixer.stopAllAction();
     scene.traverse((o) => { if (o.isMesh) { o.geometry.dispose(); for (const m of [].concat(o.material)) { for (const k in m) if (m[k] && m[k].isTexture) m[k].dispose(); m.dispose(); } } });
     renderer.dispose(); renderer.forceContextLoss(); renderer.domElement.remove();

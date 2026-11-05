@@ -42,6 +42,13 @@ export class Inertializer {
     this.xR = new Float32Array(n * 3); this.vR = new Float32Array(n * 3); this.xP = new Float32Array(n * 3); this.vP = new Float32Array(n * 3);
     this.oldVR = new Float32Array(n * 3); this.oldVP = new Float32Array(n * 3);
     this.springOn = false; this.seedV = false; this.hl = 0.05; this.hasPrev = false; this.hlScale = 0.3;
+    // v2.22 planted-foot clips: the contact-IK bake owns these bones, so the spring offset never touches them while one
+    // of plantClips plays (an offset on a planted leg skates the foot). plantMask[i] = 1 for those bone indices.
+    this.plantClips = null; this.plantMask = new Uint8Array(n);
+  }
+  setPlant(clipNames, boneNames) {
+    this.plantClips = new Set(clipNames); const s = new Set(boneNames);
+    for (let i = 0; i < this.bones.length; i++) this.plantMask[i] = s.has(this.bones[i].name) ? 1 : 0;
   }
   // THREE.PropertyMixer only writes a binding when its mixed value changed since the last write. A held pose
   // (hit-stop, clamped clip end, frozen clip time) is therefore NOT rewritten, and anything layered on top after the
@@ -108,7 +115,9 @@ export class Inertializer {
     if (this.springOn && deadline <= 0) this.springOn = false;
     if (this.springOn) {
       const u = deadline < 0.1 ? deadline / 0.1 : 1, g = u * u * (3 - 2 * u);
+      const PM = this.plantClips && this.plantClips.has(clip) ? this.plantMask : null;
       for (let i = 0; i < n; i++) {
+        if (PM && PM[i]) continue;
         const b = B[i], k = i * 3;
         qexp(XR, k, g, _o); b.quaternion.premultiply(_o);
         b.position.x += XP[k] * g; b.position.y += XP[k + 1] * g; b.position.z += XP[k + 2] * g;

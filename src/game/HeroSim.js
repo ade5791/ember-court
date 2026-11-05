@@ -5,9 +5,25 @@
 // Verb frame data comes from assets/attack-timing.json (same table the controls page plays).
 import { SIM } from '../shared/constants.js';
 import { Outcome } from '../shared/enums.js';
+import { footStep } from '../shared/attackFoot.js';
 
-export const HERO_STATE = Object.freeze({ LOCO: 0, ACTION: 1, DODGE: 2, HITSTUN: 3, DEAD: 4, FINISHER: 5 });
-export const HERO_STATE_NAMES = Object.freeze(['LOCO', 'ACTION', 'DODGE', 'HITSTUN', 'DEAD', 'FINISHER']);
+export const HERO_STATE = Object.freeze({ LOCO: 0, ACTION: 1, DODGE: 2, HITSTUN: 3, DEAD: 4, FINISHER: 5, SNATCH: 6, RIFT: 7 });
+export const HERO_STATE_NAMES = Object.freeze(['LOCO', 'ACTION', 'DODGE', 'HITSTUN', 'DEAD', 'FINISHER', 'SNATCH', 'RIFT']);
+// v2.21 RIFT ("Ember Rift"): Judgment-Cut-End adapted from the Jessica13007 reference. Only while Ember Trigger burns
+// with at least MIN_LEFT frames left: press Trigger again. The hero plants and sheathes (STARTUP, invulnerable),
+// CUTS space-cuts land on every targetable foe within RANGE (any direction, one actionId per cut), then the
+// re-sheathe FINALE lands one heavy hit and spends the rest of the trigger. Invulnerable until FINALE + 6.
+export const HERO_RIFT = Object.freeze({ STARTUP: 22, CUTS: 6, CUT_EVERY: 4, RANGE: 8.5, FINALE: 54, TOTAL: 86, MIN_LEFT: 150,
+  CUT_DMG: 9, CUT_POSTURE: 16, END_DMG: 38, END_POSTURE: 70 });
+// v2.14 DMC layer (studied from DMC5 Nero vs Vergil DMD footage; see docs/STYLE_SPEC.md).
+// SNATCH: Nero's Wire Snatch adapted - an ember chain zips the hero to the nearest foe inside RANGE. Startup is
+// vulnerable (no i-frames), travel is fast and ends just inside sword reach, recovery is cancellable into any
+// attack (the "snatch into combo" loop). Big foes (bosses) pull the hero; it never moves the target.
+export const HERO_SNATCH = Object.freeze({ RANGE: 11.0, MIN: 3.2, STARTUP: 7, TRAVEL_MAX: 16, SPEED: 0.62, RECOVER: 12, CANCEL_FROM: 2, STAMINA: 14, STOP_AT: 0.7, COOLDOWN: 24 });
+// TRIGGER: Devil Trigger adapted as "Ember Trigger". Gauge 0..100 fills from style (StyleMeter) and landed hits.
+// Activate at >= COST: TRIGGER_F frames of x DMG damage / x POSTURE posture, stamina regen x STAM, health drain
+// reversed into slow regen, and a short invulnerable burst on activation (BURST_F) that knocks foes back.
+export const HERO_TRIGGER = Object.freeze({ MAX: 100, COST: 50, DRAIN: 100 / (60 * 12), DMG: 1.3, POSTURE: 1.4, STAM: 1.8, HEAL_PER_S: 3, BURST_F: 18, BURST_R: 3.2, HIT_GAIN: 0.6 });
 
 // gameplay numbers per verb (frame data comes from the timing table)
 export const HERO_VERBS = Object.freeze({
@@ -16,6 +32,30 @@ export const HERO_VERBS = Object.freeze({
   LIGHT_3: { clip: 'light_3', stamina: 16, lunge: 0.60, chainTo: null, chain: null, dodgeFrom: 30, dmg: 20, posture: 18 },
   HEAVY: { clip: 'heavy', stamina: 30, lunge: 0.80, chainTo: null, chain: null, dodgeFrom: 50, dmg: 32, posture: 34 },
 });
+// v2.22 great-sword SWEEP pair (Blender-authored gs_sweep / gs_sweep_rev over MotionBricks fw_sweep / fw_sweep_rev).
+// Great sword only. Frame data is 1:1 with the authored clips (already at great-sword pace, so no SWING stretch).
+// Contact: wide arc (cos >= ARC, about 100 deg each side of facing) instead of the 70 deg cone, every foe in the arc
+// once per actionId, knockback KNOCK metres over KNOCK_F frames (non-boss only). Travel and turn come from the
+// footwork root curve (foot), never from a lunge, so the planted feet in the clip match the sim exactly.
+// SWEEP chains into SWEEP_REV with a second sweep press inside chain[].
+export const HERO_SWEEP = Object.freeze({
+  SWEEP: { clip: 'gs_sweep', foot: 'at_sweep', startup: 34, active: 13, total: 64, chainTo: 'SWEEP_REV', chain: [40, 58], dodgeFrom: 50,
+    stamina: 26, dmg: 16, posture: 20, reach: 1.35, arc: -0.17, knock: 1.2 },
+  SWEEP_REV: { clip: 'gs_sweep_rev', foot: 'at_sweep_rev', startup: 31, active: 13, total: 60, chainTo: null, chain: null, dodgeFrom: 48,
+    stamina: 24, dmg: 18, posture: 24, reach: 1.35, arc: -0.17, knock: 1.4 },
+  KNOCK_F: 10,
+});
+// Rift footwork (MotionBricks at_rift_plant, 87 f): the whole rift follows its root curve (a short planted brace).
+export const HERO_RIFT_FOOT = Object.freeze({ CLIP: 'at_rift_plant' });
+function sweepVerb(k) {
+  const s = HERO_SWEEP[k], rec = s.total - s.startup - s.active;
+  const phases = [
+    { phase: 'STARTUP', specF: s.startup, clipF: [0, s.startup], start: 0 },
+    { phase: 'ACTIVE', specF: s.active, clipF: [s.startup, s.startup + s.active], start: s.startup },
+    { phase: 'RECOVERY', specF: rec, clipF: [s.startup + s.active, s.total], start: s.startup + s.active },
+  ];
+  return { ...s, name: k, phases, sweep: true };
+}
 export const HERO_DODGE = Object.freeze({ total: 34, travel: 3.0, travelF: [2, 22], stamina: 20, cancelFrom: 28, guardRange: 9.0 });
 // Guarded quickstep directions (relative to facing). Clip names match the MotionBricks bake (motion/mb/hero.combat.json).
 export const STEP_DIR = Object.freeze({ NONE: 0, F: 1, B: 2, L: 3, R: 4 });
@@ -51,14 +91,25 @@ export function scaleVerb(v, k) {
   o.chain = v.chain ? [s(v.chain[0]), s(v.chain[1])] : null; o.dodgeFrom = s(v.dodgeFrom);
   return o;
 }
-export const WEAPON = Object.freeze({ SWORD: 0, GREAT: 1 });
+export const WEAPON = Object.freeze({ SWORD: 0, GREAT: 1, FANG: 2, ODACHI: 3, FROST: 4 });
+// v2.19 boss drops: every two-hander shares the great-sword frame data (SWING stays 1.3, so one stretched verb set
+// and one clip warp table serve them all) and differs in reach / damage / posture / weight plus one perk:
+// GAUGE scales the Ember Trigger gauge gained from style. Ids only go up (a drop never downgrades the hero).
+// FANG drops from the Ford Wyvern, ODACHI from the Shadow Warden, FROST from the Chrome Gauntlet (victory relic).
+export const WEAPONS = Object.freeze([
+  null,
+  Object.freeze({ id: 1, key: 'great', name: 'GREAT SWORD', REACH: 0.7, DMG: 1.4, POSTURE: 1.35, STAMINA: 1.15, SWING: 1.3, MOVE: 0.72, TURN: 0.8, GAUGE: 1.0 }),
+  Object.freeze({ id: 2, key: 'fang', name: 'WYVERN FANG', REACH: 0.75, DMG: 1.55, POSTURE: 1.5, STAMINA: 1.2, SWING: 1.3, MOVE: 0.7, TURN: 0.8, GAUGE: 1.5 }),
+  Object.freeze({ id: 3, key: 'odachi', name: 'DUSK ODACHI', REACH: 1.0, DMG: 1.45, POSTURE: 1.3, STAMINA: 1.1, SWING: 1.3, MOVE: 0.8, TURN: 0.86, GAUGE: 1.2 }),
+  Object.freeze({ id: 4, key: 'frost', name: 'FROSTBRAND', REACH: 0.85, DMG: 1.7, POSTURE: 1.6, STAMINA: 1.15, SWING: 1.3, MOVE: 0.74, TURN: 0.82, GAUGE: 1.3 }),
+]);
 const TURN = SIM.TURN_RATE / 60;
 const TAU = Math.PI * 2;
 function wrap(a) { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI; }
 
 // Command filled each fixed step by the game (input layer or bot). Reused, never reallocated.
 export function makeHeroCommand() {
-  return { mx: 0, mz: 0, speed: 0, attack: false, heavy: false, heavyHeld: false, dodge: false, roll: false, blockHeld: false, blockPress: false };
+  return { mx: 0, mz: 0, speed: 0, attack: false, heavy: false, heavyHeld: false, dodge: false, roll: false, blockHeld: false, blockPress: false, snatch: false, trigger: false, sweep: false };
 }
 
 export class HeroSim {
@@ -83,6 +134,8 @@ export class HeroSim {
     // great-sword frame data: same verbs stretched by GREATSWORD.SWING (this.verbs swaps on equip / reset)
     this.verbsStd = this.verbs; this.verbsGreat = {};
     for (const k in this.verbsStd) this.verbsGreat[k] = scaleVerb(this.verbsStd[k], GREATSWORD.SWING);
+    this.verbsGreat.SWEEP = sweepVerb('SWEEP'); this.verbsGreat.SWEEP_REV = sweepVerb('SWEEP_REV');
+    this._foot = new Float32Array(3); this.footYaw0 = 0; this.sweeps = 0; this.knocks = 0;
     this._charged = { ...this.verbs.HEAVY };   // scratch verb record for a charged release (no per-hit allocation)
     this._great = { name: '', dmg: 0, posture: 0, reach: 0, charge: 0 };   // scratch verb record for great-sword hits
     this.id = 1; this.radius = SIM.CAPSULE_RADIUS;
@@ -98,7 +151,7 @@ export class HeroSim {
     this.hp = SIM.HP_PLAYER; this.stamina = SIM.STAMINA_MAX; this.staminaIdle = 0;
     this.state = HERO_STATE.LOCO; this.verb = null; this.actF = 0; this.actionId = 0; this.stateF = 0;
     this.invuln = false; this.dodgeF = -1; this.deflectF = -1; this.blocking = false;
-    this.stepDirX = 0; this.stepDirZ = 1; this.stepToward = 0; this.pushX = 0; this.pushZ = 0; this.stepKind = STEP_DIR.NONE;
+    this.stepDirX = 0; this.stepDirZ = 1; this.stepToward = 0; this.pushX = 0; this.pushZ = 0; this._lpx = 0; this._lpz = 0; this._lpF = 0; this.plantDX = 0; this.plantDZ = 0; this.stepKind = STEP_DIR.NONE;
     this.queued = null; this.hitstunLen = HITSTUN_F;
     this.frame = 0; this.hitsTaken = 0; this.damageTaken = 0; this.damageDealt = 0; this.flash = 0;
     this.perfects = 0; this.deflects = 0; this.phantoms = 0; this.finishers = 0;
@@ -107,10 +160,75 @@ export class HeroSim {
     this._hitN = 0;
     this.charging = false; this.chargeF = 0; this.chargeLvl = 0; this.chargedHits = 0;
     this.hpIdle = 0; this.hpRegained = 0;
-    this.weapon = WEAPON.SWORD; this.verbs = this.verbsStd;
+    this.weapon = WEAPON.SWORD; this.wp = null; this.verbs = this.verbsStd;
+    // DMC layer
+    this.snatchF = -1; this.snatchT = null; this.snatchCd = 0; this.snatchX = 0; this.snatchZ = 0; this.snatches = 0;
+    this.gauge = 0; this.triggerF = 0; this.triggers = 0; this.burstF = -1; this.burstHit = false;
+    this.riftF = -1; this.rifts = 0; this.riftCuts = 0; this.riftHits = 0;
   }
 
-  equipGreatsword() { if (this.weapon === WEAPON.GREAT) return false; this.weapon = WEAPON.GREAT; this.verbs = this.verbsGreat; this._event('equip'); return true; }
+  // Ember Rift: needs a burning trigger with MIN_LEFT frames left; free cancel from LOCO, late ACTION recovery or DODGE.
+  _startRift(targets) {
+    if (this.triggerF < HERO_RIFT.MIN_LEFT) return false;
+    const s = this.state;
+    const okAct = s === HERO_STATE.ACTION && this.verbs[this.verb] && this.actF >= this.verbs[this.verb].dodgeFrom;
+    if (!(s === HERO_STATE.LOCO || s === HERO_STATE.DODGE || okAct)) return false;
+    this.state = HERO_STATE.RIFT; this.riftF = 0; this.actF = 0; this.dodgeF = -1; this.invuln = true;
+    this.blocking = false; this.queued = null; this.charging = false; this.speed = 0;
+    const ay = this._assistYaw(targets); if (ay !== null) this.yaw = ay;
+    this.footYaw0 = this.yaw; this.rifts++; this._event('rift');
+    return true;
+  }
+
+  _riftCut(targets, fin) {
+    const R = HERO_RIFT;
+    const v = fin ? (this._riftEnd || (this._riftEnd = { name: 'RIFT_END', dmg: R.END_DMG, posture: R.END_POSTURE, reach: R.RANGE, charge: 0, great: false, rift: true }))
+      : (this._riftV || (this._riftV = { name: 'RIFT_CUT', dmg: R.CUT_DMG, posture: R.CUT_POSTURE, reach: R.RANGE, charge: 0, great: false, rift: true }));
+    this.actionId++; this.riftCuts++;
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i]; if (!t || !t.targetable) continue;
+      if (Math.hypot(t.x - this.x, t.z - this.z) > R.RANGE + (t.radius || 0)) continue;
+      const dealt = t.onHeroHit ? t.onHeroHit(this, v, this.actionId) : 0;
+      if (dealt > 0) { this.damageDealt += dealt; this.riftHits++; }
+      if (this.hitSink) this.hitSink(t, dealt, v);
+    }
+    this._event(fin ? 'rift_end' : 'rift_cut');
+  }
+
+  get triggered() { return this.triggerF > 0; }
+  addGauge(g) { if (!(g > 0) || this.triggerF > 0) return; this.gauge = Math.min(HERO_TRIGGER.MAX, this.gauge + g); }
+
+  // Ember Trigger: spend the full gauge on a timed burst mode. Allowed from LOCO / ACTION / DODGE (a "DT cancel").
+  _startTrigger() {
+    if (this.triggerF > 0 || this.gauge < HERO_TRIGGER.COST) return false;
+    const s = this.state; if (s === HERO_STATE.DEAD || s === HERO_STATE.FINISHER || s === HERO_STATE.HITSTUN) return false;
+    this.triggerF = Math.round(this.gauge / HERO_TRIGGER.DRAIN); this.gauge = 0; this.triggers++;
+    this.burstF = 0; this.burstHit = false; this.stamina = SIM.STAMINA_MAX; this._event('trigger');
+    return true;
+  }
+
+  // Snatch: pull toward the nearest targetable foe in [MIN, RANGE]. Returns false (no stamina spent) if none.
+  _startSnatch(targets) {
+    if (this.snatchCd > 0) return false;
+    let best = null, bd = HERO_SNATCH.RANGE;
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i]; if (!t || !t.targetable) continue;
+      const d = Math.hypot(t.x - this.x, t.z - this.z) - (t.radius || 0);
+      if (d >= HERO_SNATCH.MIN && d < bd) { bd = d; best = t; }
+    }
+    if (!best || !this._spend(HERO_SNATCH.STAMINA)) return false;
+    this.state = HERO_STATE.SNATCH; this.snatchF = 0; this.actF = 0; this.snatchT = best; this.blocking = false; this.queued = null;
+    this.yaw = Math.atan2(-(best.x - this.x), -(best.z - this.z)); this.snatchX = best.x; this.snatchZ = best.z;
+    this.snatches++; this._event('snatch');
+    return true;
+  }
+
+  equipGreatsword() { return this.equip(WEAPON.GREAT); }
+  // equip a two-hander by id; refuses anything not better than what is held (drops only upgrade)
+  equip(w) {
+    if (!(w > this.weapon) || !WEAPONS[w]) return false;
+    this.weapon = w; this.wp = WEAPONS[w]; this.verbs = this.verbsGreat; this._event('equip'); return true;
+  }
 
   // charge level of the current (or last) heavy, 0..1
   _chargeLevel() { return Math.max(0, Math.min(1, (this.chargeF - HERO_CHARGE.MIN_F) / (HERO_CHARGE.MAX_F - HERO_CHARGE.MIN_F))); }
@@ -159,11 +277,12 @@ export class HeroSim {
 
   _startVerb(name, targets) {
     const v = this.verbs[name];
-    if (!this._spend(this.weapon === WEAPON.GREAT ? Math.round(v.stamina * GREATSWORD.STAMINA) : v.stamina)) return false;
+    if (!this._spend(this.wp ? Math.round(v.stamina * this.wp.STAMINA) : v.stamina)) return false;
     this.state = HERO_STATE.ACTION; this.verb = name; this.actF = 0; this.actionId++; this._hitN = 0;
     this.queued = null; this.blocking = false;
     this.charging = name === 'HEAVY'; this.chargeF = 0; this.chargeLvl = 0;
     const ay = this._assistYaw(targets); if (ay !== null) this.yaw = ay;
+    this.footYaw0 = this.yaw; if (v.sweep) { this.sweeps++; this._event('sweep'); }
     return true;
   }
 
@@ -219,7 +338,63 @@ export class HeroSim {
     if (this.flash > 0) this.flash--;
     let mx = 0, mz = 0;                       // planar displacement this step (metres)
 
+    // Ember Trigger: activation is a free cancel out of LOCO / ACTION / DODGE; burst frames are invulnerable
+    // a second Trigger press while burning cashes the rest of the meter into an Ember Rift
+    if (cmd.trigger) { if (this.triggerF > 0) this._startRift(targets); else this._startTrigger(); }
+    if (this.snatchCd > 0) this.snatchCd--;
+    if (this.triggerF > 0) {
+      if (--this.triggerF === 0) this._event('trigger_end');
+      if (this.state !== HERO_STATE.DEAD && this.hp < SIM.HP_PLAYER) this.hp = Math.min(SIM.HP_PLAYER, this.hp + HERO_TRIGGER.HEAL_PER_S / 60);
+    }
+    if (this.burstF >= 0) {
+      this.burstF++;
+      if (!this.burstHit && this.burstF >= 4) { this.burstHit = true; this._burst(targets); }
+      if (this.burstF > HERO_TRIGGER.BURST_F) { this.burstF = -1; if (this.state !== HERO_STATE.FINISHER && this.state !== HERO_STATE.RIFT && this.dodgeF < 0) this.invuln = false; }
+      else this.invuln = true;
+    }
+    // Snatch from LOCO, or as a cancel from late ACTION recovery
+    if (cmd.snatch && (this.state === HERO_STATE.LOCO || (this.state === HERO_STATE.ACTION && this.verbs[this.verb] && this.actF >= this.verbs[this.verb].dodgeFrom))) {
+      this.charging = false; this._startSnatch(targets);
+    }
+
     switch (this.state) {
+      case HERO_STATE.RIFT: {
+        const R = HERO_RIFT, f = ++this.riftF; this.actF++; this.speed = 0;
+        if (this.wp) { // v2.22 great sword: braced plant from the MotionBricks at_rift_plant root curve (about 0.1 m forward)
+          const s = footStep(HERO_RIFT_FOOT.CLIP, f, this._foot), fx0 = -Math.sin(this.footYaw0), fz0 = -Math.cos(this.footYaw0);
+          mx = fx0 * s[0] + fz0 * s[1]; mz = fz0 * s[0] - fx0 * s[1];
+        }
+        const c = f - R.STARTUP;
+        if (c >= 0 && c < R.CUTS * R.CUT_EVERY && c % R.CUT_EVERY === 0) this._riftCut(targets, false);
+        if (f === R.FINALE) { this._riftCut(targets, true); if (this.triggerF > 0) { this.triggerF = 0; this._event('trigger_end'); } }
+        this.invuln = f <= R.FINALE + 6;
+        if (f >= R.TOTAL) { this.state = HERO_STATE.LOCO; this.riftF = -1; this.actF = 0; this.invuln = false; }
+        break;
+      }
+
+      case HERO_STATE.SNATCH: {
+        this.snatchF++; this.actF++;
+        const S = HERO_SNATCH, t = this.snatchT;
+        if (t && t.targetable) { this.snatchX = t.x; this.snatchZ = t.z; }
+        if (this.snatchF > S.STARTUP && this.snatchF <= S.STARTUP + S.TRAVEL_MAX) {
+          const dx = this.snatchX - this.x, dz = this.snatchZ - this.z, d = Math.hypot(dx, dz);
+          const stop = (t && t.radius || 0) + this.radius + S.STOP_AT;
+          const left = d - stop;
+          if (left <= 0.02) this.snatchF = S.STARTUP + S.TRAVEL_MAX;
+          else { const s = Math.min(S.SPEED, left); mx = dx / d * s; mz = dz / d * s; this.yaw = Math.atan2(-dx, -dz); }
+        }
+        const recAt = S.STARTUP + S.TRAVEL_MAX;
+        if (this.snatchF > recAt) {
+          // landing: cancel straight into a combo starter (Snatch -> Streak/Combo loop)
+          if (this.snatchF >= recAt + S.CANCEL_FROM && (cmd.attack || cmd.heavy)) {
+            this.state = HERO_STATE.LOCO; this.snatchF = -1; this.snatchCd = S.COOLDOWN;
+            this._startVerb(cmd.heavy ? 'HEAVY' : 'LIGHT_1', targets); break;
+          }
+          if (this.snatchF >= recAt + S.RECOVER) { this.state = HERO_STATE.LOCO; this.snatchF = -1; this.actF = 0; this.snatchCd = S.COOLDOWN; this.speed = 0; }
+        }
+        break;
+      }
+
       case HERO_STATE.DEAD: this.actF++; this.speed = 0; break;
 
       case HERO_STATE.FINISHER:
@@ -242,9 +417,9 @@ export class HeroSim {
           mx = this.stepDirX * s; mz = this.stepDirZ * s;
           if (this.stepKind === STEP_DIR.NONE) this.yaw = wrap(this.yaw + Math.max(-TURN, Math.min(TURN, wrap(Math.atan2(-this.stepDirX, -this.stepDirZ) - this.yaw))));
         }
-        if (this.dodgeF >= D.cancelFrom && (cmd.attack || cmd.heavy)) {
+        if (this.dodgeF >= D.cancelFrom && (cmd.attack || cmd.heavy || (cmd.sweep && this.wp))) {
           this.dodgeF = -1; this.state = HERO_STATE.LOCO;
-          this._startVerb(cmd.heavy ? 'HEAVY' : 'LIGHT_1', targets);
+          this._startVerb(cmd.heavy ? 'HEAVY' : cmd.attack ? 'LIGHT_1' : 'SWEEP', targets);
         } else if (this.dodgeF >= D.total) { this.dodgeF = -1; this.state = HERO_STATE.LOCO; this.actF = 0; }
         break;
       }
@@ -267,7 +442,12 @@ export class HeroSim {
         this.actF++;
         // lunge during startup->active, scaled down when a target is already inside reach
         const lungeF = v.startup + v.active;
-        if (this.actF <= lungeF) {
+        if (v.foot) {
+          // sweep: travel + turn come from the MotionBricks root curve, in the start facing frame (planted feet)
+          const s = footStep(v.foot, this.actF, this._foot), fx0 = -Math.sin(this.footYaw0), fz0 = -Math.cos(this.footYaw0);
+          mx = fx0 * s[0] + fz0 * s[1]; mz = fz0 * s[0] - fx0 * s[1];
+          this.yaw = wrap(this.footYaw0 + s[2]);
+        } else if (this.actF <= lungeF) {
           let near = Infinity;
           for (let i = 0; i < targets.length; i++) { const t = targets[i]; if (t && t.targetable) near = Math.min(near, Math.hypot(t.x - this.x, t.z - this.z) - (t.radius || 0)); }
           const k = (near < v.reach * 0.8 ? 0.25 : 1) * (this.verb === 'HEAVY' ? 1 + HERO_CHARGE.LUNGE * this.chargeLvl : 1);
@@ -279,6 +459,7 @@ export class HeroSim {
         // buffered follow-ups
         if (cmd.attack && v.chainTo) this.queued = v.chainTo;
         if (cmd.heavy) this.queued = 'HEAVY';
+        if (cmd.sweep && this.wp) this.queued = v.sweep ? (v.chainTo || null) : 'SWEEP';   // sweep -> rev; light/heavy -> sweep
         if (cmd.dodge) this.queued = 'DODGE';
         if (cmd.roll) this.queued = 'ROLL';
         const evade = this.queued === 'DODGE' || this.queued === 'ROLL';
@@ -289,7 +470,7 @@ export class HeroSim {
         }
         if (this.actF >= v.total) {
           this.state = HERO_STATE.LOCO; this.actF = 0; this.chargeLvl = 0;
-          if (this.queued === 'HEAVY') this._startVerb('HEAVY', targets);
+          if (this.queued === 'HEAVY' || this.queued === 'SWEEP') this._startVerb(this.queued, targets);
           this.queued = null;
         }
         break;
@@ -300,8 +481,9 @@ export class HeroSim {
         if ((cmd.dodge || cmd.roll) && this._startDodge(cmd, targets, cmd.roll)) break;
         if (cmd.heavy && this._startVerb('HEAVY', targets)) break;
         if (cmd.attack && this._startVerb('LIGHT_1', targets)) break;
+        if (cmd.sweep && this.wp && this._startVerb('SWEEP', targets)) break;
         this.blocking = cmd.blockHeld;
-        const gk = this.weapon === WEAPON.GREAT ? GREATSWORD.MOVE : 1;   // heavy blade: slower top speed and turns
+        const gk = this.wp ? this.wp.MOVE : 1;   // heavy blade: slower top speed and turns
         const want = (this.blocking ? Math.min(cmd.speed, SIM.WALK_SPEED) : cmd.speed) * gk;
         // dodge / lunge carry-over enters LOCO at full velocity; with the great sword cap it at the heavy top speed
         if (gk < 1) this.speed = Math.min(this.speed, SIM.RUN_SPEED * gk);
@@ -313,7 +495,7 @@ export class HeroSim {
         this.speed += Math.max(-rate, Math.min(rate, target - this.speed));
         if (l > 1e-4) {
           const wantYaw = Math.atan2(-dirX, -dirZ), d = wrap(wantYaw - this.yaw);
-          const tr = gk < 1 ? TURN * GREATSWORD.TURN : TURN;
+          const tr = this.wp ? TURN * this.wp.TURN : TURN;
           this.yaw = wrap(this.yaw + Math.max(-tr, Math.min(tr, d)));
           // move along facing once mostly turned (no backwards travel while the turn completes)
           const fx = this.facingX(), fz = this.facingZ();
@@ -338,10 +520,32 @@ export class HeroSim {
     }
 
     // integrate + collide
+    this.dbgReq = Math.hypot(mx, mz); this.dbgPush = Math.hypot(this.pushX, this.pushZ); const x0_ = this.x, z0_ = this.z;
+    // footwork clips (sweep / rift plant): never step INTO a body already in contact (the boss would shove the
+    // planted hero back out and the feet would skate). The contact signal is the body push itself (this frame's,
+    // or last frame's if the pusher updates after us); the normal is held 8 frames so the step cannot alternate.
+    const planted = this.state === HERO_STATE.ACTION && this.verbs[this.verb] && this.verbs[this.verb].foot || (this.state === HERO_STATE.RIFT && !!this.wp);
+    const cmx = mx, cmz = mz;   // the authored root-curve step, before the contact guard / body push / walls
+    if (planted) {
+      const px = this.pushX || (this._lpF > 0 ? this._lpx : 0), pz = this.pushZ || (this._lpF > 0 ? this._lpz : 0), pl = Math.hypot(px, pz);
+      if (pl > 1e-6) { const k = (mx * px + mz * pz) / pl; if (k < 0) { mx -= px / pl * k; mz -= pz / pl * k; } }
+    }
+    if (this.pushX || this.pushZ) { this._lpx = this.pushX; this._lpz = this.pushZ; this._lpF = 8; } else if (this._lpF > 0) this._lpF--;
     this.x += mx + this.pushX; this.z += mz + this.pushZ; this.pushX = 0; this.pushZ = 0;
+    this.dbgPre = [this.x, this.z]; this.dbgX0 = [x0_, z0_];
     if (this.colliders) { const r = this.colliders.resolveCapsule(this.x, this.z, this.radius, 0.0, SIM.ACTOR_HEIGHT); this.x = r.x; this.z = r.z; }
-    const lim = SIM.ARENA_HALF - this.radius;
-    this.x = Math.max(-lim, Math.min(lim, this.x)); this.z = Math.max(-lim, Math.min(lim, this.z));
+    const C = this.colliders, limX = (C ? C.halfX : SIM.ARENA_HALF) - this.radius, limZ = (C ? C.halfZ : SIM.ARENA_HALF) - this.radius;
+    this.x = Math.max(-limX, Math.min(limX, this.x)); this.z = Math.max(-limZ, Math.min(limZ, this.z));
+    // plant deficit (presentation only, never read by gameplay): how far the body is from where the clip's root
+    // curve put it during a planted-foot clip. The view offsets the model by it so the planted feet stay fixed in
+    // the world when the guard, a body push or a wall bends the travel; it bleeds off once the feet are free.
+    if (planted) {
+      this.plantDX += cmx - (this.x - x0_); this.plantDZ += cmz - (this.z - z0_);
+      const pl = Math.hypot(this.plantDX, this.plantDZ); if (pl > 0.4) { this.plantDX *= 0.4 / pl; this.plantDZ *= 0.4 / pl; }
+    } else if (this.plantDX || this.plantDZ) {
+      this.plantDX *= 0.86; this.plantDZ *= 0.86;
+      if (Math.abs(this.plantDX) + Math.abs(this.plantDZ) < 1e-4) { this.plantDX = 0; this.plantDZ = 0; }
+    }
     this.vx = (this.x - this.prevX) * 60; this.vz = (this.z - this.prevZ) * 60;
     if (this.state !== HERO_STATE.LOCO) this.speed = Math.hypot(this.vx, this.vz);
     else {
@@ -357,13 +561,21 @@ export class HeroSim {
       c.dmg = Math.round(v.dmg * (1 + HERO_CHARGE.DMG * L)); c.posture = Math.round(v.posture * (1 + HERO_CHARGE.POSTURE * L));
       c.charge = L; v = c;
     }
-    if (this.weapon === WEAPON.GREAT) {
-      const g = this._great;
-      g.name = v.name; g.charge = v.charge || 0; g.reach = v.reach + GREATSWORD.REACH;
-      g.dmg = Math.round(v.dmg * GREATSWORD.DMG); g.posture = Math.round(v.posture * GREATSWORD.POSTURE); g.great = true;
+    if (this.wp) {
+      const g = this._great, W = this.wp;
+      g.name = v.name; g.charge = v.charge || 0; g.reach = v.reach + W.REACH;
+      g.dmg = Math.round(v.dmg * W.DMG); g.posture = Math.round(v.posture * W.POSTURE); g.great = true;
+      g.arc = v.arc; g.knock = v.knock || 0; g.sweep = !!v.sweep;
       v = g;
     }
-    const fx = this.facingX(), fz = this.facingZ();
+    if (this.triggerF > 0) {
+      const tr = this._trig || (this._trig = { name: '', dmg: 0, posture: 0, reach: 0, charge: 0, great: false, triggered: true });
+      tr.name = v.name; tr.charge = v.charge || 0; tr.reach = v.reach; tr.great = !!v.great;
+      tr.dmg = Math.round(v.dmg * HERO_TRIGGER.DMG); tr.posture = Math.round(v.posture * HERO_TRIGGER.POSTURE);
+      tr.arc = v.arc; tr.knock = v.knock || 0; tr.sweep = !!v.sweep;
+      v = tr;
+    }
+    const fx = this.facingX(), fz = this.facingZ(), cosMin = v.arc !== undefined ? v.arc : 0.34;   // sweep: about 100 deg each side
     for (let i = 0; i < targets.length; i++) {
       const t = targets[i]; if (!t || !t.targetable) continue;
       let seen = false;
@@ -371,12 +583,28 @@ export class HeroSim {
       if (seen) continue;
       const dx = t.x - this.x, dz = t.z - this.z, d = Math.hypot(dx, dz);
       if (d > v.reach + (t.radius || 0) + this.radius) continue;
-      if (d > 0.3 && (dx * fx + dz * fz) / d < 0.34) continue;      // 70 degree half-cone
+      if (d > 0.3 && (dx * fx + dz * fz) / d < cosMin) continue;    // 70 degree half-cone (sweep: wide arc)
       if (this._hitN < this._hitIds.length) this._hitIds[this._hitN++] = t.id;
       const dealt = t.onHeroHit ? t.onHeroHit(this, v, this.actionId) : 0;
-      if (dealt > 0) { this.damageDealt += dealt; if (v.charge) this.chargedHits++; }
+      if (v.knock && dealt > 0 && !t.isBoss) this.knocks++;
+      if (dealt > 0) { this.damageDealt += dealt; if (v.charge) this.chargedHits++; this.addGauge(dealt * HERO_TRIGGER.HIT_GAIN); }
       if (this.hitSink) this.hitSink(t, dealt, v);
     }
+  }
+
+  // Trigger burst: radial shove that hits every targetable foe in BURST_R once (light damage, heavy posture).
+  _burst(targets) {
+    const b = this._burstV || (this._burstV = { name: 'BURST', dmg: 8, posture: 26, reach: HERO_TRIGGER.BURST_R, charge: 0, great: false, burst: true });
+    this.actionId++;
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i]; if (!t || !t.targetable) continue;
+      const d = Math.hypot(t.x - this.x, t.z - this.z);
+      if (d > HERO_TRIGGER.BURST_R + (t.radius || 0)) continue;
+      const dealt = t.onHeroHit ? t.onHeroHit(this, b, this.actionId) : 0;
+      if (dealt > 0) this.damageDealt += dealt;
+      if (this.hitSink) this.hitSink(t, dealt, b);
+    }
+    this._event('burst');
   }
 
   // Incoming contact record (WyvernBrain / DuelistSim rec shape). Applied exactly once by the attacker.

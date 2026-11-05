@@ -11,15 +11,39 @@ const CSS = `
 .ec-bar.hp b{position:absolute;left:0;top:0;bottom:0;width:100%;background:#f6c49a;transform-origin:left center;opacity:.55}
 .ec-bar.st{height:6px}.ec-bar.st i{background:linear-gradient(90deg,#b98a2c,#ffd774)}
 .ec-bar.st.low i{background:#7a5a24}
+.ec-bar.tg{height:8px;margin-top:2px;background:rgba(20,10,8,.7);border-color:rgba(255,170,60,.55)}.ec-bar.tg i{background:linear-gradient(90deg,#ff6a00,#ffd040)}
+.ec-bar.tg u{position:absolute;left:50%;top:-1px;bottom:-1px;width:1px;background:rgba(255,230,200,.7)}
+.ec-bar.tg.ready{box-shadow:0 0 10px rgba(255,80,30,.75)}.ec-bar.tg.on i{background:linear-gradient(90deg,#ff2a10,#ffd27a);animation:ecTg .35s linear infinite alternate}
+@keyframes ecTg{from{filter:brightness(1)}to{filter:brightness(1.6)}}
+.ec-rank{position:absolute;right:calc(env(safe-area-inset-right,0px) + 26px);top:calc(env(safe-area-inset-top,0px) + 88px);text-align:right;opacity:0;transition:opacity .25s;pointer-events:none}
+.ec-rank.on{opacity:1}
+.ec-rank b{display:block;font:italic 900 74px/0.9 Georgia,'Times New Roman',serif;letter-spacing:-.04em;color:#ffd9a8;
+  -webkit-text-stroke:2px #3a0a04;text-shadow:0 0 18px rgba(255,90,30,.65),4px 4px 0 rgba(120,10,0,.55);transform-origin:80% 60%}
+.ec-rank::before{content:'';position:absolute;right:-18px;top:-18px;width:210px;height:150px;z-index:-1;
+  background:radial-gradient(ellipse at 70% 45%,rgba(0,0,0,.42),rgba(0,0,0,0) 70%)}
+.ec-rank.r0 b{color:#bfc3c8}.ec-rank.r1 b{color:#9bd0ff}.ec-rank.r2 b{color:#3fa8ff}.ec-rank.r3 b{color:#ff7a3a}
+.ec-rank.r4 b{color:#ffb23a}.ec-rank.r5 b{color:#ffc94a}
+.ec-rank.r6 b{color:#f2c230;-webkit-text-stroke:3px #1a1208}
+.ec-rank.r4 b,.ec-rank.r5 b,.ec-rank.r6 b{text-shadow:0 0 26px rgba(255,150,40,.95),0 0 4px #fff,4px 4px 0 rgba(150,20,0,.6)}
+.ec-rank.pop b{animation:ecPop .2s cubic-bezier(.2,.8,.3,1)}
+@keyframes ecPop{0%{transform:scale(2.5);color:transparent;-webkit-text-stroke:4px #e8e8e8;text-shadow:none}
+  65%{transform:scale(.92) translateX(3px)}80%{transform:scale(1.02) translateX(-3px)}100%{transform:scale(1)}}
+.ec-rank s{display:block;text-decoration:none;font:italic 700 13px/1.2 Georgia,serif;letter-spacing:.2em;color:#ffd84a;margin-top:6px;
+  transform:rotate(-6deg);transform-origin:right center;text-shadow:0 1px 2px rgba(0,0,0,.85),0 0 8px rgba(0,0,0,.5)}
+.ec-rank.pop s{animation:ecWord .2s ease-out}
+@keyframes ecWord{from{opacity:0;translate:24px 0}to{opacity:1;translate:0 0}}
+.ec-rank em{display:block;margin:7px 0 0 auto;width:120px;height:4px;background:rgba(0,0,0,.45);border:1px solid rgba(255,230,190,.55);box-sizing:content-box}
+.ec-rank em i{display:block;height:100%;background:#ff7a3a;transform-origin:left center}
+.ec-touch .ec-rank{top:calc(env(safe-area-inset-top,0px) + 64px)}.ec-touch .ec-rank b{font-size:52px}
 .ec-boss{position:absolute;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 34px);transform:translateX(-50%);width:min(620px,74vw);display:none}
 .ec-boss .nm{text-align:center;letter-spacing:.32em;font-size:13px;margin-bottom:6px;text-shadow:0 1px 3px #000}
 .ec-boss .ec-bar{height:10px}.ec-boss .po i{background:linear-gradient(90deg,#c8902c,#ffe08a)}.ec-boss .po{height:4px}
-.ec-wave{position:absolute;right:calc(env(safe-area-inset-right,0px) + 18px);top:calc(env(safe-area-inset-top,0px) + 16px);text-align:right;font-size:14px;letter-spacing:.2em;text-shadow:0 1px 3px #000}
-.ec-wave small{display:block;opacity:.85;letter-spacing:.12em;font-size:12px;margin-top:4px}
+.ec-wave{position:absolute;right:calc(env(safe-area-inset-right,0px) + 18px);top:calc(env(safe-area-inset-top,0px) + 16px);text-align:right;font-size:15px;letter-spacing:.2em;text-shadow:0 1px 2px rgba(0,0,0,.9),0 0 10px rgba(0,0,0,.6)}
+.ec-wave small{display:block;opacity:.95;letter-spacing:.12em;font-size:14px;margin-top:4px}
 .ec-hud.ec-touch .ec-wave{right:calc(env(safe-area-inset-right,0px) + 84px)}
 .ec-hud.ec-ended .ec-boss{display:none!important}
 .ec-banner{position:absolute;left:0;right:0;top:34%;text-align:center;opacity:0;transition:opacity .5s;text-shadow:0 2px 12px #000}
-.ec-banner.on{opacity:1}.ec-banner h2{margin:0;font-weight:400;font-size:clamp(26px,5vw,52px);letter-spacing:.3em}
+.ec-banner.on{opacity:1}.ec-banner.hi{top:13%}.ec-banner.hi h2{font-size:clamp(20px,3.4vw,38px)}.ec-banner.hi p{opacity:.95}.ec-banner h2{margin:0;font-weight:400;font-size:clamp(26px,5vw,52px);letter-spacing:.3em}
 .ec-banner p{margin:8px 0 0;font-size:clamp(12px,1.6vw,16px);letter-spacing:.25em;opacity:.8}
 .ec-cue{position:absolute;left:50%;top:58%;transform:translate(-50%,-50%);font-size:15px;letter-spacing:.3em;text-shadow:0 1px 6px #000;opacity:0;transition:opacity .12s}
 .ec-cue.on{opacity:1}.ec-cue.perfect{color:#ffe7a6}.ec-cue.phantom{color:#9fd4ff}.ec-cue.hit{color:#ff8a70}
@@ -55,7 +79,8 @@ export class Hud {
     const r = this.root = document.createElement('div'); r.className = 'ec-hud'; r.dataset.ec = 'hud';
     r.innerHTML = `
       <div class="ec-vign"></div>
-      <div class="ec-bars" data-ec="bars"><div class="ec-bar hp"><b></b><i></i></div><div class="ec-bar st"><i></i></div></div>
+      <div class="ec-bars" data-ec="bars"><div class="ec-bar hp"><b></b><i></i></div><div class="ec-bar st"><i></i></div><div class="ec-bar tg"><i></i><u></u></div></div>
+<div class="ec-rank" data-ec="rank"><b>D</b><s>DULL</s><em><i></i></em></div>
       <div class="ec-wave" data-ec="wave"></div>
       <div class="ec-boss" data-ec="boss"><div class="nm">FORD WYVERN</div><div class="ec-bar hp"><b></b><i></i></div><div class="ec-bar po"><i></i></div></div>
       <div class="ec-banner" data-ec="banner"><h2></h2><p></p></div>
@@ -78,6 +103,10 @@ export class Hud {
       banner: q('banner'), cue: q('cue'), prompt: q('prompt'), bars: q('bars'), vign: r.querySelector('.ec-vign') };
     this.el.hpI = this.el.bars.querySelector('.hp i'); this.el.hpB = this.el.bars.querySelector('.hp b');
     this.el.st = this.el.bars.querySelector('.st'); this.el.stI = this.el.st.querySelector('i');
+    this.el.tg = this.el.bars.querySelector('.tg'); this.el.tgI = this.el.tg.querySelector('i');
+    this.el.rank = r.querySelector('[data-ec="rank"]'); this.el.rankB = this.el.rank.querySelector('b');
+    this.el.rankS = this.el.rank.querySelector('s'); this.el.rankI = this.el.rank.querySelector('em i');
+    this._rank = -1; this._rankOn = false; this._rankFlash = -999; this._tgCls = '';
     this.el.bhpI = this.el.boss.querySelector('.hp i'); this.el.bhpB = this.el.boss.querySelector('.hp b'); this.el.bpoI = this.el.boss.querySelector('.po i');
     r.querySelector('.ec-credit').textContent = credit;
     const bind = (k, fn) => { const b = q(k); const h = (e) => { e.preventDefault(); e.stopPropagation(); if (fn) fn(); }; b.addEventListener('click', h); (this._binds ||= []).push([b, h]); };
@@ -108,10 +137,16 @@ export class Hud {
     const btn = name && this.el[name].querySelector('button'); if (btn) btn.focus({ preventScroll: true });
   }
 
-  banner(title, sub = '', seconds = 2.2) {
+  // high: mid-combat callouts (road ambushes) sit above the fight, clear of damage numbers and the lock reticle
+  banner(title, sub = '', seconds = 2.2, high = false) {
+    this.el.banner.classList.toggle('hi', !!high);
     this.el.banner.querySelector('h2').textContent = title; this.el.banner.querySelector('p').textContent = sub;
     this.el.banner.classList.add('on'); this._bannerT = seconds;
   }
+
+  // hard cut (no CSS fade) - used where an end screen or the road map takes over the centre of the frame
+  clearBanner() { const b = this.el.banner; b.style.transition = 'none'; b.classList.remove('on'); this._bannerT = 0; void b.offsetWidth; b.style.transition = ''; }
+  setVictoryLine(text) { const h = this.el.victory && this.el.victory.querySelector('h3'); if (h) h.textContent = text; }
 
   cue(text, kind) { const c = this.el.cue; c.textContent = text; c.className = 'ec-cue on ' + kind; this._cueT = 0.7; }
 
@@ -133,6 +168,23 @@ export class Hud {
     E.hpB.style.transform = 'scaleX(' + this._hpLag.toFixed(4) + ')';
     E.stI.style.transform = 'scaleX(' + Math.max(0, view.stamina / view.staminaMax).toFixed(4) + ')';
     E.st.classList.toggle('low', view.staminaFail);
+    // DMC layer: Ember Trigger gauge (half mark = cost) and the style rank letter
+    if (view.trigger) {
+      const T = view.trigger, f = T.on ? T.left : T.gauge / T.max;
+      E.tgI.style.transform = 'scaleX(' + Math.max(0, Math.min(1, f)).toFixed(4) + ')';
+      const cls = T.on ? 'on' : T.gauge >= T.cost ? 'ready' : '';
+      if (cls !== this._tgCls) { E.tg.classList.remove('on', 'ready'); if (cls) E.tg.classList.add(cls); this._tgCls = cls; }
+    }
+    const st = view.style, on = !!st && (st.rank > 0 || st.frac > 0.05);
+    if (on !== this._rankOn) { this._rankOn = on; E.rank.classList.toggle('on', on); }
+    if (st) {
+      if (st.rank !== this._rank) {
+        E.rank.classList.remove('r' + this._rank); E.rank.classList.add('r' + st.rank);
+        E.rankB.textContent = st.letter; E.rankS.textContent = st.title; this._rank = st.rank;
+      }
+      if (st.flashF !== this._rankFlash) { this._rankFlash = st.flashF; E.rank.classList.remove('pop'); void E.rank.offsetWidth; E.rank.classList.add('pop'); }
+      E.rankI.style.transform = 'scaleX(' + Math.max(0, Math.min(1, st.frac)).toFixed(4) + ')';
+    }
     if (view.boss) {
       E.boss.style.display = 'block';
       const nm = view.boss.name || 'FORD WYVERN';
@@ -144,8 +196,9 @@ export class Hud {
       E.bpoI.style.transform = 'scaleX(' + Math.min(1, view.boss.posture / view.boss.postureMax).toFixed(4) + ')';
     } else { E.boss.style.display = 'none'; this._bhpLag = 1; }
     E.wave.innerHTML = view.waveLabel || '';
-    E.prompt.style.display = view.finisher ? 'block' : 'none';
-    if (view.finisher) E.prompt.textContent = view.touch ? 'HVY  -  FINISHER' : 'K / RIGHT CLICK  -  FINISHER';
+    E.prompt.style.display = view.finisher || view.tip ? 'block' : 'none';
+    const pt = view.finisher ? (view.touch ? 'HVY  -  FINISHER' : 'K / RIGHT CLICK  -  FINISHER') : view.tip || '';
+    if (pt && pt !== this._promptT) { this._promptT = pt; E.prompt.textContent = pt; }
     E.vign.style.boxShadow = 'inset 0 0 160px rgba(160,10,0,' + (view.flash > 0 ? 0.55 : hp < 0.3 ? 0.28 : 0) + ')';
     if (this._cueT > 0 && (this._cueT -= dt) <= 0) E.cue.classList.remove('on');
     if (this._bannerT > 0 && (this._bannerT -= dt) <= 0) E.banner.classList.remove('on');

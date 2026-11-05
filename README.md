@@ -12,20 +12,23 @@ Play: https://ade5791.github.io/ember-court/
 - Guard / deflect: Q or L. Time it on contact for a perfect deflect.
 - Phantom dodge: Space. Red and blue attacks cannot be blocked - dodge them.
 - Roll: C (gamepad B, or the Roll button on touch). Always rolls clear, even right next to an enemy.
+- Snatch: E or I (gamepad d-pad right) pulls an enemy 3-11 m away into your combo.
+- Ember Trigger: V or U (gamepad L3 / d-pad left). Press again while it burns to unleash Ember Rift.
+- Great-sword sweep: G or O (gamepad d-pad down). Press again to chain the reverse sweep.
 - Great sword: when the wyvern lands, a great sword is planted in the ford beside it. Walk into it to take it -
-  longer reach and heavier hits for a little more stamina.
-- Lock on: middle click, Tab or R. Pause: Esc or P.
+  longer reach and heavier two-handed hits for a little more stamina.
+- Lock on: middle click, Tab or R. Pause: Esc or P. Full screen: F.
 - Gamepad is supported; touch controls appear automatically on phones and tablets.
 
 URL options: `?q=low|medium|high` quality preset, `?seed=N` for a reproducible run.
-`?stage3=1` (preview): after the wyvern falls, a door opens into Stage 3, the Frozen Foundry, against the Chrome
-Gauntlet - just-guard its swings, dodge the red lightning columns, and get clear of the dome discharge.
-`?stage3=1&start=stage3` jumps straight to that fight.
+`?stage3=1` (preview campaign): after the wyvern falls it drops a weapon and a door opens onto the mountain road.
+Fight through its ambushes to the Shadow Warden at the Dusk Shrine, walk the next leg, then face the Chrome
+Gauntlet in the Frozen Foundry. `?road=0` skips the road legs; `?stage3=1&start=stage3` jumps to the last fight.
 
 ## Credits
 
 - Engine: Three.js (MIT), see `vendor/three/LICENSE`.
-- Boss models (Ford Wyvern, Chrome Gauntlet): CC BY 4.0, see `ATTRIBUTION.md`.
+- Boss models (Ford Wyvern, Chrome Gauntlet) and the mountain road kit: CC BY 4.0, see `ATTRIBUTION.md`.
 - Hero and duelist models were generated and rigged for this project.
 
 This repository contains the runtime build only.

@@ -24,6 +24,7 @@ const NONE = -1;
 const KEY_MAP = {
   KeyJ: A.ATTACK, KeyK: A.HEAVY, KeyL: A.BLOCK, KeyQ: A.BLOCK, Space: A.DODGE, KeyC: A.ROLL, AltLeft: A.ROLL,
   Tab: A.LOCK, KeyR: A.LOCK, Escape: A.PAUSE, KeyP: A.PAUSE,
+  KeyE: A.SNATCH, KeyI: A.SNATCH, KeyV: A.TRIGGER, KeyU: A.TRIGGER, KeyG: A.SWEEP, KeyO: A.SWEEP,   // not F: F is the fullscreen toggle (ui/Fullscreen.js)
 };
 const MOVE_KEYS = { KeyW: 0, ArrowUp: 0, KeyS: 1, ArrowDown: 1, KeyA: 2, ArrowLeft: 2, KeyD: 3, ArrowRight: 3 };
 const WALK_KEYS = { ShiftLeft: 1, ShiftRight: 1 };
@@ -33,6 +34,8 @@ const WALK_KEYS = { ShiftLeft: 1, ShiftRight: 1 };
 const PAD_BUTTONS = [
   [5, A.ATTACK], [2, A.ATTACK], [7, A.HEAVY], [3, A.HEAVY], [4, A.BLOCK], [6, A.BLOCK],
   [0, A.DODGE], [1, A.ROLL], [11, A.LOCK], [9, A.PAUSE],
+  [15, A.SNATCH], [10, A.TRIGGER], [14, A.TRIGGER],        // d-pad right snatch, L3 / d-pad left Ember Trigger
+  [13, A.SWEEP],                                            // d-pad down: great-sword sweep (v2.22)
 ];
 
 export class Input {

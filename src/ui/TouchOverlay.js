@@ -24,6 +24,9 @@ const BUTTONS = [
   { action: A.ROLL, key: 'roll', label: 'Roll', size: 'l' },
   { action: A.LOCK, key: 'lock', label: 'Lock', size: 'm' },
   { action: A.PAUSE, key: 'pause', label: 'Pause', size: 's' },
+  { action: A.SNATCH, key: 'snatch', label: 'Snatch', size: 'm' },
+  { action: A.TRIGGER, key: 'trigger', label: 'Ember', size: 'm' },
+  { action: A.SWEEP, key: 'sweep', label: 'Sweep', size: 'm' },
 ];
 
 const CSS = `
@@ -71,7 +74,14 @@ const CSS = `
 .ec-btn.lock{right:calc(var(--sar) + 62px);bottom:calc(var(--sab) + 288px)}
 .ec-btn.pause{right:calc(var(--sar) + 36px);bottom:auto;top:calc(var(--sat) + 12px);transform:translate(50%,0)}
 .ec-btn.pause.held{transform:translate(50%,0) scale(.92)}
+.ec-btn.snatch{right:calc(var(--sar) + 160px);bottom:calc(var(--sab) + 352px);border-color:rgba(255,110,80,.7)}
+.ec-btn.trigger{right:calc(var(--sar) + 62px);bottom:calc(var(--sab) + 372px);border-color:rgba(255,80,40,.75)}
+.ec-btn.trigger.ready{box-shadow:0 0 14px 2px rgba(255,80,30,.8)}
+.ec-btn.sweep{right:calc(var(--sar) + 160px);bottom:calc(var(--sab) + 440px);border-color:rgba(255,170,90,.7)}
 @media (orientation:landscape){
+  .ec-btn.sweep{right:calc(var(--sar) + 356px);bottom:calc(var(--sab) + 150px)}
+  .ec-btn.snatch{right:calc(var(--sar) + 262px);bottom:calc(var(--sab) + 200px)}
+  .ec-btn.trigger{right:calc(var(--sar) + 356px);bottom:calc(var(--sab) + 60px)}
   .ec-btn.attack{right:calc(var(--sar) + 76px);bottom:calc(var(--sab) + 76px)}
   .ec-btn.heavy{right:calc(var(--sar) + 176px);bottom:calc(var(--sab) + 50px)}
   .ec-btn.block{right:calc(var(--sar) + 64px);bottom:calc(var(--sab) + 180px)}
@@ -96,6 +106,7 @@ export class TouchOverlay {
     this._btnEls = [];
     this._btnPointer = new Int32Array(BUTTONS.length).fill(-1);
     this._available = new Uint8Array(BUTTONS.length).fill(1);
+    this._readyCls = new Uint8Array(BUTTONS.length);
     this.heavyChargeFrames = 30;
     this.stickX = 0; this.stickY = 0;
   }
@@ -189,6 +200,12 @@ export class TouchOverlay {
     if (i < 0 || this._available[i] === (ok ? 1 : 0)) return;
     this._available[i] = ok ? 1 : 0;
     this._btnEls[i].classList.toggle('off', !ok);
+  }
+
+  // Glow a button when its resource is ready (Ember Trigger gauge >= cost). Presentation only.
+  setReady(action, on) {
+    const i = this._indexOf(action);
+    if (i >= 0 && this._readyCls[i] !== (on ? 1 : 0)) { this._readyCls[i] = on ? 1 : 0; this._btnEls[i].classList.toggle('ready', !!on); }
   }
 
   setToggle(action, on) {

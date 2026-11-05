@@ -28,18 +28,24 @@ export const FOUNDRY_LOOK = Object.freeze({
 export function makeFoundryEnvironment(renderer) { return makeGorgeEnvironment(renderer, 0.04, FOUNDRY_LOOK.env); }
 
 // rig: { scene, renderer, sun, hemi, points: PointLight[4], slots: [[x,y,z] x4], sky (mesh or null), envRT }
+// Snapshot the gorge rig once, before any other stage look touches it (shared by FoundryLook and ShrineLook).
+export function snapshotGorge(rig) {
+  if (rig.saved) return;
+  const s = rig.scene, r = rig.renderer, u = rig.sky && rig.sky.material.uniforms;
+  rig.saved = {
+    background: s.background, fog: s.fog ? [s.fog.color.clone(), s.fog.density] : null,
+    env: s.environment, envI: s.environmentIntensity, exposure: r.toneMappingExposure,
+    sun: [rig.sun.color.clone(), rig.sun.intensity, rig.sun.position.clone(), rig.sun.shadow.radius],
+    hemi: [rig.hemi.color.clone(), rig.hemi.groundColor.clone(), rig.hemi.intensity],
+    points: rig.points.map((p) => [p.color.clone(), p.intensity, p.distance, p.decay, p.position.clone()]),
+    sky: rig.sky ? rig.sky.visible : false,
+    skyU: u && u.uH ? [u.uH.value.clone(), u.uZ.value.clone()] : null,
+  };
+}
+
 export function setFoundryLook(rig) {
   const L = FOUNDRY_LOOK, s = rig.scene, r = rig.renderer;
-  if (!rig.saved) {
-    rig.saved = {
-      background: s.background, fog: s.fog ? [s.fog.color.clone(), s.fog.density] : null,
-      env: s.environment, envI: s.environmentIntensity, exposure: r.toneMappingExposure,
-      sun: [rig.sun.color.clone(), rig.sun.intensity, rig.sun.position.clone(), rig.sun.shadow.radius],
-      hemi: [rig.hemi.color.clone(), rig.hemi.groundColor.clone(), rig.hemi.intensity],
-      points: rig.points.map((p) => [p.color.clone(), p.intensity, p.distance, p.decay, p.position.clone()]),
-      sky: rig.sky ? rig.sky.visible : false,
-    };
-  }
+  snapshotGorge(rig);
   s.background = hex(L.background);
   // mutate the one FogExp2: fog type is in the program key, so keeping the type keeps every program
   if (!s.fog) s.fog = new THREE.FogExp2(hex(L.fog), L.fogDensity);
@@ -67,4 +73,5 @@ export function restoreGorgeLook(rig) {
   rig.hemi.color.copy(v.hemi[0]); rig.hemi.groundColor.copy(v.hemi[1]); rig.hemi.intensity = v.hemi[2];
   rig.points.forEach((p, i) => { const q = v.points[i]; p.color.copy(q[0]); p.intensity = q[1]; p.distance = q[2]; p.decay = q[3]; p.position.copy(q[4]); });
   if (rig.sky) rig.sky.visible = v.sky;
+  if (rig.sky && v.skyU) { rig.sky.material.uniforms.uH.value.copy(v.skyU[0]); rig.sky.material.uniforms.uZ.value.copy(v.skyU[1]); }
 }

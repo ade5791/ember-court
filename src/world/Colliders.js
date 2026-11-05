@@ -17,6 +17,8 @@ export class Colliders {
     this.profZ = new Float32Array(prof.points.map((p) => p[0]));
     this.profY = new Float32Array(prof.points.map((p) => p[1]));
     this.half = doc.arena.half;
+    // v2.20 per-axis bounds: the road is 18 x 120 m; square arenas leave halfX = halfZ = half
+    this.halfX = doc.arena.halfX || this.half; this.halfZ = doc.arena.halfZ || this.half;
     const n = doc.colliders.length;
     this.count = n;
     this.names = doc.colliders.map((c) => c.name);
@@ -118,7 +120,7 @@ export class Colliders {
       if (d < best) { best = d; bi = i; }
     }
     if (y < wallTop) {
-      const w = this.half - Math.max(Math.abs(x), Math.abs(z));
+      const w = Math.min(this.halfX - Math.abs(x), this.halfZ - Math.abs(z));
       if (w < best) { best = w; bi = -1; }
     }
     this.hit.index = bi;
@@ -167,9 +169,9 @@ export class Colliders {
       }
     }
     // arena walls (inner face at |x|,|z| = half)
-    const lim = this.half - r;
-    if (x > lim) { x = lim; hit.pushed = true; } else if (x < -lim) { x = -lim; hit.pushed = true; }
-    if (z > lim) { z = lim; hit.pushed = true; } else if (z < -lim) { z = -lim; hit.pushed = true; }
+    const lx = this.halfX - r, lz = this.halfZ - r;
+    if (x > lx) { x = lx; hit.pushed = true; } else if (x < -lx) { x = -lx; hit.pushed = true; }
+    if (z > lz) { z = lz; hit.pushed = true; } else if (z < -lz) { z = -lz; hit.pushed = true; }
     hit.x = x; hit.z = z;
     return hit;
   }

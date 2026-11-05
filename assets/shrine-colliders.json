@@ -1,0 +1,32 @@
+{
+  "space": "game (three.js Y-up, metres, north = -Z)",
+  "source": "hand-authored from docs/STAGE2_SPEC.md section 4 (Dusk Shrine)",
+  "stage": "shrine-32m",
+  "ground": {
+    "y": 0.0,
+    "playable": { "minX": -16.0, "maxX": 16.0, "minZ": -16.0, "maxZ": 16.0 },
+    "heightProfile": { "axis": "abs(z)", "points": [[0.0, 0.0], [30.0, 0.0]], "interp": "linear" },
+    "surface": "STONE_FLOOR",
+    "zones": []
+  },
+  "arena": { "half": 16.0, "size": 32.0, "flightCeiling": 11.0, "bossSpawn": [0.0, 0.0, -6.0], "bossScale": 1.0, "hoverMinY": 0.0, "playerSpawn": [0.0, 0.0, 9.0] },
+  "shrine": {
+    "lightSlots": [[-14.4, 1.9, -14.4], [14.4, 1.9, -14.4], [-14.4, 1.9, 14.4], [14.4, 1.9, 14.4]],
+    "duelRing": 6.0,
+    "gravelBand": [13.6, 16.0]
+  },
+  "colliders": [
+    { "name": "COL_pillar_0", "kind": "cyl", "center": [-11.0, 3.0, -11.0], "radius": 0.5, "halfHeight": 3.0, "surface": "WOOD_BARK" },
+    { "name": "COL_pillar_1", "kind": "cyl", "center": [11.0, 3.0, -11.0], "radius": 0.5, "halfHeight": 3.0, "surface": "WOOD_BARK" },
+    { "name": "COL_pillar_2", "kind": "cyl", "center": [-11.0, 3.0, 11.0], "radius": 0.5, "halfHeight": 3.0, "surface": "WOOD_BARK" },
+    { "name": "COL_pillar_3", "kind": "cyl", "center": [11.0, 3.0, 11.0], "radius": 0.5, "halfHeight": 3.0, "surface": "WOOD_BARK" },
+    { "name": "COL_wall_n", "kind": "obb", "center": [0.0, 0.55, -16.3], "halfExtents": [16.6, 0.55, 0.3], "yaw": 0.0, "surface": "STONE_WALL" },
+    { "name": "COL_wall_s", "kind": "obb", "center": [0.0, 0.55, 16.3], "halfExtents": [16.6, 0.55, 0.3], "yaw": 0.0, "surface": "STONE_WALL" },
+    { "name": "COL_wall_w", "kind": "obb", "center": [-16.3, 0.55, 0.0], "halfExtents": [0.3, 0.55, 16.0], "yaw": 0.0, "surface": "STONE_WALL" },
+    { "name": "COL_wall_e", "kind": "obb", "center": [16.3, 0.55, 0.0], "halfExtents": [0.3, 0.55, 16.0], "yaw": 0.0, "surface": "STONE_WALL" },
+    { "name": "COL_lantern_0", "kind": "cyl", "center": [-14.4, 1.1, -14.4], "radius": 0.55, "halfHeight": 1.1, "surface": "STONE_LANTERN" },
+    { "name": "COL_lantern_1", "kind": "cyl", "center": [14.4, 1.1, -14.4], "radius": 0.55, "halfHeight": 1.1, "surface": "STONE_LANTERN" },
+    { "name": "COL_lantern_2", "kind": "cyl", "center": [-14.4, 1.1, 14.4], "radius": 0.55, "halfHeight": 1.1, "surface": "STONE_LANTERN" },
+    { "name": "COL_lantern_3", "kind": "cyl", "center": [14.4, 1.1, 14.4], "radius": 0.55, "halfHeight": 1.1, "surface": "STONE_LANTERN" }
+  ]
+}
