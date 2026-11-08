@@ -2,6 +2,11 @@
 // Reads game state each frame through update(view); writes nothing into the sim. Buttons call the
 // handlers passed in init (onStart, onRetry, onRestart, onResume). Bars update every frame (A1.5: <= 2 frames).
 const CSS = `
+.ec-chars{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin:14px 0 6px}
+.ec-char{pointer-events:auto;min-width:150px;padding:10px 14px;background:rgba(20,12,10,.55);border:1px solid rgba(255,170,110,.28);color:#f3e6da;font:600 13px/1.2 inherit;letter-spacing:.14em;cursor:pointer;display:flex;flex-direction:column;gap:4px;text-align:left}
+.ec-char i{font-style:normal;font-weight:400;font-size:11px;letter-spacing:.04em;opacity:.7}
+.ec-char.on{border-color:#ff8a4a;background:rgba(255,110,40,.18);box-shadow:0 0 0 1px #ff8a4a inset}
+
 .ec-hud{position:fixed;inset:0;pointer-events:none;z-index:20;font-family:Georgia,'Times New Roman',serif;color:#f4dcc0}
 .ec-hud *{box-sizing:border-box}
 .ec-bars{position:absolute;left:calc(env(safe-area-inset-left,0px) + 18px);top:calc(env(safe-area-inset-top,0px) + 16px);width:min(300px,42vw)}
@@ -15,7 +20,7 @@ const CSS = `
 .ec-bar.tg u{position:absolute;left:50%;top:-1px;bottom:-1px;width:1px;background:rgba(255,230,200,.7)}
 .ec-bar.tg.ready{box-shadow:0 0 10px rgba(255,80,30,.75)}.ec-bar.tg.on i{background:linear-gradient(90deg,#ff2a10,#ffd27a);animation:ecTg .35s linear infinite alternate}
 @keyframes ecTg{from{filter:brightness(1)}to{filter:brightness(1.6)}}
-.ec-rank{position:absolute;right:calc(env(safe-area-inset-right,0px) + 26px);top:calc(env(safe-area-inset-top,0px) + 88px);text-align:right;opacity:0;transition:opacity .25s;pointer-events:none}
+.ec-rank{position:absolute;right:calc(env(safe-area-inset-right,0px) + 44px);top:calc(env(safe-area-inset-top,0px) + 88px);text-align:right;opacity:0;transition:opacity .25s;pointer-events:none}
 .ec-rank.on{opacity:1}
 .ec-rank b{display:block;font:italic 900 74px/0.9 Georgia,'Times New Roman',serif;letter-spacing:-.04em;color:#ffd9a8;
   -webkit-text-stroke:2px #3a0a04;text-shadow:0 0 18px rgba(255,90,30,.65),4px 4px 0 rgba(120,10,0,.55);transform-origin:80% 60%}
@@ -73,7 +78,7 @@ const CSS = `
 
 export class Hud {
   static id = 'hud';
-  init({ host = document.body, credit = '', touch = false, onStart, onRetry, onRestart, onResume }) {
+  init({ host = document.body, credit = '', touch = false, onStart, onRetry, onRestart, onResume, chars = null, onChar = null }) {
     this.disposed = false;
     this._style = document.createElement('style'); this._style.textContent = CSS; document.head.appendChild(this._style);
     const r = this.root = document.createElement('div'); r.className = 'ec-hud'; r.dataset.ec = 'hud';
@@ -87,6 +92,7 @@ export class Hud {
       <div class="ec-cue" data-ec="cue"></div>
       <div class="ec-prompt" data-ec="prompt"></div>
       <div class="ec-screen" data-ec="title"><h1>EMBER COURT</h1><h3>THE CRIMSON FORD</h3>
+        <div class="ec-chars" data-ec="chars"></div>
         <div class="ec-row"><button class="ec-btn2" data-ec="start">BEGIN</button><span class="ec-slot" data-ec="slot-fs"></span></div>
         <div class="ec-keys">${touch ? 'Left thumb moves. Tap ATK, hold HVY. BLK at the right moment deflects. DGE through red and blue strikes, ROLL to roll clear.'
           : 'WASD move &nbsp; Shift walk &nbsp; Mouse look<br>J / Left click attack &nbsp; K / Right click heavy<br>L or Q block - tap as a strike lands to deflect<br>Space dodge - through red and blue strikes &nbsp; C roll &nbsp; Esc pause'}</div>
@@ -109,6 +115,16 @@ export class Hud {
     this._rank = -1; this._rankOn = false; this._rankFlash = -999; this._tgCls = '';
     this.el.bhpI = this.el.boss.querySelector('.hp i'); this.el.bhpB = this.el.boss.querySelector('.hp b'); this.el.bpoI = this.el.boss.querySelector('.po i');
     r.querySelector('.ec-credit').textContent = credit;
+    // v2.24 character select: one card per playable character; picking a different one calls onChar(id) (page reloads)
+    if (chars) {
+      const host2 = q('chars');
+      for (const c of chars.list) {
+        const b = document.createElement('button'); b.className = 'ec-char' + (c.id === chars.current ? ' on' : ''); b.dataset.char = c.id;
+        b.innerHTML = '<b></b><i></i>'; b.querySelector('b').textContent = c.name; b.querySelector('i').textContent = c.weapon;
+        const h = (e) => { e.preventDefault(); e.stopPropagation(); if (c.id !== chars.current && onChar) onChar(c.id); };
+        b.addEventListener('click', h); (this._binds ||= []).push([b, h]); host2.appendChild(b);
+      }
+    }
     const bind = (k, fn) => { const b = q(k); const h = (e) => { e.preventDefault(); e.stopPropagation(); if (fn) fn(); }; b.addEventListener('click', h); (this._binds ||= []).push([b, h]); };
     bind('start', onStart); bind('again', onRestart); bind('retry', onRetry); bind('restart', onRestart); bind('resume', onResume); bind('quit', onRestart);
     this._hpLag = 1; this._bhpLag = 1; this._cueT = 0; this._bannerT = 0; this._screen = '';
@@ -223,6 +239,8 @@ export class Hud {
   }
 
   // full-screen white flash (capped; reduced-motion callers pass a lower k)
+  // trailer: tint the full-screen impact flash (default warm white); css colour string
+  setFlashColor(css) { if (css !== this._flashCss) { this._flashCss = css; this._flash.style.background = css; } }
   flash(k = 0.6) { this._flashA = Math.max(this._flashA, Math.min(0.85, k)); this._flash.style.opacity = this._flashA.toFixed(3); }
 
   clearFx() { for (const d of this._dmg) { d.t = 9; d.e.style.opacity = '0'; } this._flashA = 0; this._flash.style.opacity = '0'; }

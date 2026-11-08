@@ -214,7 +214,9 @@ export class DuelistSim {
     const toHx = hero.x - this.x, toHz = hero.z - this.z, l = Math.hypot(toHx, toHz) || 1;
     const facing = (toHx * this.forwardX() + toHz * this.forwardZ()) / l > 0.5;
     // warden: guards any light from the front while spacing (not just the opener) - break posture or flank him
-    const guardable = this.elite ? v.name !== 'HEAVY' : v.name === 'LIGHT_1';
+    // v2.27 dance steps: heavies (v.heavy) count as HEAVY; the dance openers (D_L1 / D_L4) are guardable like LIGHT_1
+    const hv = v.name === 'HEAVY' || !!v.heavy;
+    const guardable = this.elite ? !hv : (v.name === 'LIGHT_1' || v.name === 'D_L1' || v.name === 'D_L4');
     const blocks = this.state === DUEL_STATE.SPACE && facing && guardable && this.rng.float() < (this.elite ? WARDEN.GUARD_P : 0.5);
     const stag = this.state === DUEL_STATE.STAGGER;
     let dmg = blocks ? 0 : Math.round(v.dmg * (stag ? 2 : 1));
@@ -231,7 +233,7 @@ export class DuelistSim {
     // hyper armour: the warden's C_ verbs do not flinch (only posture break stops them)
     const armoured = this.elite && this.state === DUEL_STATE.ATTACK && this.verb && this.verb.startsWith('C_');
     if (!stag && this.posture >= this.postureMax) { this.state = DUEL_STATE.STAGGER; this.f = 0; this.hasToken = false; }
-    else if (!stag && !blocks && !armoured && (this.state !== DUEL_STATE.ATTACK || v.name === 'HEAVY')) { this.state = DUEL_STATE.HIT; this.f = 0; this.hasToken = false; }
+    else if (!stag && !blocks && !armoured && (this.state !== DUEL_STATE.ATTACK || hv)) { this.state = DUEL_STATE.HIT; this.f = 0; this.hasToken = false; }
     return dmg;
   }
 }

@@ -20,6 +20,15 @@ Play: https://ade5791.github.io/ember-court/
 - Lock on: middle click, Tab or R. Pause: Esc or P. Full screen: F.
 - Gamepad is supported; touch controls appear automatically on phones and tablets.
 
+## Heroes and combat
+
+- Pick your hero on the title screen (or `?char=hero|vesper|kael`): the Duelist, Vesper with the Cinder Sabre
+  (quick, turning strings) or Kael with the Astral Glaive (longest reach, heavy posture damage).
+- One-handed blades fight like a dance: every strike is a real step, and a string chains up to 10 light / heavy
+  presses with a different move on each press. Mix light and heavy to change the route.
+- Two-handed weapons (great sword, Wyvern Fang, Dusk Odachi, Frostbrand) hit harder but cannot dodge or roll.
+- Hit-stop and slow motion are off by default; `?hitstop=1` turns them back on.
+
 URL options: `?q=low|medium|high` quality preset, `?seed=N` for a reproducible run.
 `?stage3=1` (preview campaign): after the wyvern falls it drops a weapon and a door opens onto the mountain road.
 Fight through its ambushes to the Shadow Warden at the Dusk Shrine, walk the next leg, then face the Chrome

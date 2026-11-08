@@ -241,7 +241,21 @@ export class RoadStage {
     this.root.add(flames); this.geometries.push(fGeo); this.materials.push(fMat);
 
     // gate veil between the torii pillars: dim ember-red while the pass is held, bright gold once every ambush fell
-    const vGeo = new THREE.PlaneGeometry(5.0, 5.2), vMat = new THREE.MeshBasicMaterial({ color: 0xff3a1a, transparent: true, opacity: 0.18,
+    // v2.23: the veil was a flat additive card and read as an untextured slab once it went gold. Now it is a
+    // heat-haze curtain: soft side/top falloff, bright at the ground, deterministic vertical streaks (from R)
+    const VW = 64, VH = 128, vData = new Uint8Array(VW * VH * 4), streak = new Float32Array(VW);
+    for (let x = 0; x < VW; x++) streak[x] = 0.55 + 0.45 * R.float();
+    for (let x = 1; x < VW - 1; x++) streak[x] = (streak[x - 1] + streak[x] * 2 + streak[x + 1]) * 0.25;
+    for (let y = 0; y < VH; y++) for (let x = 0; x < VW; x++) {
+      const u = x / (VW - 1), v = y / (VH - 1);                     // v = 0 at the ground
+      const side = Math.pow(Math.sin(Math.PI * u), 0.8), top = Math.pow(1 - v, 1.6);
+      const a = side * top * streak[x] * (0.75 + 0.25 * Math.sin(v * 21 + u * 9));
+      const i = (y * VW + x) * 4, g = Math.round(255 * Math.max(0, Math.min(1, a)));
+      vData[i] = g; vData[i + 1] = g; vData[i + 2] = g; vData[i + 3] = 255;
+    }
+    const vTex = new THREE.DataTexture(vData, VW, VH); vTex.magFilter = THREE.LinearFilter; vTex.minFilter = THREE.LinearFilter;
+    vTex.needsUpdate = true; this.textures.push(vTex);
+    const vGeo = new THREE.PlaneGeometry(5.0, 5.2), vMat = new THREE.MeshBasicMaterial({ color: 0xff3a1a, map: vTex, transparent: true, opacity: 0.18,
       blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false });
     this.veil = new THREE.Mesh(vGeo, vMat); this.veil.position.set(roadX(ROAD.GATE_Z), 2.6, ROAD.GATE_Z); this.veil.name = 'road_gate_veil';
     this.root.add(this.veil); this.geometries.push(vGeo); this.materials.push(vMat);
@@ -272,7 +286,7 @@ export class RoadStage {
     const k = Math.min(1, dt * 2.5); this._open += ((cleared ? 1 : 0) - this._open) * k;
     const m = this.veil.material;
     m.color.copy(this._veilShut).lerp(this._veilOpen, this._open);
-    m.opacity = 0.14 + this._open * (0.32 + 0.08 * Math.sin(this._t * 3.1));
+    m.opacity = 0.22 + this._open * (0.5 + 0.1 * Math.sin(this._t * 3.1));   // map now carries the falloff, so peak runs higher
   }
 
   dispose() {

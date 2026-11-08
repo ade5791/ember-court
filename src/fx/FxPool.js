@@ -66,6 +66,7 @@ varying float vA; varying vec3 vC; varying float vE; varying float vU;
 void main(){ vA = aA; vC = aC; vE = aE; vU = aU; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`;
 const RIBBON_FS = `
 varying float vA; varying vec3 vC; varying float vE; varying float vU;
+uniform float uHot;
 ${NOISE_GLSL}
 void main(){
   if (!(vA > 0.0)) discard;
@@ -78,7 +79,7 @@ void main(){
   float dry = smoothstep(0.0, 0.22, fib + 0.70 - vU * 1.2 - (1.0 - ve) * 0.25);
   float core = pow(ve, 10.0), rim = smoothstep(0.80, 0.97, ve) * (1.0 - smoothstep(0.97, 1.0, ve));
   float hair = 0.68 + 0.32 * smoothstep(0.25, 0.75, fib);
-  vec3 c = vC * (0.5 + 0.5 * e) * (0.75 + 0.45 * fib) + mix(vC, vec3(1.0), 0.55) * (core * 0.9 + rim * 0.25);
+  vec3 c = vC * (0.5 + 0.5 * e) * (0.75 + 0.45 * fib) + mix(vC, vec3(1.0), 0.55 * uHot) * (core * 0.9 + rim * 0.25);
   // v2.17e: the guard-side edge kept 42% alpha, so the inner border of the stroke was a hard straight line and the
   // ribbon read as a flat panel; feather it to 0 and let the ink body build from the middle outward
   float inner = smoothstep(0.0, 0.45, ve) * (0.8 + 0.2 * fib);
@@ -225,6 +226,8 @@ export class FxPool {
       this.spPos[o] = pos.x; this.spPos[o + 1] = pos.y; this.spPos[o + 2] = pos.z;
       this.spVel[o] = vx / l * sp; this.spVel[o + 1] = vy / l * sp; this.spVel[o + 2] = vz / l * sp;
       this.spLife[i] = SPARK_LIFE * r.range(0.6, 1.0);
+      // trailer: thin the burst (presentation rng only, sim streams untouched)
+      if (this.sparkGain !== undefined && r.float() > this.sparkGain) this.spLife[i] = 0;
     }
   }
 
@@ -244,8 +247,13 @@ export class FxPool {
       L[o6] = P[o]; L[o6 + 1] = P[o + 1]; L[o6 + 2] = P[o + 2];
       L[o6 + 3] = P[o] - V[o] * st; L[o6 + 4] = P[o + 1] - V[o + 1] * st; L[o6 + 5] = P[o + 2] - V[o + 2] * st;
       // hot white-orange head, deep orange tail, fading (HDR > 1 so bloom picks it up when post is on)
+      const T = this.sparkTint;   // trailer: sparks carry the blade colour (head HDR, tail deeper) instead of white-orange
+      if (T) { const hk = this.sparkHead === undefined ? 2.4 : this.sparkHead;
+        Cc[o6] = T[0] * hk * t; Cc[o6 + 1] = T[1] * hk * t; Cc[o6 + 2] = T[2] * hk * t; Cc[o6 + 3] = T[0] * 0.9 * t; Cc[o6 + 4] = T[1] * 0.9 * t; Cc[o6 + 5] = T[2] * 0.9 * t; }
+      else {
       Cc[o6] = 3.0 * t; Cc[o6 + 1] = 1.6 * t; Cc[o6 + 2] = 0.5 * t;
       Cc[o6 + 3] = 1.2 * t; Cc[o6 + 4] = 0.35 * t; Cc[o6 + 5] = 0.05 * t;
+      }
       count++;
     }
     this.stats.sparks = count;
@@ -365,7 +373,7 @@ export class FxPool {
     // v2.9 ink ribbon: per-owner tint, hot leading (tip) edge, soft wash fading toward the guard
     // v2.17: smoothed arc, brush fibres, dry-brush tail (RIBBON_VS / RIBBON_FS)
     const m = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-      vertexShader: RIBBON_VS, fragmentShader: RIBBON_FS });
+      vertexShader: RIBBON_VS, fragmentShader: RIBBON_FS, uniforms: { uHot: { value: 1 } } });
     this.streakMesh = new THREE.Mesh(g, m); this.streakMesh.frustumCulled = false; this.streakMesh.name = 'fx_streaks'; this.streakMesh.renderOrder = 11;
     this.group.add(this.streakMesh);
   }
@@ -497,6 +505,7 @@ export class FxPool {
       const e = 1 - (1 - u) * (1 - u) * (1 - u);          // ease-out: fast burst, slow settle
       s.r.scale.setScalar(0.2 + s.rad * e);
       s.m.opacity = 1.6 * s.k * (1 - u) * (1 - u);
+      if (this.shockCap !== undefined && s.m.opacity > this.shockCap) s.m.opacity = this.shockCap;   // trailer: no bloom-white rings
     }
   }
 
@@ -553,14 +562,15 @@ export class FxPool {
     const g = new THREE.PlaneGeometry(1, 1); this._flareGeo = g;
     for (let i = 0; i < 4; i++) {
       const m = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
-        uniforms: { uC: { value: new THREE.Color(1, 0.6, 0.3) }, uA: { value: 0 }, uRot: { value: 0 } },
+        uniforms: { uC: { value: new THREE.Color(1, 0.6, 0.3) }, uA: { value: 0 }, uRot: { value: 0 }, uHot: { value: 1 }, uCap: { value: 1e6 } },
         vertexShader: 'varying vec2 vUv; void main(){ vUv = uv - 0.5; vec4 mv = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);' +
           ' vec3 s = vec3(length(modelMatrix[0].xyz), length(modelMatrix[1].xyz), 1.0); mv.xy += position.xy * s.xy; gl_Position = projectionMatrix * mv; }',
-        fragmentShader: 'uniform vec3 uC; uniform float uA, uRot; varying vec2 vUv; void main(){' +
+        fragmentShader: 'uniform vec3 uC; uniform float uA, uRot, uHot, uCap; varying vec2 vUv; void main(){' +
           ' float c = cos(uRot), s = sin(uRot); vec2 p = mat2(c, -s, s, c) * vUv * 2.0; float r = length(p);' +
           ' float core = exp(-r * r * 40.0); float halo = exp(-r * 5.0) * 0.35;' +
           ' float star = exp(-abs(p.x) * 38.0) * exp(-abs(p.y) * 2.4) + exp(-abs(p.y) * 38.0) * exp(-abs(p.x) * 2.4);' +
-          ' float k = core * 3.0 + halo + star * 1.4; if (k < 0.004) discard; vec3 col = mix(uC, vec3(1.0), clamp(core, 0.0, 1.0)) * k * uA;' +
+          ' float k = core * 3.0 + halo + star * 1.4; if (k < 0.004) discard; vec3 col = mix(uC, vec3(1.0), clamp(core, 0.0, 1.0) * uHot) * k * uA * mix(1.0, 0.55, step(uHot, 0.99));' +
+          ' col *= min(1.0, uCap / max(1e-4, max(col.r, max(col.g, col.b))));' +
           ' gl_FragColor = vec4(col, clamp(k * uA, 0.0, 1.0));\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}' });
       const mesh = new THREE.Mesh(g, m); mesh.name = 'fx_flare_' + i; mesh.visible = false; mesh.frustumCulled = false; mesh.renderOrder = 13;
       this.group.add(mesh); this.flares.push({ g: mesh, m, t: -1, life: 0.16, k: 1 });
@@ -569,8 +579,12 @@ export class FxPool {
   flare(pos, k = 1, color = 0xff9040) {
     if (!pos) return;
     const f = this.flares[this.flareNext]; this.flareNext = (this.flareNext + 1) % this.flares.length;
-    f.t = 0; f.k = k; f.life = 0.12 + 0.06 * Math.min(k, 2);
-    f.g.position.copy(pos); f.g.visible = true; f.m.uniforms.uC.value.setHex(color);
+    // flareGain (trailer ?fscale) shrinks the star itself; lightCap only clamps its brightness, which keeps the hue
+    // and so makes a capped flare read as a bigger coloured star unless the size comes down with it.
+    const fg = this.flareGain === undefined ? 1 : this.flareGain;
+    f.t = 0; f.k = k * fg; f.life = 0.12 + 0.06 * Math.min(k, 2);
+    f.g.position.copy(pos); f.g.visible = true; f.m.uniforms.uC.value.setHex(color); f.m.uniforms.uHot.value = this.hotCore === undefined ? 1 : this.hotCore;
+    f.m.uniforms.uCap.value = this.lightCap === undefined ? 1e6 : this.lightCap;
     f.m.uniforms.uRot.value = this.rng.range(-0.5, 0.5);
   }
   // ---------- v2.21 rift slashes (Ember Rift space-cuts): 16 view-aligned hairline blades, round-robin. Each one
@@ -580,14 +594,15 @@ export class FxPool {
     this.rifts = []; this.riftNext = 0;
     const g = new THREE.PlaneGeometry(1, 1); this._riftGeo = g;
     const mat = (i) => new THREE.ShaderMaterial({ transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
-      uniforms: { uC: { value: new THREE.Color(0.6, 0.9, 1.0) }, uA: { value: 0 }, uRot: { value: 0 }, uOpen: { value: 0 }, uW: { value: 1 } },
+      uniforms: { uC: { value: new THREE.Color(0.6, 0.9, 1.0) }, uA: { value: 0 }, uRot: { value: 0 }, uOpen: { value: 0 }, uW: { value: 1 }, uHot: { value: 1 }, uCap: { value: 1e6 } },
       vertexShader: 'uniform float uRot, uOpen; varying vec2 vUv; void main(){ vUv = uv - 0.5; vec4 mv = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);' +
         ' vec3 s = vec3(length(modelMatrix[0].xyz), length(modelMatrix[1].xyz), 1.0); vec2 q = position.xy * s.xy; q.x *= uOpen;' +
         ' float c = cos(uRot), n = sin(uRot); mv.xy += vec2(c * q.x - n * q.y, n * q.x + c * q.y); gl_Position = projectionMatrix * mv; }',
-      fragmentShader: 'uniform vec3 uC; uniform float uA, uW; varying vec2 vUv; void main(){' +
+      fragmentShader: 'uniform vec3 uC; uniform float uA, uW, uHot, uCap; varying vec2 vUv; void main(){' +
         ' float ax = abs(vUv.x) * 2.0; float taper = 1.0 - ax * ax; float y = abs(vUv.y) * 2.0 / max(0.05, uW * taper);' +
         ' float core = exp(-y * y * 30.0); float edge = exp(-y * 3.2) * 0.45; float k = (core * 2.4 + edge) * taper; if (k < 0.004) discard;' +
-        ' vec3 col = mix(uC, vec3(1.0), clamp(core, 0.0, 1.0)) * k * uA;' +
+        ' vec3 col = mix(uC, vec3(1.0), clamp(core, 0.0, 1.0) * uHot) * k * uA * mix(1.0, 0.55, step(uHot, 0.99));' +
+        ' col *= min(1.0, uCap / max(1e-4, max(col.r, max(col.g, col.b))));' +
         ' gl_FragColor = vec4(col, clamp(k * uA, 0.0, 1.0));\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}' });
     for (let i = 0; i < 16; i++) {
       const m = mat(i), mesh = new THREE.Mesh(g, m); mesh.name = 'fx_rift_' + i; mesh.visible = false; mesh.frustumCulled = false; mesh.renderOrder = 14;
@@ -599,7 +614,8 @@ export class FxPool {
     if (!pos) return;
     const r = this.rifts[this.riftNext]; this.riftNext = (this.riftNext + 1) % this.rifts.length;
     r.t = -delay - 1e-4; r.delay = delay; r.len = this.reducedMotion ? len * 0.8 : len; r.life = this.reducedMotion ? life * 0.7 : life;
-    r.g.position.copy(pos); r.g.visible = false; r.m.uniforms.uC.value.setHex(color); r.m.uniforms.uRot.value = rot; r.m.uniforms.uA.value = 0;
+    r.g.position.copy(pos); r.g.visible = false; r.m.uniforms.uC.value.setHex(color); r.m.uniforms.uHot.value = this.hotCore === undefined ? 1 : this.hotCore; r.m.uniforms.uRot.value = rot; r.m.uniforms.uA.value = 0;
+    r.m.uniforms.uCap.value = this.lightCap === undefined ? 1e6 : this.lightCap;
     r.live = true;
   }
   clearRifts() { for (const r of this.rifts) { r.live = false; r.t = -1; r.g.visible = false; } }
@@ -646,7 +662,8 @@ export class FxPool {
       const s = a.radius * (1.6 - 0.6 * u);
       a.g.scale.set(s, 1, s);
       const pulse = this.reducedMotion ? 1 : 0.8 + 0.2 * Math.sin(a.t * 24);
-      a.rm.opacity = (0.55 + 0.45 * u) * pulse; a.dm.opacity = (a.mode === TELEGRAPH.NORMAL ? 0.10 : 0.22) * (0.5 + 0.5 * u);
+      const ag = this.auraGain === undefined ? 1 : this.auraGain;   // trailer capture dims the rings (uniform only)
+      a.rm.opacity = (0.55 + 0.45 * u) * pulse * ag; a.dm.opacity = (a.mode === TELEGRAPH.NORMAL ? 0.10 : 0.22) * (0.5 + 0.5 * u) * ag;
       if (a.t > a.lead + 0.15) { a.owner = -1; a.g.visible = false; }
     }
     this.stats.auras = n;
@@ -811,6 +828,23 @@ export class FxPool {
     }
     this.mistLive++;
     if (this.mistCalls) this.mistCalls[preset] += n;   // QA attribution: puffs emitted per preset since boot
+  }
+
+  // v2.26 trailer aura: mist() with an explicit tint (r,g,b 0-1, peak alpha a) instead of a preset. Same smoke pool
+  // and program, so no new shader permutation.
+  mistRGBA(x, y, z, radius, cr, cg, cb, ca, n = 4, up = 0.8) {
+    const S = this.smoke, r = this.rng, T = this.smokeTint;
+    if (this.reducedMotion) n = Math.max(1, n >> 1);
+    for (let j = 0; j < n; j++) {
+      const i = S.next; S.next = (S.next + 1) % S.n; const o = i * 3, o4 = i * 4;
+      const a = r.float() * Math.PI * 2, d = Math.sqrt(r.float()) * radius;
+      S.pos[o] = x + Math.cos(a) * d; S.pos[o + 1] = y + r.range(-0.1, 0.3); S.pos[o + 2] = z + Math.sin(a) * d;
+      const out = r.range(0.3, 1.0);
+      S.vel[o] = Math.cos(a) * out; S.vel[o + 1] = up * r.range(0.7, 1.3); S.vel[o + 2] = Math.sin(a) * out;
+      const life = r.range(0.8, 1.3); S.life[i] = life; S.max[i] = life; S.size[i] = r.range(0.45, 0.8) * (0.6 + radius); S.seed[i] = r.range(0.05, 8);
+      T[o4] = cr; T[o4 + 1] = cg; T[o4 + 2] = cb; T[o4 + 3] = ca; this.smokeDrag[i] = 1;
+    }
+    this.mistLive++;
   }
 
   // v2.17 ember: a hot point in the flame pool (flameJet 2, negative seed = no erosion), gravity + drag, long life

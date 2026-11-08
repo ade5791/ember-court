@@ -47,6 +47,34 @@ export const HERO_SWEEP = Object.freeze({
 });
 // Rift footwork (MotionBricks at_rift_plant, 87 f): the whole rift follows its root curve (a short planted brace).
 export const HERO_RIFT_FOOT = Object.freeze({ CLIP: 'at_rift_plant' });
+// v2.27 DANCE set (one-handed blades: the Duelist and Vesper). docs/DANCE_COMBAT.md. Every strike is a weight
+// transfer authored as one MotionBricks footwork clip (lower body, contact IK) with an authored sword arc layered on
+// top (motion/mb/hero.dance.attacks.json, clip = foot = dz_*). The blade peaks 2 frames after the lead foot plants
+// (peak), so the hit lands on the step like a beat. Moves alternate the hip pivot (opposition: open left, close right)
+// and the string travels a floor pattern (zig-zag in, turn, lunge) instead of standing still.
+// Travel and turn come only from the clip root curve (planted feet = no slide). settle = first frame with both feet
+// down; the chain opens a few frames before it so the next step starts from a loaded stance, on the rhythm.
+export const HERO_DANCE = Object.freeze({
+  D_L1: { foot: 'dz_l1', peak: 28, settle: 42, frames: 59, stamina: 12, dmg: 14, posture: 12, reach: 1.35 },  // step in, open left: R->L cut
+  D_L2: { foot: 'dz_l2', peak: 30, settle: 36, frames: 54, stamina: 12, dmg: 14, posture: 12, reach: 1.35 },  // counter-pivot: high thrust (v2.28, was the rising cut - read too close to the reap)
+  D_L3: { foot: 'dz_l3', peak: 32, settle: 42, frames: 57, stamina: 13, dmg: 16, posture: 14, reach: 1.45 },  // cross right: reaping L->R
+  D_L4: { foot: 'dz_l4', peak: 24, settle: 42, frames: 51, stamina: 13, dmg: 15, posture: 14, reach: 1.35 },  // big open pivot: fast cut
+  D_L5: { foot: 'dz_l5', peak: 30, settle: 43, frames: 57, stamina: 16, dmg: 20, posture: 18, reach: 1.55 },  // square lunge: overhead
+  D_H1: { foot: 'dz_h1', peak: 42, settle: 54, frames: 65, stamina: 28, dmg: 30, posture: 32, reach: 1.5, heavy: true },   // deep plant: slam
+  D_H2: { foot: 'dz_h2', peak: 38, settle: 56, frames: 71, stamina: 26, dmg: 28, posture: 30, reach: 1.45, heavy: true },  // half turn: spin cut
+  ACTIVE: 6, PRE: 3, LINK_LEAD: 6,
+});
+function danceVerb(k) {
+  const d = HERO_DANCE[k], startup = d.peak - HERO_DANCE.PRE, active = HERO_DANCE.ACTIVE, total = d.frames;
+  const phases = [
+    { phase: 'STARTUP', specF: startup, clipF: [0, startup], start: 0 },
+    { phase: 'ACTIVE', specF: active, clipF: [startup, startup + active], start: startup },
+    { phase: 'RECOVERY', specF: total - startup - active, clipF: [startup + active, total], start: startup + active },
+  ];
+  const c0 = Math.max(startup + active + COMBO.CHAIN_LEAD, d.settle - HERO_DANCE.LINK_LEAD);
+  return { ...d, name: k, clip: d.foot, phases, total, startup, active, chain: [c0, total - 1], chainTo: null,
+    dodgeFrom: startup + active + 4, lunge: 0, dance: true };
+}
 function sweepVerb(k) {
   const s = HERO_SWEEP[k], rec = s.total - s.startup - s.active;
   const phases = [
@@ -56,9 +84,31 @@ function sweepVerb(k) {
   ];
   return { ...s, name: k, phases, sweep: true };
 }
+// v2.23 combo routes: up to COMBO.MAX moves in one string, built from light (A) and heavy (B) presses. Each node maps
+// the verb that is playing to the next verb for [A, B]. Any verb chains inside its chain window (verbs without an
+// authored window chain from 3 frames after ACTIVE to the last recovery frame), so a light can follow a heavy and a
+// heavy can follow a light at any depth. Chained moves cost CHAIN_STAMINA x their stamina so a full 10-hit string is
+// affordable. Presentation follows the sim verb + actF only, so the animation sequence is exactly the button sequence.
+export const COMBO = Object.freeze({ MAX: 10, CHAIN_STAMINA: 0.35, CHAIN_LEAD: 3 });
+export const COMBO_ROUTE = Object.freeze({
+  great: Object.freeze({ LOCO: ['LIGHT_1', 'HEAVY'], LIGHT_1: ['LIGHT_2', 'HEAVY'], LIGHT_2: ['LIGHT_3', 'HEAVY'], LIGHT_3: ['SWEEP', 'HEAVY'],
+    SWEEP: ['SWEEP_REV', 'HEAVY'], SWEEP_REV: ['LIGHT_2', 'HEAVY'], HEAVY: ['LIGHT_2', 'SWEEP'] }),
+  std: Object.freeze({ LOCO: ['LIGHT_1', 'HEAVY'], LIGHT_1: ['LIGHT_2', 'HEAVY'], LIGHT_2: ['LIGHT_3', 'HEAVY'], LIGHT_3: ['LIGHT_1', 'HEAVY'],
+    HEAVY: ['LIGHT_2', 'HEAVY'] }),
+  // v2.27 Duelist dance route: five different light steps in a row (A x5 never repeats a move), and a heavy from
+  // each light branches to one of two heavy finishers depending on where in the phrase it lands. The heavy opener
+  // (from LOCO) stays the chargeable HEAVY.
+  dance: Object.freeze({ LOCO: ['D_L1', 'HEAVY'], D_L1: ['D_L2', 'D_H1'], D_L2: ['D_L3', 'D_H2'], D_L3: ['D_L4', 'D_H1'],
+    D_L4: ['D_L5', 'D_H2'], D_L5: ['D_L1', 'D_H1'], D_H1: ['D_L2', 'D_H2'], D_H2: ['D_L4', 'D_H1'], HEAVY: ['D_L2', 'D_H2'] }),
+  // Vesper: same steps, her own phrasing - opens on the big pivot and keeps turning (quick, spinning, roll-friendly)
+  vesper: Object.freeze({ LOCO: ['D_L4', 'HEAVY'], D_L4: ['D_L2', 'D_H2'], D_L2: ['D_L1', 'D_H2'], D_L1: ['D_L3', 'D_H1'],
+    D_L3: ['D_L5', 'D_H2'], D_L5: ['D_L4', 'D_H1'], D_H2: ['D_L1', 'D_H1'], D_H1: ['D_L3', 'D_H2'], HEAVY: ['D_L4', 'D_H2'] }),
+});
 export const HERO_DODGE = Object.freeze({ total: 34, travel: 3.0, travelF: [2, 22], stamina: 20, cancelFrom: 28, guardRange: 9.0 });
 // Guarded quickstep directions (relative to facing). Clip names match the MotionBricks bake (motion/mb/hero.combat.json).
 export const STEP_DIR = Object.freeze({ NONE: 0, F: 1, B: 2, L: 3, R: 4 });
+// v2.23: two-handers never roll or sidestep (user direction). Exported so fixtures can assert it.
+export const GREAT_NO_EVADE = true;
 export const STEP_CLIP = Object.freeze(['dodge', 'dodge_F', 'dodge_B', 'dodge_L', 'dodge_R']);
 export const HERO_FINISHER_F = 96;          // matches the boss finisher length (WyvernBrain FINISHER_F)
 // Finisher presentation: Sword Judgment (clip 102). Blade lands on clip frame 62, the boss takes the blow on sim
@@ -102,7 +152,19 @@ export const WEAPONS = Object.freeze([
   Object.freeze({ id: 2, key: 'fang', name: 'WYVERN FANG', REACH: 0.75, DMG: 1.55, POSTURE: 1.5, STAMINA: 1.2, SWING: 1.3, MOVE: 0.7, TURN: 0.8, GAUGE: 1.5 }),
   Object.freeze({ id: 3, key: 'odachi', name: 'DUSK ODACHI', REACH: 1.0, DMG: 1.45, POSTURE: 1.3, STAMINA: 1.1, SWING: 1.3, MOVE: 0.8, TURN: 0.86, GAUGE: 1.2 }),
   Object.freeze({ id: 4, key: 'frost', name: 'FROSTBRAND', REACH: 0.85, DMG: 1.7, POSTURE: 1.6, STAMINA: 1.15, SWING: 1.3, MOVE: 0.74, TURN: 0.82, GAUGE: 1.3 }),
+  // v2.24 Kael's signature polearm (never dropped): longest reach, posture-heavy, a touch quicker on its feet than
+  // the great blades. Same two-hander frame data, so GREAT_NO_EVADE applies (guard / just-guard / walk out).
+  Object.freeze({ id: 5, key: 'glaive', name: 'ASTRAL GLAIVE', REACH: 1.1, DMG: 1.3, POSTURE: 1.55, STAMINA: 1.15, SWING: 1.3, MOVE: 0.78, TURN: 0.84, GAUGE: 1.15 }),
 ]);
+// v2.24 playable characters. 'hero' is the original duelist and is bit-identical to v2.23 (fixtures unchanged).
+// lock: the signature weapon is kept for the whole campaign (boss drops are recorded on the road map but not equipped).
+// one: one-handed signature modifiers on the standard sword frame data (roll / quickstep stay available).
+export const CHARACTERS = Object.freeze({
+  hero: Object.freeze({ id: 'hero', name: 'THE DUELIST', weapon: 0, lock: false, one: null }),
+  vesper: Object.freeze({ id: 'vesper', name: 'VESPER', weapon: 0, lock: true,
+    one: Object.freeze({ name: 'CINDER SABRE', REACH: 0.2, DMG: 0.95, POSTURE: 0.8, STAMINA: 0.8, GAUGE: 1.45 }) }),
+  kael: Object.freeze({ id: 'kael', name: 'KAEL', weapon: 5, lock: true, one: null }),
+});
 const TURN = SIM.TURN_RATE / 60;
 const TAU = Math.PI * 2;
 function wrap(a) { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI; }
@@ -135,6 +197,12 @@ export class HeroSim {
     this.verbsStd = this.verbs; this.verbsGreat = {};
     for (const k in this.verbsStd) this.verbsGreat[k] = scaleVerb(this.verbsStd[k], GREATSWORD.SWING);
     this.verbsGreat.SWEEP = sweepVerb('SWEEP'); this.verbsGreat.SWEEP_REV = sweepVerb('SWEEP_REV');
+    for (const k in HERO_DANCE) if (k.startsWith('D_')) this.verbsStd[k] = danceVerb(k);   // one-handed only
+    this.danceOn = true;         // v2.27 dance routes for one-handed blades (main.js ?dance=0 restores v2.26)
+    for (const set of [this.verbsStd, this.verbsGreat]) for (const k in set) {
+      const v = set[k]; v.comboChain = v.chain || [v.startup + v.active + COMBO.CHAIN_LEAD, v.total - 1];
+    }
+    this.comboOn = true;         // v2.23 10-move combo routing (main.js ?combo10=0 restores the v2.22 chains)
     this._foot = new Float32Array(3); this.footYaw0 = 0; this.sweeps = 0; this.knocks = 0;
     this._charged = { ...this.verbs.HEAVY };   // scratch verb record for a charged release (no per-hit allocation)
     this._great = { name: '', dmg: 0, posture: 0, reach: 0, charge: 0 };   // scratch verb record for great-sword hits
@@ -142,6 +210,7 @@ export class HeroSim {
     this.contactSink = null;     // (rec) => void, presentation hook after the hero applied an incoming contact
     this.hitSink = null;         // (targetKind, target, dmg, info) => void, presentation hook for outgoing hits
     this._hitIds = new Int32Array(8); this._hitN = 0;
+    this.lockW = -1; this.sig = null; this.charId = 'hero';   // v2.24 character loadout (setCharacter), survives reset
     this.reset(0, 9, 0);
   }
 
@@ -152,7 +221,8 @@ export class HeroSim {
     this.state = HERO_STATE.LOCO; this.verb = null; this.actF = 0; this.actionId = 0; this.stateF = 0;
     this.invuln = false; this.dodgeF = -1; this.deflectF = -1; this.blocking = false;
     this.stepDirX = 0; this.stepDirZ = 1; this.stepToward = 0; this.pushX = 0; this.pushZ = 0; this._lpx = 0; this._lpz = 0; this._lpF = 0; this.plantDX = 0; this.plantDZ = 0; this.stepKind = STEP_DIR.NONE;
-    this.queued = null; this.hitstunLen = HITSTUN_F;
+    this.queued = null; this.queuedBtn = 0; this.hitstunLen = HITSTUN_F;
+    this.comboN = 0; this.comboMask = 0; this.comboMax = 0; this.combos10 = 0;
     this.frame = 0; this.hitsTaken = 0; this.damageTaken = 0; this.damageDealt = 0; this.flash = 0;
     this.perfects = 0; this.deflects = 0; this.phantoms = 0; this.finishers = 0;
     this.lastEvent = ''; this.lastEventFrame = -999; this.lastStaminaFail = -999;
@@ -161,6 +231,7 @@ export class HeroSim {
     this.charging = false; this.chargeF = 0; this.chargeLvl = 0; this.chargedHits = 0;
     this.hpIdle = 0; this.hpRegained = 0;
     this.weapon = WEAPON.SWORD; this.wp = null; this.verbs = this.verbsStd;
+    if (this.lockW > 0) { this.weapon = this.lockW; this.wp = WEAPONS[this.lockW]; this.verbs = this.verbsGreat; }   // v2.24 signature two-hander
     // DMC layer
     this.snatchF = -1; this.snatchT = null; this.snatchCd = 0; this.snatchX = 0; this.snatchZ = 0; this.snatches = 0;
     this.gauge = 0; this.triggerF = 0; this.triggers = 0; this.burstF = -1; this.burstHit = false;
@@ -224,9 +295,23 @@ export class HeroSim {
   }
 
   equipGreatsword() { return this.equip(WEAPON.GREAT); }
+  // v2.27 combo route for the blade in hand: two-handers keep the great route; one-handed blades dance, each
+  // character with its own phrasing. comboOn=false / danceOn=false fall back to the classic three-light chain.
+  _route() {
+    if (this.wp) return COMBO_ROUTE.great;
+    if (!this.danceOn) return COMBO_ROUTE.std;
+    return this.charId === 'vesper' ? COMBO_ROUTE.vesper : COMBO_ROUTE.dance;
+  }
+  _opener() { return this.comboOn ? this._route().LOCO[0] : 'LIGHT_1'; }
+  // v2.24: pick a CHARACTERS entry. Locked characters keep their signature weapon (drops never replace it).
+  setCharacter(id) {
+    const C = CHARACTERS[id] || CHARACTERS.hero;
+    this.charId = C.id; this.lockW = C.lock ? C.weapon : -1; this.sig = C.one;
+    this.reset(this.x, this.z, this.yaw); return C;
+  }
   // equip a two-hander by id; refuses anything not better than what is held (drops only upgrade)
   equip(w) {
-    if (!(w > this.weapon) || !WEAPONS[w]) return false;
+    if (!(w > this.weapon) || !WEAPONS[w] || (this.lockW >= 0 && w !== this.lockW)) return false;
     this.weapon = w; this.wp = WEAPONS[w]; this.verbs = this.verbsGreat; this._event('equip'); return true;
   }
 
@@ -275,9 +360,16 @@ export class HeroSim {
     return best ? Math.atan2(-(best.x - this.x), -(best.z - this.z)) : null;
   }
 
-  _startVerb(name, targets) {
+  // chained: started from a combo window (cheaper, extends the string). btn: 0 light, 1 heavy, 2 sweep (HUD pips)
+  _startVerb(name, targets, chained = false, btn = name === 'HEAVY' ? 1 : 0) {
     const v = this.verbs[name];
-    if (!this._spend(this.wp ? Math.round(v.stamina * this.wp.STAMINA) : v.stamina)) return false;
+    const sk = (this.wp ? this.wp.STAMINA : this.sig ? this.sig.STAMINA : 1) * (chained ? COMBO.CHAIN_STAMINA : 1);
+    if (!this._spend(sk !== 1 ? Math.round(v.stamina * sk) : v.stamina)) return false;
+    this.comboN = chained ? this.comboN + 1 : 1;
+    if (!chained) this.comboMask = 0;
+    if (btn === 1 && this.comboN <= COMBO.MAX) this.comboMask |= 1 << (this.comboN - 1);
+    if (this.comboN > this.comboMax) this.comboMax = this.comboN;
+    if (this.comboN === COMBO.MAX) { this.combos10++; this._event('combo10'); }
     this.state = HERO_STATE.ACTION; this.verb = name; this.actF = 0; this.actionId++; this._hitN = 0;
     this.queued = null; this.blocking = false;
     this.charging = name === 'HEAVY'; this.chargeF = 0; this.chargeLvl = 0;
@@ -288,7 +380,10 @@ export class HeroSim {
 
   // roll = true (ROLL button): always the evasive roll, even with a foe in guard range. Same frames, i-frames,
   // travel and stamina as the dodge; only the quickstep branch is skipped.
+  // v2.23: a two-hander (weapon >= 1) cannot roll or quickstep at all - the heavy blade plants the hero. Defence with
+  // a great sword is guard / just-guard plus walking out of red telegraphs. No stamina is spent on a refused evade.
   _startDodge(cmd, targets, roll = false) {
+    if (this.wp && GREAT_NO_EVADE) return false;
     if (!this._spend(HERO_DODGE.stamina)) return false;
     this.state = HERO_STATE.DODGE; this.dodgeF = 0; this.actF = 0; this.blocking = false; this.queued = null;
     const l = Math.hypot(cmd.mx, cmd.mz);
@@ -388,7 +483,7 @@ export class HeroSim {
           // landing: cancel straight into a combo starter (Snatch -> Streak/Combo loop)
           if (this.snatchF >= recAt + S.CANCEL_FROM && (cmd.attack || cmd.heavy)) {
             this.state = HERO_STATE.LOCO; this.snatchF = -1; this.snatchCd = S.COOLDOWN;
-            this._startVerb(cmd.heavy ? 'HEAVY' : 'LIGHT_1', targets); break;
+            this._startVerb(cmd.heavy ? 'HEAVY' : this._opener(), targets); break;
           }
           if (this.snatchF >= recAt + S.RECOVER) { this.state = HERO_STATE.LOCO; this.snatchF = -1; this.actF = 0; this.snatchCd = S.COOLDOWN; this.speed = 0; }
         }
@@ -419,7 +514,7 @@ export class HeroSim {
         }
         if (this.dodgeF >= D.cancelFrom && (cmd.attack || cmd.heavy || (cmd.sweep && this.wp))) {
           this.dodgeF = -1; this.state = HERO_STATE.LOCO;
-          this._startVerb(cmd.heavy ? 'HEAVY' : cmd.attack ? 'LIGHT_1' : 'SWEEP', targets);
+          this._startVerb(cmd.heavy ? 'HEAVY' : cmd.attack ? this._opener() : 'SWEEP', targets);
         } else if (this.dodgeF >= D.total) { this.dodgeF = -1; this.state = HERO_STATE.LOCO; this.actF = 0; }
         break;
       }
@@ -434,7 +529,7 @@ export class HeroSim {
             if (this.chargeF === HERO_CHARGE.MAX_F) this._event('charged');
             const ay = this._assistYaw(targets);
             if (ay !== null) this.yaw = wrap(this.yaw + Math.max(-TURN * 0.5, Math.min(TURN * 0.5, wrap(ay - this.yaw))));
-            if (cmd.dodge || cmd.roll) { this.charging = false; this.state = HERO_STATE.LOCO; this._startDodge(cmd, targets, cmd.roll); }
+            if ((cmd.dodge || cmd.roll) && !(this.wp && GREAT_NO_EVADE)) { this.charging = false; this.state = HERO_STATE.LOCO; this._startDodge(cmd, targets, cmd.roll); }
             break;
           }
           if (this.actF >= holdAt) { this.charging = false; if (this.chargeLvl > 0) this._event('release'); }
@@ -457,20 +552,31 @@ export class HeroSim {
         const ph = this.phase();
         if (ph === 'ACTIVE') this._resolveSwing(v, targets);
         // buffered follow-ups
-        if (cmd.attack && v.chainTo) this.queued = v.chainTo;
-        if (cmd.heavy) this.queued = 'HEAVY';
-        if (cmd.sweep && this.wp) this.queued = v.sweep ? (v.chainTo || null) : 'SWEEP';   // sweep -> rev; light/heavy -> sweep
-        if (cmd.dodge) this.queued = 'DODGE';
-        if (cmd.roll) this.queued = 'ROLL';
+        if (this.comboOn) {
+          const r = this._route()[this.verb], room = this.comboN < COMBO.MAX;
+          if (r && room && cmd.attack) { this.queued = r[0]; this.queuedBtn = 0; }
+          if (r && room && cmd.heavy) { this.queued = r[1]; this.queuedBtn = 1; }
+          if (room && cmd.sweep && this.wp) { const q = v.sweep ? (v.chainTo || null) : 'SWEEP'; if (q) { this.queued = q; this.queuedBtn = 2; } }
+        } else {
+          if (cmd.attack && v.chainTo) this.queued = v.chainTo;
+          if (cmd.heavy) this.queued = 'HEAVY';
+          if (cmd.sweep && this.wp) this.queued = v.sweep ? (v.chainTo || null) : 'SWEEP';   // sweep -> rev; light/heavy -> sweep
+        }
+        // two-handers cannot evade: a dodge / roll press must not queue (it would cut the swing back to LOCO)
+        const canEvade = !(this.wp && GREAT_NO_EVADE);
+        if (cmd.dodge && canEvade) this.queued = 'DODGE';
+        if (cmd.roll && canEvade) this.queued = 'ROLL';
         const evade = this.queued === 'DODGE' || this.queued === 'ROLL';
         if (evade && this.actF >= v.dodgeFrom) { const r = this.queued === 'ROLL'; this.state = HERO_STATE.LOCO; this._startDodge(cmd, targets, r); break; }
-        if (this.queued && !evade && v.chain && this.actF >= v.chain[0] && this.actF <= v.chain[1]) {
-          const q = this.queued; this.state = HERO_STATE.LOCO; if (!this._startVerb(q, targets)) this.state = HERO_STATE.LOCO;
+        const cw = this.comboOn ? v.comboChain : v.chain;
+        if (this.queued && !evade && cw && this.actF >= cw[0] && this.actF <= cw[1]) {
+          const q = this.queued; this.state = HERO_STATE.LOCO; if (!this._startVerb(q, targets, this.comboOn, this.queuedBtn)) this.state = HERO_STATE.LOCO;
           break;
         }
         if (this.actF >= v.total) {
           this.state = HERO_STATE.LOCO; this.actF = 0; this.chargeLvl = 0;
-          if (this.queued === 'HEAVY' || this.queued === 'SWEEP') this._startVerb(this.queued, targets);
+          if (this.comboOn && this.queued && !evade) this._startVerb(this.queued, targets, true, this.queuedBtn);
+          else if (this.queued === 'HEAVY' || this.queued === 'SWEEP') this._startVerb(this.queued, targets);
           this.queued = null;
         }
         break;
@@ -480,7 +586,7 @@ export class HeroSim {
         this.actF++;
         if ((cmd.dodge || cmd.roll) && this._startDodge(cmd, targets, cmd.roll)) break;
         if (cmd.heavy && this._startVerb('HEAVY', targets)) break;
-        if (cmd.attack && this._startVerb('LIGHT_1', targets)) break;
+        if (cmd.attack && this._startVerb(this._opener(), targets)) break;
         if (cmd.sweep && this.wp && this._startVerb('SWEEP', targets)) break;
         this.blocking = cmd.blockHeld;
         const gk = this.wp ? this.wp.MOVE : 1;   // heavy blade: slower top speed and turns
@@ -565,6 +671,12 @@ export class HeroSim {
       const g = this._great, W = this.wp;
       g.name = v.name; g.charge = v.charge || 0; g.reach = v.reach + W.REACH;
       g.dmg = Math.round(v.dmg * W.DMG); g.posture = Math.round(v.posture * W.POSTURE); g.great = true;
+      g.arc = v.arc; g.knock = v.knock || 0; g.sweep = !!v.sweep;
+      v = g;
+    } else if (this.sig) {   // v2.24 one-handed signature blade (Vesper's Cinder Sabre)
+      const g = this._sigV || (this._sigV = { name: '', dmg: 0, posture: 0, reach: 0, charge: 0, great: false }), S = this.sig;
+      g.name = v.name; g.charge = v.charge || 0; g.reach = v.reach + S.REACH;
+      g.dmg = Math.round(v.dmg * S.DMG); g.posture = Math.round(v.posture * S.POSTURE);
       g.arc = v.arc; g.knock = v.knock || 0; g.sweep = !!v.sweep;
       v = g;
     }

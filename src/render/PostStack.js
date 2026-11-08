@@ -34,11 +34,13 @@ const GradeShader = {
     uFlash: { value: new THREE.Vector4(1, 1, 1, 0) }, uAspect: { value: 1.6 },
     // v2.17 impact blur: xy = contact point in uv, z = strength (0 = off), w = clear radius in uv around the contact
     uBlur: { value: new THREE.Vector4(0.5, 0.5, 0, 0.12) },
+    // v2.26 hue keep: x = knee luminance, y = strength (0 = off), z = roll-off
+    uKeep: { value: new THREE.Vector3(1.2, 0, 0.6) },
   },
   vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
   fragmentShader: `
     uniform sampler2D tDiffuse; uniform vec3 uGain, uShadow, uHigh; uniform float uSat, uContrast, uAspect;
-    uniform vec2 uVig; uniform vec4 uFlash; uniform vec4 uBlur; varying vec2 vUv;
+    uniform vec2 uVig; uniform vec4 uFlash; uniform vec4 uBlur; uniform vec3 uKeep; varying vec2 vUv;
     void main() {
       vec4 t = texture2D(tDiffuse, vUv);
       // radial zoom blur toward the contact point: the contact itself stays sharp (clear radius), the frame edges
@@ -67,6 +69,19 @@ const GradeShader = {
       // (measured on a charged heavy: luma 79 -> 117, contrast 22 -> 15, the "sepia wash"); a multiply keeps the
       // value structure, so the hero still separates from the arena during the flash
       c = c * (1.0 + uFlash.rgb * uFlash.a * 1.4) + uFlash.rgb * uFlash.a * 0.04;
+      // v2.26 hue keep (trailer): AgX desaturates very hot pixels to white. Above uKeep.x linear luminance, roll the
+      // value off and push saturation back up so coloured light stays coloured. uKeep.y = 0 disables (gameplay).
+      if (uKeep.y > 0.0) {
+        float L = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        if (L > uKeep.x) {
+          float Ln = uKeep.x + (L - uKeep.x) / (1.0 + (L - uKeep.x) * uKeep.z);
+          vec3 cn = c * (Ln / L);
+          float mx = max(cn.r, max(cn.g, cn.b)), mn = min(cn.r, min(cn.g, cn.b));
+          float sat = (mx - mn) / max(mx, 1e-4);
+          cn = mix(vec3(Ln), cn, 1.0 + uKeep.y * sat * smoothstep(uKeep.x, uKeep.x * 3.0, L));
+          c = mix(c, max(cn, 0.0), uKeep.y);
+        }
+      }
       gl_FragColor = vec4(max(c, 0.0), t.a);
     }`,
 };

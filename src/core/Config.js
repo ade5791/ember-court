@@ -7,6 +7,9 @@ export const QUALITY = Object.freeze({
     particles: 900, trailSegments: 24, decals: 32, anisotropy: 4, waterReflection: 0.35 }),
   high: Object.freeze({ name: 'high', pixelRatioCap: 2.0, shadowMap: 2048, cascades: 3, ao: 'full', post: 'grade',
     particles: 1500, trailSegments: 32, decals: 48, anisotropy: 8, waterReflection: 0.5 }),
+  // recording only (?q=ultra): high with 4096 shadow maps and 16x anisotropy. Same budgets and light count, so no new programs.
+  ultra: Object.freeze({ name: 'ultra', pixelRatioCap: 2.0, shadowMap: 4096, cascades: 3, ao: 'full', post: 'grade',
+    particles: 1500, trailSegments: 32, decals: 48, anisotropy: 16, waterReflection: 0.5 }),
 });
 
 export function resolveQuality(name) {

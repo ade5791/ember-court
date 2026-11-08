@@ -1,0 +1,17 @@
+{
+  "note": "v2.25 generated weapon meshes (fal Hi3D image-to-3D from concept renders, decimated + WebP in tools/blender/weapon_opt.py). Blade along +Y from y=0 (pommel / butt end). guardFrac = measured widest slice / length; for swords that is the crossguard. fit maps two anchors along the mesh height into socket metres so reach matches the sim.",
+  "weapons": {
+    "ember_sword":   { "file": "ember_sword.glb",   "w": 0, "guardFrac": 0.263, "fit": "guard", "guardY": 0.10, "tipY": 0.87 },
+    "great_sword":   { "file": "great_sword.glb",   "w": 1, "guardFrac": 0.263, "fit": "guard", "guardY": 0.10, "tipY": 1.60 },
+    "wyvern_fang":   { "file": "wyvern_fang.glb",   "w": 2, "guardFrac": 0.338, "fit": "guard", "guardY": 0.10, "tipY": 1.65 },
+    "dusk_odachi":   { "file": "dusk_odachi.glb",   "w": 3, "guardFrac": 0.312, "fit": "guard", "guardY": 0.10, "tipY": 1.88 },
+    "frostbrand":    { "file": "frostbrand.glb",    "w": 4, "guardFrac": 0.312, "fit": "guard", "guardY": 0.10, "tipY": 1.74 },
+    "cinder_sabre":  { "file": "cinder_sabre.glb",  "w": 0, "char": "vesper", "guardFrac": 0.212, "vcol": true, "fit": "guard", "guardY": 0.10, "tipY": 1.02 },
+    "astral_glaive": { "file": "astral_glaive.glb", "w": 5, "char": "kael", "fit": "ends", "bottomY": -0.50, "topY": 2.22 }
+  },
+  "provenance": {
+    "source": "generated 3D (fal Hi3D image-to-3D), concepts generated 2D (ThinkForce Image_Generation)",
+    "fetch": "tools/game/fetch-weapons.ps1",
+    "optimize": "tools/blender/weapon_opt.ps1"
+  }
+}

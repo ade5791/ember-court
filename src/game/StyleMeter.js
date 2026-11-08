@@ -9,6 +9,7 @@ export const STYLE_TITLES = Object.freeze(['DULL', 'CRUEL', 'BRUTAL', 'ASCENDANT
 export const STYLE = Object.freeze({
   BAND: 100, MAX: 700,
   GAIN: Object.freeze({ LIGHT_1: 14, LIGHT_2: 16, LIGHT_3: 24, HEAVY: 30, CHARGED: 46, SNATCH: 20, SWEEP: 26, SWEEP_REV: 30, FINISHER: 140,
+    D_L1: 14, D_L2: 16, D_L3: 18, D_L4: 18, D_L5: 24, D_H1: 32, D_H2: 34,
     PERFECT: 60, DEFLECT: 30, PHANTOM: 50, JUSTGUARD: 45, KILL: 40, TRIGGER: 25, RIFT: 90 }),
   VARIETY_N: 5, REPEAT_CUT: 0.28, MIN_K: 0.15,
   HOLD_F: 100,            // frames after the last gain before decay starts
@@ -38,7 +39,7 @@ export class StyleMeter {
     const id = KINDS.indexOf(kind);
     let reps = 0; for (let i = 0; i < this._recent.length; i++) if (this._recent[i] === id) reps++;
     // defence and finishers are never "spam": only offensive repeats are cut
-    const off = kind === 'LIGHT_1' || kind === 'LIGHT_2' || kind === 'LIGHT_3' || kind === 'HEAVY' || kind === 'CHARGED' || kind === 'SNATCH' || kind === 'SWEEP' || kind === 'SWEEP_REV';
+    const off = kind.startsWith('D_') || kind === 'LIGHT_1' || kind === 'LIGHT_2' || kind === 'LIGHT_3' || kind === 'HEAVY' || kind === 'CHARGED' || kind === 'SNATCH' || kind === 'SWEEP' || kind === 'SWEEP_REV';
     const k = off ? Math.max(STYLE.MIN_K, 1 - STYLE.REPEAT_CUT * reps) : 1;
     if (off) { this._recent[this._ri] = id; this._ri = (this._ri + 1) % this._recent.length; }
     const g = base * k;

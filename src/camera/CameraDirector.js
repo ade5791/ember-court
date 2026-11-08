@@ -47,15 +47,28 @@ export const CAMERA_STABILITY = Object.freeze({
 
 // Cinematic layer (v2): authored boss shots blended over the gameplay rig. Never narrows the lens; every shot
 // still goes through the clearance solve and the arena clamp. dist/height are metres from the focus point.
-export const CINE = Object.freeze({ NONE: 0, INTRO: 1, PHASE: 2, FINISHER: 3, DEATH: 4 });
-export const CINE_NAMES = Object.freeze(['NONE', 'INTRO', 'PHASE', 'FINISHER', 'DEATH']);
+export const CINE = Object.freeze({ NONE: 0, INTRO: 1, PHASE: 2, FINISHER: 3, DEATH: 4, ROAD_OPEN: 5, AMBUSH: 6, GATE: 7 });
+export const CINE_NAMES = Object.freeze(['NONE', 'INTRO', 'PHASE', 'FINISHER', 'DEATH', 'ROAD_OPEN', 'AMBUSH', 'GATE']);
+// lb = letterbox weight (0..1) the owner applies while the shot is live
 const CINE_SHOT = [
   null,
-  { dur: 5.0, inT: 0.6, outT: 1.2, d0: 13.0, d1: 10.5, h0: 5.0, h1: 2.6, orbit: 1.15, lookY: 0.2, fov: 0 },     // INTRO: sweeping orbit as it lands
-  { dur: 1.9, inT: 0.35, outT: 0.8, d0: 9.5, d1: 7.8, h0: 0.7, h1: 0.5, orbit: 0.25, lookY: 0.4, fov: 0 },     // PHASE: low push on the roar
-  { dur: 1.6, inT: 0.2, outT: 0.6, d0: 5.2, d1: 4.6, h0: 0.55, h1: 0.9, orbit: 0.55, lookY: -0.6, fov: 0 },    // FINISHER: low side arc
-  { dur: 4.0, inT: 0.6, outT: 1.2, d0: 9.0, d1: 15.0, h0: 2.2, h1: 5.5, orbit: 0.5, lookY: -0.4, fov: 4 },     // DEATH: slow pull-back
+  { dur: 5.0, inT: 0.6, outT: 1.2, d0: 13.0, d1: 10.5, h0: 5.0, h1: 2.6, orbit: 1.15, lookY: 0.2, fov: 0, lb: 1 },     // INTRO: sweeping orbit as it lands
+  { dur: 1.9, inT: 0.35, outT: 0.8, d0: 9.5, d1: 7.8, h0: 0.7, h1: 0.5, orbit: 0.25, lookY: 0.4, fov: 0, lb: 1 },     // PHASE: low push on the roar
+  { dur: 1.6, inT: 0.2, outT: 0.6, d0: 5.2, d1: 4.6, h0: 0.55, h1: 0.9, orbit: 0.55, lookY: -0.6, fov: 0, lb: 1 },    // FINISHER: low side arc
+  { dur: 4.0, inT: 0.6, outT: 1.2, d0: 9.0, d1: 15.0, h0: 2.2, h1: 5.5, orbit: 0.5, lookY: -0.4, fov: 4, lb: 1 },     // DEATH: slow pull-back
+  // v2.23 road grammar (PBZ reference: one continuous take, no cuts). Every road shot is hero-focused or two-shot and
+  // ENDS on the chase pose, so the hand-back is a settle, not a cut. cine(kind, endYaw, k) sets the arc direction.
+  { dur: 4.2, inT: 0.02, outT: 1.3, d0: 6.6, d1: 4.6, h0: 2.6, h1: 0.5, orbit: 2.4, lookY: 0.25, fov: 0, lb: 1 },    // ROAD_OPEN: crane from in front, over the shoulder into the chase
+  { dur: 2.6, inT: 1.05, outT: 0.8, d0: 8.2, d1: 7.2, h0: 3.2, h1: 2.6, orbit: 0.25, lookY: -0.4, fov: 0, lb: 0.35 },  // AMBUSH: raised three-quarter on the pincer
+  { dur: 2.6, inT: 0.5, outT: 0.9, d0: 5.6, d1: 4.3, h0: 0.25, h1: 0.55, orbit: 0.35, lookY: 1.15, fov: 2, lb: 1 },   // GATE: low hero shot, torii above
 ];
+// v2.23 road chase lens: 3-5 m back, ~60 deg (reference #1), thirds offset, slight down-tilt down the pass
+const ROAD_BASE = { boom: 4.4, height: 1.7, fov: 58, pitch: -0.05, blend: 1.2, side: 0.35 };
+const ROAD_DUEL = { boom: 4.7, height: 1.7, fov: 58, pitch: -0.09, blend: 0.9, side: 0.5 };
+// assistIdle: s without look input before the chase assist; assistLag: s follow lag; maxSpeed: m/s cap on the camera
+// body (the take never whips - a pincer target swap used to swing the duel rig ~30 m/s round the hero)
+export const ROAD_CAM = Object.freeze({ assistIdle: 1.0, assistLag: 0.9, maxSpeed: 18.0 });   // 0.30 m/frame, under the 0.35 cut line
+const _prevDes = new THREE.Vector3();
 const _cPos = new THREE.Vector3(), _cLook = new THREE.Vector3(), _cPiv = new THREE.Vector3();
 function smooth01(x) { x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); }
 
@@ -68,8 +81,15 @@ export class CameraDirector extends BaseCameraRig {
 
   constructor() { super({}); this.shot = SHOT.EXPLORE; }
 
-  init(ctx, { camera, colliders, reducedMotion = false }) {
+  init(ctx, { camera, colliders, reducedMotion = false, boomScale = 1, fovScale = 1, bossBoomScale = 1, bossLook = 0.35, bossPitchK = 1 }) {
+    // trailer-only boss lens (defaults are the identity, so gameplay and QA framing are unchanged)
+    this.bossBoomScale = bossBoomScale; this.bossLook = bossLook; this.bossPitchK = bossPitchK;
+    this.bossSide = 1; this.occRadiusK = 1;   // trailer: wider oblique offset + fatter occluder (main sets these)
+    this.bossBias = 0; this.bossHeight = 0;   // trailer: profile two-shot yaw bias (rad) and pivot height override (m)
+    this.cineDistK = 1; this.bossPitchBias = 0;   // ad cut: authored-shot distance scale, extra boss-shot pitch (rad, <0 tilts down)
     this.ctx = ctx; this.camera = camera; this.colliders = colliders; this.reducedMotion = reducedMotion;
+    // ?trailer=1 (recording only): tighter gameplay lens for promo footage; gameplay shots only, cines untouched
+    this.boomScale = boomScale; this.fovScale = fovScale;
     this.hero = null;             // { position: Vector3, yaw }
     this.target = null;           // { position: Vector3 (lock point), airborne: bool } or null
     this.lockOn = false;
@@ -88,7 +108,9 @@ export class CameraDirector extends BaseCameraRig {
     this.pulledIn = 0; this.cineBlock = 0; this.cineGuardFrames = 0;
     this.cineKind = CINE.NONE; this.cineT = 0; this.cineW = 0; this.cineYaw0 = 0; this.cineCount = 0;
     this.cineFocus = new THREE.Vector3();   // owner (main) writes the subject point each frame
-    this.cineLog = [0, 0, 0, 0, 0];
+    this.cineLog = CINE_NAMES.map(() => 0); this.cineSgn = 1;
+    // v2.23 road: owner sets roadMode + roadYaw (chase yaw down the pass at the hero) every frame
+    this.roadMode = false; this.roadYaw = 0; this.lookIdle = 99; this.assistW = 0;
     this.occluder = { position: new THREE.Vector3(), active: false };   // owner (main) writes the boss body centre
     this.occYaw = 0; this.occSign = 0; this.occFrames = 0; this._cw = 0;
     const bus = ctx && ctx.get ? ctx.get('bus') : null;
@@ -104,7 +126,15 @@ export class CameraDirector extends BaseCameraRig {
 
   setHero(hero) { this.hero = hero; }
   setTarget(target, lockOn = false) { this.target = target; this.lockOn = lockOn; }
-  addLook(dYaw, dPitch) { this.orbitYaw += dYaw; this.orbitPitch = clamp(this.orbitPitch + dPitch, -0.35, 0.70); }
+  addLook(dYaw, dPitch) {
+    if (Math.abs(dYaw) + Math.abs(dPitch) > 1e-5) this.lookIdle = 0;
+    this.orbitYaw += dYaw; this.orbitPitch = clamp(this.orbitPitch + dPitch, -0.35, 0.70);
+  }
+  // shot params: the road swaps the explore/duel lens for the chase lens (reference #1: 3-5 m, ~60 deg)
+  _base(shot) { return this.roadMode && shot === SHOT.EXPLORE ? ROAD_BASE : this.roadMode && shot === SHOT.DUEL ? ROAD_DUEL : BASE[shot]; }
+  // "wide after a kill": a short pull-out on the push layer (negative push distance); never cuts a stronger push
+  release() { if (this.push > 0.3) return; this.push = 1; this.pushT = 0; this.pushDist = -1.1; this.pushIn = 0.45; this.pushOut = 1.6; }
+  get cineLb() { const S = CINE_SHOT[this.cineKind]; return S ? this.cineW * (S.lb === undefined ? 1 : S.lb) : 0; }
 
   // ---- event layers ----
   onContact(p) {
@@ -125,12 +155,24 @@ export class CameraDirector extends BaseCameraRig {
   phantomStep(frames = 18) { this.phantom = 1; this.phantomT = frames / 60; }
 
   // Start an authored shot. A higher-priority shot (DEATH > FINISHER > INTRO > PHASE) is never cut by a lower one.
-  cine(kind) {
+  // Road shots (kind >= ROAD_OPEN) take endYaw: the arc is laid out so it FINISHES on that yaw (the chase pose), and
+  // sgn picks the arc direction. Boss shots keep the old rule (grow out of the current view).
+  cine(kind, endYaw = null, sgn = 1) {
     if (!CINE_SHOT[kind]) return;
-    const pri = [0, 2, 1, 3, 4];
+    // trailer ?cines= whitelist (bit per CINE kind): the close FINISHER arc and the PHASE push put the lens inside
+    // the 3x wyvern's wing, so the ad capture keeps the gameplay two-shot through those beats
+    if (this.cineMask !== undefined && !((this.cineMask >> kind) & 1)) return;
+    const pri = [0, 2, 1, 3, 4, 1, 1, 1];
+    const road = kind >= CINE.ROAD_OPEN;
+    // a boss shot replacing a road shot is a new place (stage change): drop the road shot outright
+    if (!road && this.cineKind >= CINE.ROAD_OPEN) { this.cineKind = CINE.NONE; this.cineW = 0; }
     if (this.cineKind !== CINE.NONE && this.cineT < CINE_SHOT[this.cineKind].dur && pri[kind] < pri[this.cineKind]) return;
-    // start from where the gameplay camera already looks from, so the shot grows out of the current view
-    if (this.cineKind === CINE.NONE || this.cineW < 0.05) this.cineYaw0 = Math.atan2(this.position.x - this.cineFocus.x, this.position.z - this.cineFocus.z);
+    if (road && endYaw !== null) { this.cineSgn = sgn < 0 ? -1 : 1; this.cineYaw0 = endYaw - CINE_SHOT[kind].orbit * this.cineSgn; }
+    else {
+      this.cineSgn = 1;
+      // start from where the gameplay camera already looks from, so the shot grows out of the current view
+      if (this.cineKind === CINE.NONE || this.cineW < 0.05) this.cineYaw0 = Math.atan2(this.position.x - this.cineFocus.x, this.position.z - this.cineFocus.z);
+    }
     this.cineKind = kind; this.cineT = 0; this.cineCount++; this.cineLog[kind]++; this.cineLatch = false;
     this.push = 0; this.trauma = Math.min(this.trauma, 0.2);
   }
@@ -144,8 +186,20 @@ export class CameraDirector extends BaseCameraRig {
     const u = this.cineT / S.dur, e = smooth01(u);
     const w = Math.min(smooth01(this.cineT / S.inT), smooth01((S.dur - this.cineT) / S.outT));
     const f = this.cineFocus;
-    let yaw = this.cineYaw0 + S.orbit * e * (this.cineKind === CINE.FINISHER ? -1 : 1);
-    const d = S.d0 + (S.d1 - S.d0) * e, h = S.h0 + (S.h1 - S.h0) * e;
+    let yaw = this.cineYaw0 + S.orbit * e * (this.cineKind === CINE.FINISHER ? -1 : this.cineSgn);
+    let d = (S.d0 + (S.d1 - S.d0) * e) * (this.cineKind === CINE.FINISHER ? 1 : this.cineDistK), h = S.h0 + (S.h1 - S.h0) * e;
+    // v2.23 AMBUSH fit: hold every foe in the frame. Radius r must sit inside the narrower half-angle of the lens
+    // (vertical at 16:9 is the binding one for depth spread) with ~25% margin; the fit distance is smoothed so a
+    // foe dying or stepping in never pops the dolly. Capped at 12.5 m (the pass walls start at 14.2 m).
+    if (this.cineKind === CINE.AMBUSH) {
+      const half = Math.min(this.camera.fov * 0.5, Math.atan(Math.tan(this.camera.fov * Math.PI / 360) * this.camera.aspect) * 180 / Math.PI);
+      const want = Math.min(10.5, (this.cineFitR || 0) * 1.15 / Math.tan(half * Math.PI / 180));
+      // first frame of the shot: take the fit distance outright (easing up from 0 left the lens inside the pincer
+      // for the whole blend-in, with foes behind it); after that, smooth so deaths/steps never pop the dolly
+      if (!this._fitD || this.cineT <= dt * 1.5) this._fitD = want;
+      else this._fitD += (want - this._fitD) * Math.min(1, dt * 3);
+      if (this._fitD > d) { const k = this._fitD / d; d = this._fitD; h *= Math.min(1.4, k); }
+    } else this._fitD = 0;
     if (this.cineKind === CINE.FINISHER && this.hero) {
       // side-on to the hero->target line, framed on the midpoint, low and close
       const hp = this.hero.position, mx = (hp.x + f.x) * 0.5, mz = (hp.z + f.z) * 0.5;
@@ -174,16 +228,16 @@ export class CameraDirector extends BaseCameraRig {
     if (this._snapPending) {
       // first frame after reset(): jump straight to the right shot, rig params and framing yaw (no whip, no blend)
       this._snapPending = false; this.shot = this.prevShot = next; this.blendT = 1;
-      const B0 = BASE[next]; Object.assign(this.cur, { boom: B0.boom, height: B0.height, fov: B0.fov, pitch: B0.pitch, side: B0.side });
+      const B0 = this._base(next); Object.assign(this.cur, { boom: B0.boom, height: B0.height, fov: B0.fov, pitch: B0.pitch, side: B0.side });
       if (this.target && next !== SHOT.EXPLORE) {
         const hp0 = this.hero.position;
         this.orbitYaw = Math.atan2(-(this.target.position.x - hp0.x), -(this.target.position.z - hp0.z));
       }
     }
-    if (next !== this.shot) { this.prevShot = this.shot; this.shot = next; this.blendT = 0; this.blendDur = BASE[next].blend; }
+    if (next !== this.shot) { this.prevShot = this.shot; this.shot = next; this.blendT = 0; this.blendDur = this._base(next).blend; }
     if (this.blendT < 1) this.blendT = Math.min(1, this.blendT + dt / this.blendDur);
     // one exponential blend toward the active shot (lag derived from its blend time: ~95% at blendDur)
-    const B = BASE[this.shot], a = smoothingAlpha(this.blendDur / 3, dt), c = this.cur;
+    const B = this._base(this.shot), a = smoothingAlpha(this.blendDur / 3, dt), c = this.cur;
     c.boom += (B.boom - c.boom) * a; c.height += (B.height - c.height) * a; c.fov += (B.fov - c.fov) * a;
     c.pitch += (B.pitch - c.pitch) * a; c.side += (B.side - c.side) * a;
 
@@ -194,7 +248,7 @@ export class CameraDirector extends BaseCameraRig {
       const ax = smoothingAlpha(S.pivotLagXZ, dt), ay = smoothingAlpha(S.pivotLagY, dt);
       _pivotS.x += (hp.x - _pivotS.x) * ax; _pivotS.z += (hp.z - _pivotS.z) * ax; _pivotS.y += (hp.y - _pivotS.y) * ay;
     }
-    _pivot.set(_pivotS.x, _pivotS.y + c.height, _pivotS.z);
+    _pivot.set(_pivotS.x, _pivotS.y + (this.bossHeight > 0 && this.shot === SHOT.BOSS_GROUND ? this.bossHeight : c.height), _pivotS.z);
     // smoothed lock point; snaps when a new target appears or after a reset
     if (this.target) {
       const tp = this.target.position;
@@ -207,12 +261,24 @@ export class CameraDirector extends BaseCameraRig {
     if (this.target && this.shot !== SHOT.EXPLORE) {
       // frame hero and target: camera behind the hero on the hero->target line, offset to the side (thirds)
       _toT.subVectors(_tgtS, _pivot);
-      yaw = Math.atan2(-_toT.x, -_toT.z) + (BASE[this.shot].bias || 0);
+      yaw = Math.atan2(-_toT.x, -_toT.z) + (this._base(this.shot).bias || 0) + (this.shot >= SHOT.BOSS_GROUND ? this.bossBias : 0);
       const flat = Math.hypot(_toT.x, _toT.z);
-      pitch = c.pitch + clamp(Math.atan2(_toT.y, Math.max(1, flat)) * 0.6, -0.2, this.shot === SHOT.BOSS_AIR ? CAMERA_LIMITS.pitchMaxAir : 0.35);
+      pitch = c.pitch + (this.shot >= SHOT.BOSS_GROUND ? this.bossPitchBias : 0) + clamp(Math.atan2(_toT.y, Math.max(1, flat)) * 0.6 * (this.shot >= SHOT.BOSS_GROUND ? this.bossPitchK : 1), -0.2, this.shot === SHOT.BOSS_AIR ? CAMERA_LIMITS.pitchMaxAir : 0.35);
       this.orbitYaw += (yaw - this.orbitYaw - Math.round((yaw - this.orbitYaw) / (2 * Math.PI)) * 2 * Math.PI) * smoothingAlpha(this.shot === SHOT.DUEL ? S.yawLagDuel : S.yawLagBoss, dt);
       yaw = this.orbitYaw;
-    } else { yaw = this.orbitYaw; pitch = c.pitch + this.orbitPitch; }
+    } else {
+      // v2.23 road chase assist: after ROAD_CAM.assistIdle s with no look input, the orbit eases onto the pass
+      // direction (and pitch back to level) so the camera always looks down the road. Look input wins instantly.
+      this.lookIdle += dt;
+      const want = this.roadMode && this.lookIdle > ROAD_CAM.assistIdle ? 1 : 0;
+      this.assistW += (want - this.assistW) * smoothingAlpha(0.5, dt);
+      if (this.assistW > 1e-3) {
+        const ka = smoothingAlpha(ROAD_CAM.assistLag, dt) * this.assistW;
+        let e = this.roadYaw - this.orbitYaw; e -= Math.round(e / (2 * Math.PI)) * 2 * Math.PI;
+        this.orbitYaw += e * ka; this.orbitPitch += (0 - this.orbitPitch) * ka;
+      }
+      yaw = this.orbitYaw; pitch = c.pitch + this.orbitPitch;
+    }
 
     // push-in layer
     if (this.push > 0) {
@@ -221,7 +287,9 @@ export class CameraDirector extends BaseCameraRig {
       const k = this.pushT < inT ? this.pushT / inT : Math.max(0, 1 - (this.pushT - inT) / outT);
       this.push = this.pushT < inT + outT ? k : 0;
     }
-    const boom = c.boom - this.push * this.pushDist;
+    // trailer lens: boss shots tighten further so the hero is not a speck under the 3x wyvern (recording only)
+    const bossK = this.shot >= SHOT.BOSS_GROUND ? this.bossBoomScale : 1;
+    const boom = (c.boom - this.push * this.pushDist) * this.boomScale * bossK;
     const cp = Math.cos(pitch), sp = Math.sin(pitch);
     // C13: occlusion test on the un-swung pose, then a smoothed swing + lift toward the clear side
     let occT = 0;
@@ -235,9 +303,10 @@ export class CameraDirector extends BaseCameraRig {
     _pivot.y += OCCLUSION.lift * Math.min(1, Math.abs(this.occYaw) / OCCLUSION.swing);
     // forward (camera looks along) = (-sin yaw, ., -cos yaw); camera sits behind the pivot
     const fx = -Math.sin(yaw), fz = -Math.cos(yaw), rx = Math.cos(yaw), rz = -Math.sin(yaw);
-    _desired.set(_pivot.x - fx * boom * cp + rx * c.side, _pivot.y - sp * boom, _pivot.z - fz * boom * cp + rz * c.side);
-    _look.set(_pivot.x + fx * 4 + rx * c.side * 0.4, _pivot.y + sp * 4, _pivot.z + fz * 4 + rz * c.side * 0.4);
-    if (this.target && this.shot !== SHOT.EXPLORE) _look.lerp(_tgtS, 0.35);
+    const sd = c.side * (this.shot >= SHOT.BOSS_GROUND ? this.bossSide : 1);
+    _desired.set(_pivot.x - fx * boom * cp + rx * sd, _pivot.y - sp * boom, _pivot.z - fz * boom * cp + rz * sd);
+    _look.set(_pivot.x + fx * 4 + rx * sd * 0.4, _pivot.y + sp * 4, _pivot.z + fz * 4 + rz * sd * 0.4);
+    if (this.target && this.shot !== SHOT.EXPLORE) _look.lerp(_tgtS, this.shot >= SHOT.BOSS_GROUND ? this.bossLook : 0.35);
 
     // shake (trauma^2, decays 1.6/s) is applied BEFORE the clearance solve so it can never break the C5 margin
     this.trauma = Math.max(0, this.trauma - 1.6 * dt);
@@ -258,7 +327,13 @@ export class CameraDirector extends BaseCameraRig {
       }
     }
     this._cw = cw;
+    // v2.23 road continuity: cap the camera body speed (before the clearance solve, so the C5 margin still wins)
+    if (this.roadMode && this._roadPrev && dt > 0) {
+      _w.subVectors(_desired, _prevDes); const L = _w.length(), m = ROAD_CAM.maxSpeed * dt;
+      if (L > m) { _desired.copy(_prevDes).addScaledVector(_w, m / L); this.speedCapped = (this.speedCapped || 0) + 1; }
+    }
     this._resolveClearance(_pivot, _desired);
+    if (this.roadMode) { _prevDes.copy(_desired); this._roadPrev = true; } else this._roadPrev = false;
     if (this.cineKind !== CINE.NONE) {
       // latched per shot: fading the shot shrinks the pull, which would otherwise un-block it and oscillate
       if (this.pulledIn > CINE_GUARD.pullMax && this.cineW > 0.3) this.cineLatch = true;
@@ -266,7 +341,10 @@ export class CameraDirector extends BaseCameraRig {
     } else { this.cineBlock = 0; this.cineLatch = false; }
     // v2.16 hero-in-frame guard (authored shots only): if the hero chest sits more than CINE_GUARD.cone off the
     // look axis, turn the look toward the hero just enough to bring it back inside. Gameplay shots already frame it.
-    if (cw > 0 && this.hero) {
+    // v2.23: on the road the guard runs at full strength on every frame - the speed cap can hold the body back while
+    // the look has already swung to the pincer (measured: hero at ndc x -1.02 for 2 frames as AMBUSH blended in)
+    const gw = this.roadMode ? 1 : cw;
+    if (gw > 0 && this.hero) {
       const hp = this.hero.position;
       _w.set(hp.x - _desired.x, hp.y + OCCLUSION.heroY - _desired.y, hp.z - _desired.z);
       _v.subVectors(_look, _desired);
@@ -274,7 +352,7 @@ export class CameraDirector extends BaseCameraRig {
       if (lh > 1e-3 && ll > 1e-3) {
         const ang = Math.acos(clamp(_w.dot(_v) / (lh * ll), -1, 1));
         if (ang > CINE_GUARD.cone) {
-          const t = (1 - CINE_GUARD.cone / ang) * cw;
+          const t = (1 - CINE_GUARD.cone / ang) * gw;
           _v.multiplyScalar(1 / ll).lerp(_w.multiplyScalar(1 / lh), t).normalize();
           _look.copy(_desired).addScaledVector(_v, ll);
           this.cineGuardFrames++;
@@ -284,7 +362,7 @@ export class CameraDirector extends BaseCameraRig {
     if (this.occluder.active && cw === 0 && this._segOcc(this.occluder.position, _desired.x, _desired.y, _desired.z, this.hero.position) !== 0) this.occFrames++;
 
     // FOV kick (6 f in/out envelope), deflect push-in FOV, phantom FOV +4
-    let fov = c.fov;
+    let fov = c.fov * this.fovScale;
     if (this.kick !== 0) {
       this.kickT += dt;
       const e = this.kickT < 0.05 ? this.kickT / 0.05 : Math.max(0, 1 - (this.kickT - 0.05 - 0.1) / 0.25);
@@ -342,12 +420,14 @@ export class CameraDirector extends BaseCameraRig {
     const t = clamp(((O.x - cx) * dx + (O.y - cy) * dy + (O.z - cz) * dz) / dd, 0, 1);
     if (t > 0.97) return 0;                                   // body beyond the hero: not an occluder
     const px = cx + dx * t - O.x, py = cy + dy * t - O.y, pz = cz + dz * t - O.z;
-    if (px * px + py * py + pz * pz > OCCLUSION.radius * OCCLUSION.radius) return 0;
+    const rr = OCCLUSION.radius * this.occRadiusK;
+    if (px * px + py * py + pz * pz > rr * rr) return 0;
     return (dx * (O.z - cz) - dz * (O.x - cx)) > 0 ? -1 : 1;   // swing away from the side the body is on
   }
   _occSide(pivot, yaw, boom, cp, sp, side) {
     const fx = -Math.sin(yaw), fz = -Math.cos(yaw), rx = Math.cos(yaw), rz = -Math.sin(yaw);
-    return this._segOcc(this.occluder.position, pivot.x - fx * boom * cp + rx * side, pivot.y - sp * boom, pivot.z - fz * boom * cp + rz * side, this.hero.position);
+    const sd = side * (this.shot >= SHOT.BOSS_GROUND ? this.bossSide : 1);
+    return this._segOcc(this.occluder.position, pivot.x - fx * boom * cp + rx * sd, pivot.y - sp * boom, pivot.z - fz * boom * cp + rz * sd, this.hero.position);
   }
 
   _clampLimits(p) {
@@ -366,13 +446,13 @@ export class CameraDirector extends BaseCameraRig {
   reset(heroYaw = 0) {
     this.trauma = 0; this.kick = 0; this.kickT = 0; this.push = 0; this.pushT = 0; this.pushDist = 0;
     this.phantom = 0; this.phantomT = 0; this.pulledIn = 0; this.occYaw = 0; this.occSign = 0; this._cw = 0; this.cineBlock = 0;
-    this.cineKind = CINE.NONE; this.cineT = 0; this.cineW = 0;
+    this.cineKind = CINE.NONE; this.cineT = 0; this.cineW = 0; this.cineSgn = 1; this.assistW = 0; this.lookIdle = 99; this._roadPrev = false;
     this.orbitYaw = heroYaw; this.orbitPitch = 0;
     this.target = null; this.lockOn = false; this.shot = this.prevShot = SHOT.EXPLORE;
     this._snapPending = true; this._stableInit = false; this._tgtLive = false; this.snap(); this.resetStats();
   }
 
-  snap() { this.initialized = false; this.blendT = 1; const B = BASE[this.shot]; Object.assign(this.cur, { boom: B.boom, height: B.height, fov: B.fov, pitch: B.pitch, side: B.side }); }
+  snap() { this.initialized = false; this.blendT = 1; const B = this._base(this.shot); Object.assign(this.cur, { boom: B.boom, height: B.height, fov: B.fov, pitch: B.pitch, side: B.side }); }
   resetStats() { this.minClearance = Infinity; this.occFrames = 0; }
 
   dispose() {

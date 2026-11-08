@@ -1,4 +1,4 @@
-// main - the shipped game page (index.html). Owner: game. Wires GameSim (deterministic run) to the render stack,
+﻿// main - the shipped game page (index.html). Owner: game. Wires GameSim (deterministic run) to the render stack,
 // input layer, touch overlay, camera director, fx pool and HUD. Visuals stay downstream of sim events.
 // Query: ?seed=N  ?q=low|medium|high  ?start=title|wave1|wave2|boss  ?god=1  ?bot=1 (autopilot)  ?touch=0|1  ?rm=1
 import * as THREE from 'three';
@@ -33,7 +33,7 @@ import { RoadMap } from '../ui/RoadMap.js';
 import { RoadStage } from '../world/RoadStage.js';
 import { makeRoadEnvironment, setRoadLook, roadSunDir, ROAD_LOOK } from '../render/RoadLook.js';
 import { ROAD, ROAD_AMBUSH, roadX, makeRoadDoc } from '../shared/road.js';
-import { HERO_DODGE, HERO_FINISHER_F, HERO_FINISHER_CLIP, STEP_DIR, STEP_CLIP, HERO_CHARGE, GREATSWORD, scalePhases, HERO_SNATCH, HERO_TRIGGER, HERO_RIFT, WEAPONS, HERO_SWEEP } from './HeroSim.js';
+import { HERO_DODGE, HERO_FINISHER_F, HERO_FINISHER_CLIP, STEP_DIR, STEP_CLIP, HERO_CHARGE, GREATSWORD, scalePhases, HERO_SNATCH, HERO_TRIGGER, HERO_RIFT, WEAPONS, HERO_SWEEP, GREAT_NO_EVADE } from './HeroSim.js';
 import { STYLE_RANKS, STYLE_TITLES } from './StyleMeter.js';
 const SNATCH_SPAN = HERO_SNATCH.STARTUP + HERO_SNATCH.TRAVEL_MAX + HERO_SNATCH.RECOVER;
 import { buildQuickstep, quickstepClipTime } from '../shared/quickstep.js';
@@ -44,6 +44,8 @@ import { buildWarp } from './TimeWarp.js';
 import { GauntletView, GAUNTLET_ID } from './GauntletView.js';
 import { GAUNTLET } from '../shared/constants.js';
 import { G_STATE } from '../boss/GauntletBrain.js';
+import { makeRetargeter } from './Retarget.js';
+import { loadWeaponMeshes, fitWeapon, dressRig } from './WeaponMeshes.js';
 
 const ROOT = new URL('../../', import.meta.url).href;      // site root (works under a GitHub Pages sub-path)
 const qs = new URLSearchParams(location.search);
@@ -52,6 +54,9 @@ const seed = Number(qs.get('seed') || SIM.SEED_DEFAULT) >>> 0;
 const reducedMotion = qs.get('rm') === '1' || matchMedia('(prefers-reduced-motion: reduce)').matches;
 // ?rec=1 recording mode: autopilot with full tactics, no cursor / credit / debug chrome, auto-start, letterboxed cine
 const recMode = qs.get('rec') === '1';
+// v2.24 playable character (?char=hero|vesper|kael, else the last pick). Chosen at boot; the title picker reloads.
+const CHAR_IDS = ['hero', 'vesper', 'kael'];
+const CHAR = CHAR_IDS.includes(qs.get('char')) ? qs.get('char') : (() => { try { const c = localStorage.getItem('ec.char'); return CHAR_IDS.includes(c) ? c : 'hero'; } catch (e) { return 'hero'; } })();
 const useBot = qs.get('bot') === '1' || recMode;
 const OCC_ON = qs.get('occ') !== '0';   // C13 A/B switch (review only)
 const HERO_ID = 1, BOSS_ID = 100, MAX_DUELISTS = 3;
@@ -149,6 +154,14 @@ const [heroGltf, enemyGltf, bossGltf, bossManifest, timing, heroCombat, heroLung
   fetch(ROOT + 'characters/gauntlet/gauntlet.manifest.json').then((r) => r.json()),
   fetch(ROOT + 'motion/mb/hero.v222.attacks.json').then((r) => (r.ok ? r.json() : null)).catch(() => null),
 ]);
+// v2.24: Vesper / Kael share the hero's 24-bone skeleton but not its rest pose; the hero clip set is retargeted onto
+// their rest (src/game/Retarget.js) so every verb, warp and IK path below runs unchanged. Built here, at rest.
+const charGltf = CHAR !== 'hero' ? await loader.loadAsync(ROOT + 'characters/' + CHAR + '/out/character.glb') : null;
+const RETARGET = charGltf ? makeRetargeter(heroGltf.scene, charGltf.scene) : null;
+// v2.25: generated weapon meshes (?meshwpn=0 keeps the procedural blades)
+const MESH_WPN = qs.get('meshwpn') !== '0';
+const WPN = MESH_WPN ? await loadWeaponMeshes(loader, ROOT).catch((e) => { console.warn('[wpn]', e); return {}; }) : {};
+if (RETARGET) console.info('[char]', CHAR, JSON.stringify(RETARGET.report));
 // C16: authored clips are 30 Hz LINEAR keys -> resample to 60 Hz monotone cubic (keys/extremes/holds kept exactly,
 // velocity continuous through every key). ?smooth=0 keeps the raw tracks for A/B.
 const SMOOTH_ON = qs.get('smooth') !== '0';
@@ -283,11 +296,105 @@ function dressGreatSword(s, w, steelMat, inlayMat, guardMat) {
   if (steelMat) steelMat.color.setHex(L.steel);
   if (inlayMat) inlayMat.emissive.setHex(L.inlay);
   if (guardMat) guardMat.color.setHex(L.guard);
+  showGen(s, w);
+}
+// v2.25 generated meshes on the great-sword rig: one fitted mesh per boss blade, the matching one shown, tip moved to
+// the mesh's real tip. The procedural parts stay in the socket (hidden) as the ?meshwpn=0 fallback.
+const GEN_GREAT = ['', 'great_sword', 'wyvern_fang', 'dusk_odachi', 'frostbrand'];
+const genMats = { hero: [] };
+function genMat(id, owner) {
+  const W = WPN[id]; if (!W) return null;
+  const m = W.mat.clone(); m.emissive = new THREE.Color(0, 0, 0);
+  if (owner === 'hero') genMats.hero.push(m);
+  return m;
+}
+function addGenGreat(rig, owner) {
+  if (!MESH_WPN) return;
+  rig.gen = {};
+  for (let w = 1; w < GEN_GREAT.length; w++) {
+    const W = WPN[GEN_GREAT[w]]; if (!W) continue;
+    const f = fitWeapon(W, genMat(GEN_GREAT[w], owner)); f.mesh.visible = false; rig.socket.add(f.mesh); rig.gen[w] = f;
+  }
+  if (Object.keys(rig.gen).length) for (const c of [rig.blade, rig.inlay, rig.point, rig.guard]) c.visible = false;
+  else rig.gen = null;
+}
+function showGen(rig, w) {
+  if (!rig.gen) return;
+  const f = rig.gen[w] || rig.gen[1];
+  for (const k in rig.gen) rig.gen[k].mesh.visible = rig.gen[k] === f;
+  if (f) rig.tip.position.set(f.tipX, f.tipY, f.tipZ);
+}
+function dressGen(rig, id, owner) {
+  if (!MESH_WPN || !WPN[id]) return null;
+  return dressRig(rig, WPN[id], genMat(id, owner));
+}
+
+// v2.24 Cinder Sabre (Vesper): slim curved one-hander, 0.92 m (standard blade +0.2 m = CHARACTERS.vesper.one.REACH),
+// ember edge along the cutting side, crescent guard. Curve = 4 stacked segments with increasing tilt (shared geo).
+// Same steel / brass / emberInlay programs as the other blades, so no new program keys.
+const sabreSegGeo = new THREE.BoxGeometry(0.052, 0.24, 0.008), sabreEdgeGeo = new THREE.BoxGeometry(0.012, 0.24, 0.011);
+const sabreGuardGeo = new THREE.TorusGeometry(0.06, 0.012, 5, 10, Math.PI), sabreGripGeo = new THREE.CylinderGeometry(0.016, 0.018, 0.15, 8);
+function addSabre(bone, s) {
+  const socket = new THREE.Group();
+  socket.position.fromArray(s.position); socket.quaternion.fromArray(s.quaternion); socket.scale.setScalar(s.scale);
+  bone.add(socket);
+  const edgeMat = emberInlay.clone();   // own clone: the charge glow pulses it, never the drop / pickup inlays
+  const parts = [];
+  let y = 0.11, x = 0, a = 0;
+  for (let i = 0; i < 4; i++) {
+    const seg = new THREE.Group(); seg.position.set(x, y, 0); seg.rotation.z = a;
+    const b = new THREE.Mesh(sabreSegGeo, heroSteel); b.position.y = 0.12; b.scale.x = 1 - i * 0.16;   // tapers to the point
+    const e = new THREE.Mesh(sabreEdgeGeo, edgeMat); e.position.set(0.026 * (1 - i * 0.16), 0.12, 0);
+    seg.add(b, e); socket.add(seg); parts.push(b, e);
+    y += 0.235 * Math.cos(a); x -= 0.235 * Math.sin(a); a += 0.13;
+  }
+  const guard = new THREE.Mesh(sabreGuardGeo, brass); guard.position.y = 0.1; guard.rotation.z = Math.PI;
+  const grip = new THREE.Mesh(sabreGripGeo, leather); grip.position.y = 0.02;
+  for (const m of [...parts, guard, grip]) m.castShadow = true;
+  socket.add(guard, grip);
+  const tip = new THREE.Object3D(); tip.position.set(x, y, 0); socket.add(tip);
+  const hilt = new THREE.Object3D(); hilt.position.y = 0.09; socket.add(hilt);
+  return { tip, hilt, socket, edgeMat };
+}
+// v2.24 Astral Glaive (Kael): 2.3 m polearm - long dark-steel shaft with a two-hand grip below the hand, a broad
+// crescent head with an indigo ember core, butt spike. Blade length matches WEAPONS[5].REACH (great sword +0.4 m).
+const glShaftGeo = new THREE.CylinderGeometry(0.022, 0.026, 1.7, 8), glHeadGeo = new THREE.BoxGeometry(0.17, 0.6, 0.03);
+const glCoreGeo = new THREE.BoxGeometry(0.04, 0.5, 0.036), glTipGeo = new THREE.ConeGeometry(0.12, 0.26, 4);
+const glCollarGeo = new THREE.CylinderGeometry(0.045, 0.045, 0.08, 8), glButtGeo = new THREE.ConeGeometry(0.03, 0.14, 6);
+const glCrescentGeo = (() => {   // 2D outline in the socket XY plane (blade along +Y), extruded 2.6 cm
+  const s = new THREE.Shape(); s.moveTo(-0.02, 0); s.lineTo(0.03, 0);
+  s.bezierCurveTo(0.26, 0.2, 0.28, 0.62, 0.05, 0.9);      // convex cutting edge out to the point
+  s.bezierCurveTo(0.1, 0.6, 0.04, 0.28, -0.02, 0.1);      // concave spine back to the socket
+  s.lineTo(-0.02, 0);
+  const g = new THREE.ExtrudeGeometry(s, { depth: 0.026, bevelEnabled: true, bevelThickness: 0.006, bevelSize: 0.006, bevelSegments: 1, curveSegments: 10 });
+  g.translate(0, 0, -0.013); return g;
+})();
+const glShaftMat = new THREE.MeshStandardMaterial({ color: 0x23262e, metalness: 1, roughness: 0.42 });
+function addGlaive(bone, s) {
+  const socket = new THREE.Group();
+  socket.position.fromArray(s.position); socket.quaternion.fromArray(s.quaternion); socket.scale.setScalar(s.scale);
+  bone.add(socket);
+  const coreMat = emberInlay.clone(); coreMat.emissive.setHex(0x6a7dff);
+  const glSteel = heroSteel.clone(); glSteel.color.setHex(0xd6dbe6);
+  const shaft = new THREE.Mesh(glShaftGeo, glShaftMat); shaft.position.y = 0.45;
+  const grip = new THREE.Mesh(gsGripGeo, leather); grip.position.y = -0.08;
+  const collar = new THREE.Mesh(glCollarGeo, brass); collar.position.y = 1.3;
+  // crescent head: one extruded single-edged blade (convex cutting edge, concave spine), indigo core inset, spur hook
+  const head = new THREE.Mesh(glCrescentGeo, glSteel); head.position.set(0, 1.32, 0);
+  const core = new THREE.Mesh(glCrescentGeo, coreMat); core.position.set(0.012, 1.36, 0); core.scale.set(0.32, 0.72, 1.12);
+  const point = new THREE.Object3D();
+  const spur = new THREE.Mesh(glTipGeo, glShaftMat); spur.position.set(-0.07, 1.42, 0); spur.rotation.z = 1.9; spur.scale.set(0.5, 0.6, 0.2);
+  const butt = new THREE.Mesh(glButtGeo, brass); butt.position.y = -0.47; butt.rotation.x = Math.PI;
+  for (const m of [shaft, grip, collar, head, core, spur, butt]) { m.castShadow = true; socket.add(m); }
+  socket.visible = false;
+  const tip = new THREE.Object3D(); tip.position.set(0.05, 2.22, 0); socket.add(tip);
+  const hilt = new THREE.Object3D(); hilt.position.y = 0.12; socket.add(hilt);
+  return { tip, hilt, socket, coreMat };
 }
 
 // hero: pivot PI faces engine -Z
 pinHips(heroGltf); pinHips(enemyGltf);
-const hero = { root: new THREE.Group(), pivot: new THREE.Group(), model: heroGltf.scene, fallback: 'idle' };
+const hero = { root: new THREE.Group(), pivot: new THREE.Group(), model: charGltf ? charGltf.scene : heroGltf.scene, fallback: 'idle' };
 hero.pivot.rotation.y = Math.PI; hero.root.add(hero.pivot); hero.pivot.add(hero.model); scene.add(hero.root);
 const heroBones = prepModel(hero.model);
 // baked quickstep clips -> AnimationClips on the hero skeleton. Every track must resolve to a real bone, else the
@@ -359,6 +466,11 @@ const CARRY_BONES = ['Spine02', 'Spine01', 'Spine', 'LeftShoulder', 'LeftArm', '
 // at 60 Hz. Hips.position carries the bake's vertical only (rootXZ is applied by the sim via src/shared/attackFoot.js,
 // so the bones carry no XZ travel). Every track must resolve, else the clip is dropped and the verb uses its gs_* clip.
 const AT_OK = {};
+// v2.27 dance set (one-handed combo steps): same layered format, merged into the attack clip table
+const DANCE_ON = qs.get('dance') !== '0';
+const heroDance = DANCE_ON ? await fetch(ROOT + 'motion/mb/hero.dance.attacks.json').then((r) => (r.ok ? r.json() : null)).catch(() => null) : null;
+if (heroDance && heroDance.clips && heroAttacks && heroAttacks.clips) Object.assign(heroAttacks.clips, heroDance.clips);
+const DANCE_CLIPS = heroDance && heroDance.clips ? Object.keys(heroDance.clips) : [];
 if (heroAttacks && heroAttacks.clips) {
   const bn = {}; heroGltf.scene.traverse((o) => { if (o.isBone) bn[o.name] = o; });
   for (const name in heroAttacks.clips) {
@@ -371,38 +483,51 @@ if (heroAttacks && heroAttacks.clips) {
     mbClips.push(new THREE.AnimationClip(name, (F - 1) / fps, tracks)); AT_OK[name] = (F - 1) / fps;
   }
 }
-makeActions(hero, heroGltf.animations.concat(mbClips)); markLoops(hero);
+const HERO_CLIPS = RETARGET ? RETARGET.clips(heroGltf.animations.concat(mbClips)) : heroGltf.animations.concat(mbClips);
+makeActions(hero, HERO_CLIPS); markLoops(hero);
 // C15 inertialization: every clip switch decays the old pose into the new one (presentation only, ?inert=0 disables)
 const INERT_ON = qs.get('inert') !== '0';
 const INERT_MODE = qs.get('inert') === 'decay' ? 'decay' : 'spring';
 const INERT_HL = +(qs.get('ihl') || 0.6);
-hero.inert = new Inertializer(hero.model, heroGltf.animations.concat(mbClips)); hero.inert.enabled = INERT_ON; hero.inert.mode = INERT_MODE; hero.inert.hlScale = INERT_HL;
-if (qs.get('plant') !== '0') hero.inert.setPlant(['at_sweep', 'at_sweep_rev', 'at_rift_plant'],
+hero.inert = new Inertializer(hero.model, HERO_CLIPS); hero.inert.enabled = INERT_ON; hero.inert.mode = INERT_MODE; hero.inert.hlScale = INERT_HL;
+if (qs.get('plant') !== '0') hero.inert.setPlant(['at_sweep', 'at_sweep_rev', 'at_rift_plant'].concat(DANCE_CLIPS),
   ['Hips', 'LeftUpLeg', 'LeftLeg', 'LeftFoot', 'LeftToeBase', 'RightUpLeg', 'RightLeg', 'RightFoot', 'RightToeBase']);
-const HERO_SOCKET = { position: [-0.3366, 7.6967, -1.1561], quaternion: [0.00031, 0.23882, 0.6183, 0.74878], scale: 100 };
+const HERO_SOCKET0 = { position: [-0.3366, 7.6967, -1.1561], quaternion: [0.00031, 0.23882, 0.6183, 0.74878], scale: 100 };
+const HERO_SOCKET = RETARGET ? RETARGET.socket(HERO_SOCKET0) : HERO_SOCKET0;
 const heroSwordStd = addSword(heroBones.RightHand, HERO_SOCKET, heroSteel);
 const heroGreat = addGreatSword(heroBones.RightHand, HERO_SOCKET, heroSteel); heroGreat.socket.visible = false;
 let heroSword = heroSwordStd;
+// v2.24 signature weapons: Vesper's Cinder Sabre replaces the standard blade, Kael's Astral Glaive the two-hander.
+const heroSabre = CHAR === 'vesper' ? addSabre(heroBones.RightHand, HERO_SOCKET) : null;
+const heroGlaive = CHAR === 'kael' ? addGlaive(heroBones.RightHand, HERO_SOCKET) : null;
+if (heroSabre) { heroSwordStd.socket.visible = false; heroSword = heroSabre; }
+// v2.25 generated meshes: hero blade, every boss blade on the two-hander, Vesper's sabre, Kael's glaive
+dressGen(heroSwordStd, 'ember_sword', 'hero'); addGenGreat(heroGreat, 'hero');
+if (heroSabre) dressGen(heroSabre, 'cinder_sabre', 'hero');
+if (heroGlaive) dressGen(heroGlaive, 'astral_glaive', 'hero');
 // hero two-hander gets its own inlay + guard materials (same program keys as emberInlay / brass) so the pickup
 // pulse and the boss-drop colours never bleed into each other
 const heroInlay = emberInlay.clone(), heroGuard = brass.clone();
 heroGreat.inlay.material = heroInlay; heroGreat.guard.material = heroGuard;
 function setHeroWeapon(w) {
-  heroSword = w >= 1 ? heroGreat : heroSwordStd; heroSwordStd.socket.visible = w < 1; heroGreat.socket.visible = w >= 1;
-  dressGreatSword(heroGreat, w >= 1 ? w : 1, heroSteel, heroInlay, heroGuard);
+  const one = heroSabre || heroSwordStd, two = w === 5 && heroGlaive ? heroGlaive : heroGreat;
+  heroSword = w >= 1 ? two : one;
+  heroSwordStd.socket.visible = w < 1 && !heroSabre; if (heroSabre) heroSabre.socket.visible = w < 1;
+  heroGreat.socket.visible = w >= 1 && two === heroGreat; if (heroGlaive) heroGlaive.socket.visible = w >= 1 && two === heroGlaive;
+  if (two === heroGreat) dressGreatSword(heroGreat, w >= 1 ? w : 1, heroSteel, heroInlay, heroGuard);
 }
 // v2.19 boss drop in the world: a second great-sword rig planted blade-down at sim.drop, own materials, no light.
 const dropRoot = new THREE.Group(); dropRoot.visible = false; scene.add(dropRoot);
 const dropSteel = steel.clone(), dropInlay = emberInlay.clone(), dropGuard = brass.clone();
 const dropSword = addGreatSword(dropRoot, { position: [0, 0, 0], quaternion: [0, 0, 0, 1], scale: 1 }, dropSteel);
 dropSword.inlay.material = dropInlay; dropSword.guard.material = dropGuard;
-dropSword.socket.rotation.set(Math.PI - 0.1, 0.4, -0.06);
+dropSword.socket.rotation.set(Math.PI - 0.1, 0.4, -0.06); addGenGreat(dropSword, 'drop');
 const dropGlow = { t: 0, ping: -1, w: 0 };
 // planted pickup: the same great sword, blade down in the ford beside the wyvern's landing, with a pulsing ember
 // column so it reads from the hero spawn. No light (constant light count); additive basic material only.
 const pickupRoot = new THREE.Group(); pickupRoot.visible = false; scene.add(pickupRoot);
 const pickupSword = addGreatSword(pickupRoot, { position: [0, 0, 0], quaternion: [0, 0, 0, 1], scale: 1 }, steel);
-pickupSword.socket.rotation.set(Math.PI + 0.14, 0.6, 0.08);
+pickupSword.socket.rotation.set(Math.PI + 0.14, 0.6, 0.08); addGenGreat(pickupSword, 'pickup'); showGen(pickupSword, 1);
 const pickupBeamMat = new THREE.MeshBasicMaterial({ color: 0xff7a30, transparent: true, opacity: 0.15, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
 // v2.17c: vertical fade baked into vertex colours (additive, so black = no light): bright at the sword, gone by the
 // top. A uniform-opacity open cylinder read as a hard orange slab in the wyvern frames
@@ -476,6 +601,7 @@ for (let i = 0; i < MAX_DUELISTS; i++) {
   makeActions(s, enemyGltf.animations); markLoops(s);
   s.inert = new Inertializer(s.model, enemyGltf.animations); s.inert.enabled = INERT_ON; s.inert.mode = INERT_MODE; s.inert.hlScale = INERT_HL;
   s.sword = addSword(bones.RightHand, ENEMY_SOCKET); s.bones = bones;
+  if (MESH_WPN && WPN.ember_sword) dressRig(s.sword, WPN.ember_sword);   // shared material, same program
   s.root.visible = false;
   slots.push(s);
 }
@@ -485,6 +611,9 @@ for (let i = 0; i < MAX_DUELISTS; i++) {
 // emissive lift instead (emissive colour is a uniform on the standard material - no new program).
 // v2.13 A/B: a mid-ash retint (0.80,0.76,0.88) sank him into the pillar shadow bands - pale ash stays.
 const wardenTint = new THREE.Color(1.05, 1.0, 1.12), wardenGlow = new THREE.Color(0.035, 0.045, 0.08);
+// ?wglow=r,g,b (recording only): stronger cold emissive so the pale warden reads as a deliberate spectral boss against
+// the orange dusk instead of an untextured grey figure (ad-cut review). Uniform only - same programs.
+if (qs.get('rec') === '1' && qs.get('wglow')) { const g = qs.get('wglow').split(',').map(Number); if (g.length === 3 && g.every(Number.isFinite)) wardenGlow.setRGB(g[0], g[1], g[2]); }
 const slot0Mats = [];
 slots[0].model.traverse((o) => { if (o.isMesh && o.material && o.material.color) { o.material = o.material.clone(); slot0Mats.push({ m: o.material, base: o.material.color.clone(), em: o.material.emissive ? o.material.emissive.clone() : null }); } });
 function styleWarden(on) {
@@ -561,15 +690,52 @@ const motes = { shrine: new AmbientMotes('shrine', { rng: motesRng, quality, red
 shrine.root.add(motes.shrine.points); foundry.root.add(motes.foundry.points);
 if (roadStage) roadStage.root.add(motes.road.points);
 for (const k in motes) motes[k].setViewportHeight(renderer.domElement.height);
+const TRAILER_LOOK = qs.get('rec') === '1' && qs.get('trailer') === '1';
+const TRL_FOG = +(qs.get('fogs') || 0.55); let trlFogSet = -1;
 const heroRim = makeRimUniform(), foeRim = makeRimUniform();
 const RIM_ON = qs.get('rim') !== '0';
 if (RIM_ON) { addRimToModel(hero.model, heroRim); for (const s of slots) addRimToModel(s.model, foeRim); }
+// ?brim=<gain> (ad takes): warm sun-side rim on the wyvern so its silhouette lifts off the dusk walls. Same shared
+// 'rim' program as the hero, attached before the prewarm, so no new variant appears mid-play.
+const BOSS_RIM = +(qs.get('brim') || 0);
+if (RIM_ON && BOSS_RIM > 0) { const bossRim = makeRimUniform(); addRimToModel(boss.model, bossRim); bossRim.value.setRGB(1.0 * BOSS_RIM, 0.46 * BOSS_RIM, 0.16 * BOSS_RIM); }
 stageFinish = function applyStageFinish(name) {
   post.setStage(name);
   const R = STAGE_RIM[name] || STAGE_RIM.ford;
   heroRim.value.setRGB(R.hero[0], R.hero[1], R.hero[2]); foeRim.value.setRGB(R.foe[0], R.foe[1], R.foe[2]);
+  // ?frimk=K (promo recording only): scale the foe rim so bosses carry a glowing spectral edge; uniform only
+  if (TRAILER_LOOK && qs.get('frimk')) foeRim.value.multiplyScalar(Math.max(0, +qs.get('frimk') || 1));
   // art review: the warm camera fill flattened the dusk duel - cooler and weaker there so the rim carries separation
   const F = STAGE_FILL[name] || STAGE_FILL.ford; camFill.color.setHex(F[0]); camFill.intensity = F[1];
+  if (TRAILER_LOOK && post.enabled) {
+    // promo grade (?trailer=1): more contrast and saturation, warm highlights over cool shadows, heavier vignette.
+    // Uniforms only - no program changes. Gameplay builds never take this path.
+    const u = post.grade.uniforms;
+    u.uSat.value *= 1.16; u.uContrast.value *= 1.12;
+    u.uShadow.value.x += 0.000; u.uShadow.value.y += 0.004; u.uShadow.value.z += 0.016;
+    u.uHigh.value.x += 0.030; u.uHigh.value.y += 0.012; u.uHigh.value.z -= 0.010;
+    u.uVig.value.x = Math.min(0.6, u.uVig.value.x + 0.14);
+    post.bloom.strength *= 1.25;
+    // v2.26: hue keep - hot strikes stay coloured instead of clipping to white under AgX (?keep=0 disables)
+    u.uKeep.value.set(+(qs.get('knee') || 1.2), +(qs.get('keep') || 0.85), 0.6);
+    // QA t7: the overcast ford read flat grey in the promo; extra punch there only (warm high, teal low)
+    if (name === 'ford') {
+      // ?dusk=1 (ad takes): low warm sun under a darkening sky instead of the grey overcast - colours only, the
+      // same lights and programs, so nothing recompiles; restoreGorgeLook resets it on the next arena change
+      if (qs.get('dusk') === '1') {
+        const D = { sun: [1.0, 0.58, 0.32], hz: [0.34, 0.15, 0.075], zn: [0.035, 0.04, 0.085] };
+        look.sun.color.setRGB(D.sun[0], D.sun[1], D.sun[2]); look.sun.intensity *= +(qs.get('dsun') || 1.12);
+        look.hemi.color.setRGB(0.48, 0.46, 0.66); look.hemi.groundColor.setRGB(0.09, 0.045, 0.03);
+        const su = look.sky.material.uniforms; su.uH.value.setRGB(D.hz[0], D.hz[1], D.hz[2]); su.uZ.value.setRGB(D.zn[0], D.zn[1], D.zn[2]);
+        if (scene.fog) scene.fog.color.setRGB(D.hz[0] * 0.8, D.hz[1] * 0.8, D.hz[2] * 0.8);
+        // camera-side fill: lights the hero's back in the chase shot, so a saturated cool fill turned the dark-cloaked
+        // hero into a flat blue cutout; ?dfill=<hex>&dfilli=<k> tune it, default a near-neutral cool white
+        camFill.color.setHex(parseInt(qs.get('dfill') || 'dfe4ff', 16)); camFill.intensity = +(qs.get('dfilli') || 0.62);
+      }
+      u.uSat.value *= 1.12; u.uContrast.value *= 1.08;
+      u.uShadow.value.y += 0.006; u.uShadow.value.z += 0.012; u.uHigh.value.x += 0.02; u.uHigh.value.y += 0.006;
+    }
+  }
 };
 stageFinish(arena);
 fx.registerAfterimages(GAUNTLET_ID, gview.root);
@@ -581,7 +747,41 @@ window.__wmoRelease = () => { window.__wmoHold = null; loop.paused = false; };
 const wardenMotion = new WardenMotion({ fx, mistPreset: MIST.VIOLET, reducedMotion, colliders: { terrainY: (z) => colliders.terrainY(z) } });
 systems.set('fx', fx);
 const cam = new CameraDirector();
-cam.init(ctx, { camera, colliders, reducedMotion });
+const TRAILER = recMode && qs.get('trailer') === '1';   // promo footage: closer lens, HUD stripped to numbers + banners
+cam.init(ctx, { camera, colliders, reducedMotion, boomScale: TRAILER ? +(qs.get('boom') || 0.78) : 1, fovScale: TRAILER ? +(qs.get('fovs') || 0.92) : 1,
+  bossBoomScale: TRAILER ? +(qs.get('bboom') || 0.72) : 1, bossLook: TRAILER ? +(qs.get('blook') || 0.22) : 0.35,
+  bossPitchK: TRAILER ? +(qs.get('bpitch') || 0.85) : 1 });
+if (TRAILER) {
+  // profile two-shot: orbit ~60 deg off the hero->boss line, frame between them, lower pivot (the boss reads huge)
+  cam.bossSide = +(qs.get('bside') || 1.0); cam.occRadiusK = +(qs.get('occk') || 1.5);
+  cam.bossBias = +(qs.get('bbias') || 1.05); cam.bossHeight = +(qs.get('bheight') || 1.7);
+  // bossLook is set once here (the cam.init default above is only the non-profile fallback)
+  cam.bossLook = +(qs.get('blook') || 0.45);
+  // ?ad=1 social cut: authored boss shots (phase roar, death) stay tight instead of cutting to a 10 m wide
+  cam.cineDistK = +(qs.get('cinek') || (qs.get('ad') === '1' ? 0.62 : 1));
+  cam.bossPitchBias = +(qs.get('bpb') || 0);
+  // ?cines=intro,death : only these authored shots play (unlisted beats stay on the gameplay two-shot)
+  if (qs.get('cines') !== null) cam.cineMask = qs.get('cines').split(',').reduce((m, n) => { const k = CINE_NAMES.indexOf(n.trim().toUpperCase()); return k > 0 ? m | (1 << k) : m; }, 0);
+}
+// ?finfx=0.4 (trailer): scales the finisher blow's flash, colour kick and spark burst (QA: sparkles washed the frame)
+const TRL_FINFX = TRAILER && qs.get('finfx') ? Math.max(0, +qs.get('finfx')) : 1;
+const TRL_RIMG = +(qs.get('rimg') || 0.55);
+const TRL_HRIM = qs.get('hrim') ? parseInt(qs.get('hrim'), 16) : -1;
+if (TRAILER) fx.auraGain = +(qs.get('aura') || 0.5);   // telegraph rings stay readable but stop reading as debug decals
+// v2.26 trailer: flares, rift cuts and blade ribbons keep their own hue in the hot core (no white strikes);
+// uniform only, same programs. ?hot=1 restores the white core for A/B.
+if (TRAILER) { fx.hotCore = +(qs.get('hot') || 0); if (fx.streakMesh) fx.streakMesh.material.uniforms.uHot.value = fx.hotCore; }
+// v2.27 ad pass: additive cuts and flares stacked past 1.0 per channel and bloomed to near white. ?lcap caps each
+// channel of a flare/cut so the hue survives tonemapping; ?sgain thins spark bursts; ?shead dims spark heads;
+// ?corek sets how far a strike core lifts toward white. Uniform/presentation only, same programs, sim untouched.
+if (TRAILER && qs.get('lcap')) fx.lightCap = +qs.get('lcap');
+if (TRAILER && qs.get('sgain')) fx.sparkGain = Math.min(1, Math.max(0, +qs.get('sgain')));
+if (TRAILER && qs.get('shead')) fx.sparkHead = +qs.get('shead');
+const TRL_COREK = TRAILER && qs.get('corek') ? +qs.get('corek') : 0.35;
+if (TRAILER && qs.get('scap')) fx.shockCap = +qs.get('scap');
+if (TRAILER && qs.get('fscale')) fx.flareGain = Math.min(1, Math.max(0.2, +qs.get('fscale')));
+// ?emb=<n>: trigger-aura ember every n frames (0 = none; QA t8: gold ember squares carpeted the boss-death frames)
+const TRL_EMB = TRAILER && qs.get('emb') !== null ? Math.max(0, Math.round(+qs.get('emb'))) : 6;
 systems.set('camera', cam);
 const camHero = { position: new THREE.Vector3(), yaw: 0 };
 const camTarget = { position: new THREE.Vector3(), airborne: false, isBoss: false, distance: 99 };
@@ -597,10 +797,11 @@ systems.set('touch', touch);
 
 // ------------------------------------------------------------------ simulation
 const sim = new GameSim({ seed, timing, colliders: fordColliders, stage3Colliders: foundryColliders, stage2Colliders: shrineColliders, roadColliders, bus, god: qs.get('god') === '1',
-  startAt: qs.get('start') || 'title', dodgeProfile: QUICKSTEP, stage3: qs.get('stage3') === '1', weapon: +(qs.get('wpn') || 0) });
+  character: CHAR, startAt: qs.get('start') || 'title', dodgeProfile: QUICKSTEP, stage3: qs.get('stage3') === '1', weapon: +(qs.get('wpn') || 0) });
 const arenaFor = () => sim.roadActive ? 'road' : sim.stage3Active ? 'foundry' : sim.stage2Active ? 'shrine' : 'ford';
 setArena(arenaFor());
 const H = sim.hero;
+setHeroWeapon(H.weapon);   // v2.24: Kael starts with the glaive in hand
 const prev = { hx: H.x, hz: H.z, hyaw: H.yaw, bx: 0, by: 0, bz: 0, byaw: 0 };
 const dPrev = []; for (let i = 0; i < MAX_DUELISTS; i++) dPrev.push({ x: 0, z: 0, yaw: 0 });
 let paused = false, pauseFrames = 0;
@@ -654,6 +855,129 @@ function gauntletGuardFx(R) {
 }
 // v2.7 MH-style damage numbers: project the contact point to CSS px (presentation only, deterministic drift)
 const _dproj = new THREE.Vector3(); let dmgSeq = 0;
+// v2.24 trailer spectacle (?rec=1&trailer=1 only, never in play or QA): a blade-glint cut across every contact,
+// a crossed ember cut on big hits, doubled sparks, a hotter flare, a touch more hit-stop, and a faster Trigger gauge
+// so the Ember Trigger and Ember Rift fire several times per capture. Reads _p/_n as set by onHeroHit.
+// Cuts are tinted by the weapon in hand (each blade has a signature colour on screen) and their angle cycles so
+// consecutive hits never look identical. No extra flare: QA showed the starburst covering the contact point.
+let trlCut = 0;
+// QA t7: Kael's pale periwinkle read as blue-white once bloomed; a deeper electric blue-violet keeps its hue
+const TRL_EDGE = { kael: +('0x' + (qs.get('kcol') || '5a5cff')), vesper: 0xff5a1a };
+function trailerEdge() {
+  if (H.weapon === 5 || CHAR === 'kael') return TRL_EDGE.kael;
+  if (H.weapon >= 1) return (BLADE_LOOK[H.weapon] || BLADE_LOOK[1]).inlay;
+  return CHAR === 'vesper' ? TRL_EDGE.vesper : 0xff3a1a;
+}
+const trlTip = { prev: new THREE.Vector3(), cur: new THREE.Vector3(), f: -9, live: 0 };
+const _ts0 = new THREE.Vector3(), _ts1 = new THREE.Vector3();
+// screen angle of the blade tip's last motion (falls back to a cycled angle when the tip history is stale)
+function trailerSwingAngle() {
+  if (trlTip.live >= 1 && sim.frame - trlTip.f <= 2) {
+    _ts0.copy(trlTip.prev).project(camera); _ts1.copy(trlTip.cur).project(camera);
+    const dx = (_ts1.x - _ts0.x) * camera.aspect, dy = _ts1.y - _ts0.y;
+    if (dx * dx + dy * dy > 1e-6) return Math.atan2(dy, dx);
+  }
+  return ((trlCut * 1.37) % 1.6) - 0.45;
+}
+// v2.26 trailer: no white anywhere in a strike. The hot core is the edge colour lifted 35% toward white (keeps its
+// hue), so every cut reads as coloured light; the screen pulse on contact is the same hue.
+const _tcA = new THREE.Color(), _tcB = new THREE.Color();
+function trailerCore(hex, k = TRL_COREK) { return _tcA.setHex(hex).lerp(_tcB.setRGB(1, 1, 1), k).getHex(); }
+function trailerHitFx(heavy, ch, great, dealt) {
+  const big = heavy || great || ch > 0.5, edge = trailerEdge(), core = trailerCore(edge);
+  const rot = trailerSwingAngle(); trlCut++;
+  // one cut along the swing direction: a lifted-hue core over the weapon-coloured edge, offset 2 frames so it reads
+  // as the blade passing through; big hits add a wide second arc and an upward shard burst. No crosses (reticles).
+  // QA t7: full-length cuts crossed the hero's body from the over-shoulder lens; ~0.7x keeps them on the target
+  fx.riftSlash(_p, big ? 3.1 + 1.3 * ch : 1.9, rot, core, 0, big ? 0.26 : 0.16);
+  fx.riftSlash(_p, big ? 3.9 + 1.4 * ch : 2.3, rot + 0.04, edge, 0.033, big ? 0.36 : 0.22);
+  if (big) { fx.riftSlash(_p, 5.2 + 1.8 * ch, rot - 0.1, edge, 0.05, 0.42); _n.set(0, 1, 0); fx.burstSparks(_p, _n, 1.3); fx.flare(_p, 1.2 + 0.6 * ch, edge); }
+  if (!reducedMotion) { post.kick(big ? 0.2 + 0.1 * ch : 0.08, edge); if (big) loop.dilate(0.12, 5 + (ch > 0.5 ? 2 : 0)); }
+  H.addGauge(dealt * 0.8);
+}
+// v2.26 trailer hero aura: a low coloured haze curling off the feet plus tinted afterimages while the hero moves or
+// swings (the colour of the blade in hand). Bright tint at low alpha so it glows instead of reading as muddy smoke.
+const _auraC = new THREE.Color();
+const _scrV = new THREE.Vector3();
+function _scrX(x, y, z) { _scrV.set(x, y, z).project(camera); return Math.min(1, Math.max(0, _scrV.x * 0.5 + 0.5)); }
+let trlTint = -1; const _sparkTint = [1, 1, 1];
+function trailerAura(gy) {
+  if (presentDtNow <= 0 || reducedMotion) return;
+  const edge = trailerEdge(), on = H.triggerF > 0, f = sim.frame;
+  _auraC.setHex(edge);
+  if (edge !== trlTint) {   // sparks + full-screen flash follow the blade colour (QA: white starbursts read as generic)
+    trlTint = edge; _sparkTint[0] = _auraC.r; _sparkTint[1] = _auraC.g; _sparkTint[2] = _auraC.b; fx.sparkTint = _sparkTint;
+    hud.setFlashColor('#' + _auraC.clone().lerp(_tcB.setRGB(1, 1, 1), 0.25).getHexString());
+  }
+  // QA t6: the foot haze piled into a cloud that hid the hero. Sparser, lower, and always on the far side of the
+  // hero from the camera so it backlights the silhouette instead of covering it.
+  if ((f % (on ? 7 : 11)) === 0) {
+    camera.getWorldDirection(_dir);
+    const a = (f * 0.61) % (Math.PI * 2), r = 0.3, bx = _dir.x * 0.7, bz = _dir.z * 0.7;
+    fx.mistRGBA(H.x + bx + Math.cos(a) * r, gy + 0.15, H.z + bz + Math.sin(a) * r, 0.28, _auraC.r, _auraC.g, _auraC.b, on ? 0.2 : 0.12, on ? 2 : 1, on ? 1.3 : 0.8);
+  }
+  const moving = H.speed > 2.2 || H.state === HERO_STATE.ACTION || H.state === HERO_STATE.DODGE || H.state === HERO_STATE.RIFT;
+  if (moving && (f % 4) === 0) fx.afterimage(HERO_ID, edge, on ? 0.45 : 0.3);
+  if (on && TRL_EMB > 0 && (f % TRL_EMB) === 0) { _a.set(H.x, gy + 1.0, H.z); fx._ember(H.x + Math.sin(f) * 0.4, gy + 0.4, H.z + Math.cos(f) * 0.4, 0, 2.2, 0); }
+}
+// v2.26 trailer boss spectacle: every verb gets a colour-coded read on startup and a big contact beat on its active
+// frame (red = unblockable, blue = air, amber = normal), charge and swoop leave afterimage trails, the roar blasts a
+// ring. Presentation only, keyed on (actionId, frame) so each beat fires exactly once.
+const ART_COL = [0xffa040, 0xff3a1a, 0x4aa8ff];
+const trlBoss = { act: -1, mask: 0, roar: 0 };
+const _bh = new THREE.Vector3(), _bt = new THREE.Vector3();
+function trailerBossFx(B) {
+  if (presentDtNow <= 0) return;
+  const gy = colliders.terrainY(B.z);
+  const roaring = B.state === BRAIN_STATE.ROAR || (B.verb === BossVerb.W_ROAR && B.state === BRAIN_STATE.ACTION);
+  if (roaring && B.f >= 18 && !trlBoss.roar) {
+    trlBoss.roar = 1; HEAD.getWorldPosition(_bh);
+    fx.shockwave(B.x, gy + 0.2, B.z, 10, 0xff3a1a, 1.4, 0.9); fx.shockwave(B.x, gy + 0.25, B.z, 6, 0xffa040, 1.1, 0.6);
+    fx.flare(_bh, 2.4, 0xff4a2a); fx.mistRGBA(B.x, gy + 0.4, B.z, 2.5, 0.9, 0.35, 0.15, 0.3, 14, 1.2);
+    if (!reducedMotion) { post.kick(0.3, 0xff3a1a); cam.impact('slam'); }
+  } else if (!roaring) trlBoss.roar = 0;
+  const d = B.def;
+  if (!d || (B.state !== BRAIN_STATE.ACTION && B.state !== BRAIN_STATE.PREROLL)) return;
+  if (B.actionId !== trlBoss.act) { trlBoss.act = B.actionId; trlBoss.mask = 0; }
+  const col = ART_COL[d.art] || ART_COL[0], fxX = B.forwardX(), fxZ = B.forwardZ(), v = B.verb;
+  HEAD.getWorldPosition(_bh);
+  // startup read: a flare at the jaw in the attack's colour (red/blue verbs also flash a ground ring)
+  if (!(trlBoss.mask & 1)) {
+    trlBoss.mask |= 1; fx.flare(_bh, d.art === 0 ? 0.9 : 1.6, col);
+    if (d.art) fx.shockwave(B.x, gy + 0.2, B.z, 3.2, col, 0.8, 0.5);
+  }
+  const act = B.state === BRAIN_STATE.ACTION;
+  // trails during travel verbs
+  if (act && (v === BossVerb.W_CHARGE || v === BossVerb.W_SWOOP) && (B.f % 3) === 0) {
+    fx.afterimage(BOSS_ID, col, 0.55);
+    if (!B.airborne) fx.mistRGBA(B.x - fxX * 1.5, gy + 0.3, B.z - fxZ * 1.5, 0.9, 0.55, 0.42, 0.34, 0.32, 3, 0.7);
+  }
+  if (act && B.f >= d.active[0] && !(trlBoss.mask & 2)) {
+    trlBoss.mask |= 2;
+    const tail = v === BossVerb.W_TAIL_L || v === BossVerb.W_TAIL_R;
+    if (tail) {
+      const s = d.side || 1; _bt.set(B.x - fxX * 2.2 - fxZ * s * 2.0, gy + 1.0, B.z - fxZ * 2.2 + fxX * s * 2.0);
+      fx.riftSlash(_bt, 8.5, s * 0.12, col, 0, 0.45); fx.riftSlash(_bt, 6.0, s * 0.12 + 0.05, trailerCore(col), 0.03, 0.32);
+      fx.shockwave(B.x, gy + 0.2, B.z, 6.0, col, 1.2, 0.6);
+      if (!reducedMotion) { cam.impact('slam'); post.kick(0.2, col); }
+    } else if (v === BossVerb.W_SWOOP || v === BossVerb.W_LAND) {
+      fx.shockwave(B.x, gy + 0.2, B.z, v === BossVerb.W_LAND ? 7.5 : 6.5, col, 1.4, 0.7);
+      _bt.set(B.x, gy + 1.2, B.z); fx.riftSlash(_bt, 7.5, -0.5, col, 0, 0.4); fx.flare(_bt, 2.0, col);
+      fx.mistRGBA(B.x, gy + 0.3, B.z, 2.4, 0.6, 0.55, 0.5, 0.3, 12, 0.9);
+      if (!reducedMotion) { cam.impact('slam'); post.kick(0.22, col); loop.dilate(0.25, 4); }
+    } else if (v === BossVerb.W_HAZE || v === BossVerb.W_SKY_HAZE) {
+      const ah = d.pool ? d.pool.ahead : 3; fx.shockwave(B.x + fxX * ah, colliders.terrainY(B.z + fxZ * ah) + 0.2, B.z + fxZ * ah, 4.5, col, 1.2, 0.7);
+      if (!reducedMotion) { post.kick(0.18, 0xff5a20); cam.impact('heavy'); }
+    } else if (v === BossVerb.W_SPIT) {
+      fx.flare(_bh, 1.8, 0xffa040); fx.burstSparks(_bh, _n.set(fxX, 0.3, fxZ), 1.0);
+    } else {   // bite / lunge / charge: a jaw-snap arc in the attack colour + ground ring
+      _bt.set(_bh.x + fxX * 1.2, Math.max(_bh.y - 0.4, gy + 0.8), _bh.z + fxZ * 1.2);
+      fx.riftSlash(_bt, v === BossVerb.W_CHARGE ? 7.0 : 5.0, 0.35, col, 0, 0.36); fx.riftSlash(_bt, v === BossVerb.W_CHARGE ? 5.0 : 3.6, -0.25, trailerCore(col), 0.04, 0.28);
+      fx.shockwave(_bt.x, colliders.terrainY(_bt.z) + 0.2, _bt.z, v === BossVerb.W_CHARGE ? 5.0 : 3.2, col, 1.0, 0.5);
+      if (!reducedMotion) { cam.impact(v === BossVerb.W_CHARGE ? 'slam' : 'heavy'); post.kick(v === BossVerb.W_CHARGE ? 0.2 : 0.1, col); }
+    }
+  }
+}
 function popDamageAt(p, amount, kind) {
   _dproj.copy(p).project(camera); if (_dproj.z > 1) return;
   const dx = ((dmgSeq++ * 37) % 7 - 3) * 9;
@@ -662,14 +986,14 @@ function popDamageAt(p, amount, kind) {
 sim.onHeroHit = (t, dealt, v) => {
   if (dealt <= 0) return;
   const gH = t.id === GAUNTLET_ID, bHead = gH ? gview.HEAD : HEAD, bRoot = gH ? gview.root : boss.root;
-  { const hv = v.name === 'HEAVY', c = v.charge || 0; _a.set(t.x, 1.6, t.z); if (t.isBoss) { bHead.getWorldPosition(_a); _a.lerp(bRoot.position, 0.4); _a.y = Math.max(_a.y, 1.8); }
+  { const hv = v.name === 'HEAVY' || !!v.heavy, c = v.charge || 0; _a.set(t.x, 1.6, t.z); if (t.isBoss) { bHead.getWorldPosition(_a); _a.lerp(bRoot.position, 0.4); _a.y = Math.max(_a.y, 1.8); }
     popDamageAt(_a, dealt, c > 0.5 || dealt >= 40 ? 'big' : hv ? '' : dealt < 12 ? 'weak' : '');
     if (hv && c > 0.5) hud.flash(reducedMotion ? 0.1 : 0.16); }   // v2.17c: 0.35 -> 0.16, stacked with the grade lift it washed the frame
   _n.set(H.facingX(), 0.2, H.facingZ());
   if (t.isBoss) { bHead.getWorldPosition(_p); _p.lerp(bRoot.position, 0.5); _p.y = Math.max(_p.y, 1.2); }
   else _p.set(t.x, 1.2, t.z);
   if (v.rift) { riftHitFx(t, v); return; }
-  const heavy = v.name === 'HEAVY', ch = v.charge || 0, great = !!v.great;
+  const heavy = v.name === 'HEAVY' || !!v.heavy, ch = v.charge || 0, great = !!v.great;
   fx.burstSparks(_p, _n, (heavy ? 1.0 + 0.9 * ch : 0.6) * (great ? 1.4 : 1));
   if (heavy && !t.isBoss) fx.burstBlood(_p, _n, 0.8 + 0.6 * ch);
   if (ch > 0.5) fx.burstSparks(_p, _n, 0.8);
@@ -689,7 +1013,8 @@ sim.onHeroHit = (t, dealt, v) => {
   if (!reducedMotion) post.kick(heavy ? 0.14 + 0.14 * ch : great ? 0.11 : 0.08, ch > 0.5 ? 0xffe0a0 : 0xffb070);
   // v2.17 impact blur: only heavies and great-sword hits smear the frame (lights stay crisp so combos read)
   if (!reducedMotion && (heavy || great)) post.impactBlur(_p, heavy ? 0.55 + 0.45 * ch : 0.35);
-  fx.flare(_p, heavy ? 1.3 + 0.8 * ch : great ? 1.0 : 0.7, ch > 0.5 ? 0xffe0a0 : 0xff9040);
+  if (!TRAILER) fx.flare(_p, heavy ? 1.3 + 0.8 * ch : great ? 1.0 : 0.7, ch > 0.5 ? 0xffe0a0 : 0xff9040);
+  if (TRAILER) trailerHitFx(heavy, ch, great, dealt);
   if (t.isBoss && t.id === GAUNTLET_ID) gview.hit(H.facingX(), H.facingZ(), (heavy ? 1 : 0.5) * (1 + ch));
   else if (t.isBoss) { bossReact.amp = Math.min(1.6, bossReact.amp * 0.4 + (heavy ? 1 : 0.5) * (1 + ch)); bossReact.t = 0; bossReact.dx = H.facingX(); bossReact.dz = H.facingZ(); bossReact.flash = Math.min(1, 0.5 + 0.5 * ch + (heavy ? 0.3 : 0)); }
 };
@@ -744,13 +1069,15 @@ function dropLayer(dt) {
 }
 sim.onTelegraph = (v, art, lead) => {
   fx.telegraph(BOSS_ID, art === ART.RED ? TELEGRAPH.RED : art === ART.BLUE ? TELEGRAPH.BLUE : TELEGRAPH.NORMAL, lead, boss.root, 2.6);
-  if (art === ART.RED) hud.cue('RED - DODGE ASIDE', 'hit'); else if (art === ART.BLUE) hud.cue('BLUE - DODGE IN', 'phantom');
+  // v2.23: with a two-hander there is no roll - the cue tells the player to step out / guard instead
+  const heavy = H.wp && GREAT_NO_EVADE;
+  if (art === ART.RED) hud.cue(heavy ? 'RED - STEP ASIDE' : 'RED - DODGE ASIDE', 'hit'); else if (art === ART.BLUE) hud.cue(heavy ? 'BLUE - GUARD' : 'BLUE - DODGE IN', 'phantom');
 };
 sim.onDuelistTelegraph = (d) => {
   const s = slotFor(d); if (!s) return;
   const v = d.verbs[d.verb], red = v.art === ART.RED;
   fx.telegraph(s.actorId, red ? TELEGRAPH.RED : TELEGRAPH.NORMAL, v.startup, s.root, d.elite ? 1.4 : 1.1);
-  if (d.elite && red) hud.banner('', 'CHARGE - DODGE', 0.9);
+  if (d.elite && red) hud.banner('', H.wp && GREAT_NO_EVADE ? 'CHARGE - STEP ASIDE' : 'CHARGE - DODGE', 0.9);
   else if (d.elite && d.verb === 'C_SLAM') hud.banner('', 'SLAM - DEFLECT OR STEP OUT', 0.9);
 };
 // Gauntlet: lightning is unguardable (red ring + cue); the dome breaks a held block (blue ring + cue)
@@ -818,27 +1145,28 @@ function statsView() {
 const _move = new THREE.Vector3(), _look = { x: 0, y: 0 };
 let camYaw = 0, wasBlockHeld = false;
 const botRng = new Rng(seed ^ 0x5151).stream('qa-bot');
-const bot = { at: -1, kind: 0, hold: 0, swings: 0, sweepN: 0 };
+const bot = { at: -1, kind: 0, hold: 0, swings: 0, sweepN: 0, trigN: 0, trigAt: -1e9, pat: 0, cur: '' };
 // DMC verbs for the bot: on in ?rec=1 (showcase) or ?dmc=1 (QA); off otherwise so the legacy bot runs stay byte-identical
 const botDmc = recMode || qs.get('dmc') === '1';
 const botSweep = qs.get('sweep') === '1';   // v2.22 QA: the bot opens every third swing with a sweep (great sword only)
 if (useBot) {
   const prevT = sim.onTelegraph, prevD = sim.onDuelistTelegraph;
-  sim.onTelegraph = (v, art, lead) => { prevT(v, art, lead); const ok = botRng.float() < 0.85;
+  sim.onTelegraph = (v, art, lead) => { prevT(v, art, lead); const ok = botRng.float() < 0.85 || DANCE;   // dance takes: every parry lands
     if (art === ART.NORMAL) { bot.at = sim.frame + lead - (ok ? 3 : 7); bot.kind = 1; } else { bot.at = sim.frame + lead - (ok ? 5 : 11); bot.kind = art === ART.BLUE ? 3 : 2; } };
   // red warden charge: the bot dodges it (kind 2 = sidestep), everything else it deflects
-  sim.onDuelistTelegraph = (d, v) => { prevD(d, v); const ok = botRng.float() < 0.85;
+  sim.onDuelistTelegraph = (d, v) => { prevD(d, v); const ok = botRng.float() < 0.85 || DANCE;   // dance takes: every parry lands
     if (v.art === ART.RED) { bot.at = sim.frame + v.startup - (ok ? 5 : 11); bot.kind = 2; }
     else if (ok) { bot.at = sim.frame + v.startup - 3; bot.kind = 1; } };
   // gauntlet: just-guard (block press) the guardable verbs; dodge the lightning (sideways) and the dome (away).
   // Lightning columns land 'lead' frames after each placement, the bot sidesteps the last one.
   const prevG = sim.onGauntletTelegraph;
-  sim.onGauntletTelegraph = (v, ung, lead) => { prevG(v, ung, lead); const ok = botRng.float() < 0.85;
+  sim.onGauntletTelegraph = (v, ung, lead) => { prevG(v, ung, lead); const ok = botRng.float() < 0.85 || DANCE;   // dance takes: every parry lands
     if (v === 4) { bot.at = -1; bot.kind = 0; }        // columns are walked out of (botCommand), not timed
     else if (v === 5) { bot.at = sim.frame + lead - (ok ? 4 : 10); bot.kind = 4; }
     else { bot.at = sim.frame + lead - (ok ? 3 : 7); bot.kind = 1; } };
 }
 function botCommand(c) {
+  if (H.triggers !== bot.trigN) { bot.trigN = H.triggers; bot.trigAt = sim.frame; }
   let tx = 0, tz = 0, has = false, td = 1e9, reach = 1.6;
   for (const d of sim.duelists) if (d.alive) { const dd = Math.hypot(d.x - H.x, d.z - H.z); if (dd < td) { td = dd; tx = d.x; tz = d.z; has = true; } }
   if (sim.bossActive && sim.brain.state !== BRAIN_STATE.DEAD) { tx = sim.brain.x; tz = sim.brain.z; td = Math.hypot(tx - H.x, tz - H.z); has = true; reach = 3.2; }
@@ -878,24 +1206,90 @@ function botCommand(c) {
   }
   // rec showcase: hold a charged heavy through its wind-up (released by the dodge/block reflex or at full charge)
   if (recMode && bot.hold > 0 && sim.frame + 1 !== bot.at) { bot.hold--; c.heavyHeld = true; return; }
+  // v2.23: a two-hander cannot roll, so the bot answers every telegraph it would have dodged by walking out of the
+  // contact line for a short window (sidestep 2/3 = perpendicular, dome 4 = away). Guardable hits stay just-guards.
+  if (H.wp && GREAT_NO_EVADE && bot.kind >= 2 && sim.frame + 1 >= bot.at - 14 && sim.frame + 1 <= bot.at + 8) {
+    const s = bot.kind === 4 ? 0 : 1;
+    c.mx = s ? -dz / l : -dx / l; c.mz = s ? dx / l : -dz / l; c.speed = SIM.RUN_SPEED;
+    if (sim.frame + 1 === bot.at && bot.kind === 3) c.blockPress = true;   // blue: guard on contact as well
+    return;
+  }
   if (sim.frame + 1 === bot.at) {
     bot.hold = 0;
     if (bot.kind === 1) c.blockPress = true;
     else if (bot.kind === 4) { c.dodge = true; c.mx = -dx / l; c.mz = -dz / l; }
     else { c.dodge = true; if (bot.kind === 3) { c.mx = dx / l; c.mz = dz / l; } else { c.mx = -dz / l; c.mz = dx / l; } }
-  } else if (botDmc && H.gauge >= 50 && !H.triggered && H.state === HERO_STATE.LOCO && td < reach + 2) { c.trigger = true; }
+  } else if (DANCE && danceStep(c, dx / l, dz / l, td, reach)) { /* footwork beat between strings */ }
+  else if (botDmc && H.gauge >= 50 && !H.triggered && H.state === HERO_STATE.LOCO && td < reach + 2) { c.trigger = true; }
+  // trailer showcase: cash the trigger into an Ember Rift ~1.3 s after it lights (the QA bot waits for the tail end)
+  else if (TRAILER && H.triggerF >= HERO_RIFT.MIN_LEFT && sim.frame - bot.trigAt > 80 && H.state === HERO_STATE.LOCO && td < HERO_RIFT.RANGE - 1) { c.trigger = true; }
   else if (botDmc && H.triggerF >= HERO_RIFT.MIN_LEFT && H.triggerF < HERO_RIFT.MIN_LEFT + 120 && H.state === HERO_STATE.LOCO && td < HERO_RIFT.RANGE - 1) { c.trigger = true; }
   else if (botDmc && td > reach + 2.2 && td < 10.5 && H.snatchCd === 0 && H.state === HERO_STATE.LOCO && H.stamina >= 40 && (bot.at < sim.frame || bot.at - sim.frame > 40)) { c.snatch = true; }
   else if (botDmc && H.state === HERO_STATE.SNATCH) { c.attack = true; }
+  else if (botCombo && qs.get('combo') === '3' && H.state === HERO_STATE.ACTION && bot.seq) combo10Press(c);   // keep a 10-move string fed every frame
   else if (td > reach + 0.6) { c.mx = dx / l; c.mz = dz / l; c.speed = SIM.RUN_SPEED; }
   else if ((sim.frame + 1) % 9 === 0) {
     if (sim.finisherReady()) c.heavy = true;
+    else if (botCombo) comboPress(c);
     else if (recMode && H.state === HERO_STATE.LOCO && H.stamina >= 60 && ++bot.swings % 5 === 0 && (bot.at < sim.frame || bot.at - sim.frame > 70)) { c.heavy = true; c.heavyHeld = true; bot.hold = 62; }
     else if (botSweep && H.wp && H.stamina >= 40 && ++bot.sweepN % 3 === 0) c.sweep = true;
     else c.attack = true;
   }
   else if (td < reach - 0.6) { c.mx = -dx / l; c.mz = -dz / l; c.speed = SIM.WALK_SPEED; }
 }
+// ?rec=1&combo=1 promo showcase: the bot plays whole strings instead of single swings - 3-hit light chain, sweep ->
+// reverse sweep (two-handers), light chain again, charged heavy - and waits for stamina so every string lands in full.
+const botCombo = recMode && ['1', '2', '3'].includes(qs.get('combo'));
+// combo=2 (v2.26 promo): mixed strings so a two-hander never repeats one chop - 'M' = overhead LIGHT_1 -> horizontal
+// SWEEP -> reverse SWEEP_REV (three different cut planes in one string), then a charged heavy. combo=1 keeps v2.25.
+const COMBO_PAT = qs.get('combo') === '2' ? ['M', 'H', 'M', 'L', 'H'] : ['L', 'S', 'L', 'H'];
+// combo=3 (v2.23): 10-move strings from the COMBO_ROUTE tree. Each letter is one button press, sent once per verb as
+// soon as it starts (A light, B heavy, S sweep); the sim plays the routed verb when the chain window opens.
+const COMBO10 = qs.get('combo') === '3';
+const COMBO10_PAT = [['A', 'A', 'A', 'A', 'B', 'A', 'A', 'A', 'S', 'B'], ['A', 'B', 'S', 'S', 'A', 'A', 'B', 'A', 'A', 'B'],
+  ['A', 'A', 'A', 'A', 'A', 'B', 'A', 'B', 'A', 'A'], ['A', 'A', 'B', 'A', 'A', 'B', 'A', 'A', 'B', 'A']];
+function combo10Press(c) {
+  if (H.state === HERO_STATE.LOCO) {
+    if (H.stamina < 90) return;
+    bot.seq = COMBO10_PAT[(bot.pat++) % COMBO10_PAT.length]; bot.lastAid = -1; bot.danceLeft = 2;
+    c.attack = true; return;
+  }
+  if (H.state !== HERO_STATE.ACTION || !bot.seq || H.actionId === bot.lastAid || H.comboN >= bot.seq.length) return;
+  bot.lastAid = H.actionId;
+  const k = bot.seq[H.comboN];
+  if (k === 'A') c.attack = true; else if (k === 'B') c.heavy = true; else if (H.wp) c.sweep = true; else c.attack = true;
+}
+// ?rec=1&dance=1 (film k16, one-hand hero only): after every string the bot dances two footwork beats before the next
+// one - guarded quickstep left / right / in / out around the foe, or an evasive roll through the flank - so the clip
+// shows travel and spacing instead of a planted swing loop. Never fires near a telegraph (the parry reflex owns that).
+const DANCE = recMode && qs.get('dance') === '1';
+const DANCE_PAT = ['R', 'L', 'ROLL_R', 'F', 'L', 'B', 'ROLL_L', 'R'];
+function danceStep(c, ux, uz, td, reach) {
+  if (H.wp || H.state !== HERO_STATE.LOCO || !(bot.danceLeft > 0) || sim.frame < (bot.danceAt || 0)) return false;
+  if (td > reach + 2.5 || H.stamina < 30 || (bot.at >= sim.frame && bot.at - sim.frame < 30)) return false;
+  const k = DANCE_PAT[(bot.danceI = (bot.danceI || 0) + 1) % DANCE_PAT.length];
+  const px = -uz, pz = ux;                       // perpendicular to the foe line
+  if (k === 'R') { c.mx = px; c.mz = pz; c.dodge = true; }
+  else if (k === 'L') { c.mx = -px; c.mz = -pz; c.dodge = true; }
+  else if (k === 'F') { c.mx = ux; c.mz = uz; c.dodge = true; }
+  else if (k === 'B') { c.mx = -ux; c.mz = -uz; c.dodge = true; }
+  else { const s = k === 'ROLL_R' ? 1 : -1, rx = px * s + ux * 0.35, rz = pz * s + uz * 0.35, rl = Math.hypot(rx, rz) || 1;
+    c.mx = rx / rl; c.mz = rz / rl; c.roll = true; }
+  c.speed = SIM.RUN_SPEED; bot.danceLeft--; bot.danceAt = sim.frame + 34;
+  return true;
+}
+function comboPress(c) {
+  if (COMBO10) { combo10Press(c); return; }
+  if (H.state === HERO_STATE.LOCO) {
+    if (H.stamina < 58) return;
+    let k = COMBO_PAT[bot.pat++ % COMBO_PAT.length]; if ((k === 'S' || k === 'M') && !H.wp) k = 'L';
+    bot.cur = k;
+    if (k === 'L' || k === 'M') c.attack = true; else if (k === 'S') c.sweep = true; else { c.heavy = true; c.heavyHeld = true; bot.hold = 62; }
+  } else if (H.state === HERO_STATE.ACTION) {
+    if (bot.cur === 'L') c.attack = true; else if (bot.cur === 'S' || bot.cur === 'M') c.sweep = true;
+  }
+}
+const VERB_IDX = { LIGHT_1: 1, LIGHT_2: 2, LIGHT_3: 3, HEAVY: 4, SWEEP: 5, SWEEP_REV: 6, D_L1: 7, D_L2: 8, D_L3: 9, D_L4: 10, D_L5: 11, D_H1: 12, D_H2: 13 };
 let qaPress = null;
 function fillCommand() {
   const c = sim.cmd;
@@ -947,7 +1341,8 @@ function inkLayer(attacking, dt) {
   if (dt <= 0) return;
   if (H.state === HERO_STATE.DODGE) {
     // vanish puff at the start of the step, then a jade ghost every 4 f through the travel window (once per sim frame)
-    if (H.actF === 2 && ink.puffF !== sim.frame) { ink.puffF = sim.frame; fx.mist(H.x, colliders.terrainY(H.z) + 0.9, H.z, 0.5, MIST.WHITE, 9, 0.4); }
+    // trailer: no vanish puff (QA t6: dodge puffs stacked into a cloud that hid the hero); the ghosts carry the read
+    if (!TRAILER && H.actF === 2 && ink.puffF !== sim.frame) { ink.puffF = sim.frame; fx.mist(H.x, colliders.terrainY(H.z) + 0.9, H.z, 0.5, MIST.WHITE, 9, 0.4); }
     if (!reducedMotion && H.actF >= 3 && H.actF <= 20 && (H.actF % 4) === 3 && ink.ghostF !== sim.frame) { ink.ghostF = sim.frame; fx.afterimage(HERO_ID, INK.GHOST, 0.55); }
   }
 }
@@ -965,7 +1360,8 @@ const _dp = new THREE.Vector3();
 // v2.21 Ember Rift presentation (Jessica13007 reference: Judgment-Cut-End). Space-cuts open as hairline blades on
 // the target, crossed at deterministic angles (golden-angle walk on the cut index, no RNG); the finale is a
 // sheathe click: everything still in range splits at once. Visuals only follow resolved hits (hitSink).
-const RIFT_COL = Object.freeze({ CUT: 0x9fe8ff, EDGE: 0xff4a2a, END: 0xffffff });
+// trailer: the pale-cyan cut bloomed to near white in the ad review; a saturated cyan keeps the warm/cool split
+const RIFT_COL = Object.freeze({ CUT: TRAILER ? 0x22b8ff : 0x9fe8ff, EDGE: 0xff4a2a, END: 0xffffff });
 const _rv = new THREE.Vector3();
 function riftHitFx(t, v) {
   const fin = v.name === 'RIFT_END', k = H.riftCuts;
@@ -978,7 +1374,7 @@ function riftHitFx(t, v) {
   _n.set(0, 1, 0);
   fx.burstSparks(_p, _n, fin ? 1.4 : 0.5);
   if (!t.isBoss) fx.burstBlood(_p, _n, fin ? 1.3 : 0.6);
-  fx.flare(_p, fin ? 1.8 : 0.8, fin ? RIFT_COL.END : RIFT_COL.CUT);
+  fx.flare(_p, fin ? 1.8 : 0.8, fin ? (TRAILER ? trailerEdge() : RIFT_COL.END) : RIFT_COL.CUT);
   if (fin) {
     fx.shockwave(t.x, colliders.terrainY(t.z) + 0.24, t.z, t.isBoss ? 4.5 : 2.6, RIFT_COL.CUT, 1.0, 0.5);
     if (!reducedMotion) post.impactBlur(_p, 0.7);
@@ -1007,9 +1403,15 @@ function riftLayer(dt) {
       _rv.set(H.x + Math.cos(a) * rr, gy + 1.0 + (i % 2) * 0.6, H.z + Math.sin(a) * rr);
       fx.riftSlash(_rv, 5.5, a * 1.7, i % 2 ? RIFT_COL.EDGE : RIFT_COL.CUT, 0.03 + i * 0.015, 0.45);
     }
-    fx.shockwave(H.x, gy + 0.08, H.z, R.RANGE + 1, RIFT_COL.END, 1.2, 0.55);
+    fx.shockwave(H.x, gy + 0.08, H.z, R.RANGE + 1, TRAILER ? RIFT_COL.CUT : RIFT_COL.END, 1.2, 0.55);
+    if (TRAILER) {   // v2.26 trailer: the sheathe pulse is the blade's colour, plus a second ring and a slower freeze
+      const ec = trailerEdge(); fx.shockwave(H.x, gy + 0.1, H.z, R.RANGE * 0.6, ec, 1.4, 0.7);
+      for (let i = 0; i < 3; i++) { _rv.set(H.x, gy + 1.1 + i * 0.35, H.z); fx.riftSlash(_rv, 11 + i * 2, -0.35 + i * 0.4, i === 1 ? RIFT_COL.CUT : ec, 0.06 + i * 0.03, 0.55); }
+      if (!reducedMotion) { post.kick(0.4, ec); post.impactBlur(_rv, 0.8); loop.dilate(0.05, 14, true); cam.impact('slam'); }
+    } else {
     hud.flash(reducedMotion ? 0.1 : 0.3);
     if (!reducedMotion) { post.kick(0.36, 0xdff4ff); loop.dilate(0.05, 10, true); cam.impact('slam'); }
+    }
   }
   // letterbox weight eases in over the startup and out after the finale (read by the per-frame letterbox call)
   const want = on && H.riftF < R.FINALE + 10 ? 1 : 0;
@@ -1051,15 +1453,25 @@ function dmcLayer(dt) {
   // aura while active: sparse low-alpha crimson puffs at the hip line (cap ~1.3x hero height), so the
   // silhouette and stance stay readable; the rim (below) carries the "powered up" read on the body itself
   if (H.triggerF > 0) {
-    if ((sim.frame % 8) === 0 && dmc.ghostF !== sim.frame) { dmc.ghostF = sim.frame; fx.mist(H.x, gy + 1.0, H.z, 0.32, MIST.CRIMSON, 2, 0.8); }
+    // trailer: no hip puffs (they read as muddy smoke at the promo lens); the rim + afterimages carry the read
+    if (!TRAILER && (sim.frame % 8) === 0 && dmc.ghostF !== sim.frame) { dmc.ghostF = sim.frame; fx.mist(H.x, gy + 1.0, H.z, 0.32, MIST.CRIMSON, 2, 0.8); }
     if (!reducedMotion && H.speed > 2.5 && (sim.frame % 6) === 1) fx.afterimage(HERO_ID, 0xc8202e, 0.3);
   }
   // crimson rim on the hero while the trigger runs (uniform only - same program, no recompile)
-  const rk = H.triggerF > 0 ? 1 : 0;
+  // ?trim=0 (trailer only, visual): keep the standing rim during the trigger - in vertical ad crops the crimson
+  // rim read as a second, red hero cutting in (review 11-07); the trigger sim itself is unchanged
+  const rk = H.triggerF > 0 && !(TRAILER && qs.get('trim') === '0') ? 1 : 0;
   if (RIM_ON && rk !== dmc.rimK) {
     dmc.rimK = rk;
     if (rk) heroRim.value.setRGB(1.1, 0.10, 0.05);
     else { const R = (STAGE_RIM[arena] || STAGE_RIM.ford).hero; heroRim.value.setRGB(R[0], R[1], R[2]); }
+  }
+  // v2.26 trailer: a standing rim + foot haze in the blade's colour so the hero always reads as powered and lit
+  if (TRAILER) {
+    // QA ad takes: the dark-cloaked hero sank into the brown wyvern at 0.55; ?rimg= sets the standing rim gain
+    // ?hrim=<hex> gives the standing rim its own colour (the slash hue stays on trailerEdge)
+  if (RIM_ON && !rk) { _auraC.setHex(TRL_HRIM >= 0 ? TRL_HRIM : trailerEdge()); heroRim.value.setRGB(_auraC.r * TRL_RIMG, _auraC.g * TRL_RIMG, _auraC.b * TRL_RIMG); dmc.rimK = -1; }
+    trailerAura(gy);
   }
   // rank up: small warm flare over the hero's shoulder
   if (Sm.flashF !== dmc.flash) { dmc.flash = Sm.flashF; if (Sm.rank >= 3) { _dp.set(H.x, gy + 2.0, H.z); fx.flare(_dp, 0.5 + Sm.rank * 0.1, DMC.EMBER); } }
@@ -1249,6 +1661,7 @@ function heroLayer(dt) {
   // blade heat: emissive only (no program change); full charge flashes once
   chargeFx.glow += ((L > 0 ? 0.25 + 1.6 * L : 0) - chargeFx.glow) * Math.min(1, dt * 14);
   heroSteel.emissive.setRGB(1.0 * chargeFx.glow, 0.38 * chargeFx.glow, 0.08 * chargeFx.glow);
+  for (let i = 0; i < genMats.hero.length; i++) genMats.hero[i].emissive.setRGB(0.6 * chargeFx.glow, 0.22 * chargeFx.glow, 0.05 * chargeFx.glow);
   const full = H.charging && H.chargeF >= HERO_CHARGE.MAX_F;
   if (full && !chargeFx.wasFull) { heroSword.tip.getWorldPosition(_a); _n.set(0, 1, 0); fx.burstSparks(_a, _n, 0.9); cam.impact('light'); hud.cue('FULL CHARGE', 'perfect'); hud.flash(reducedMotion ? 0.08 : 0.18); }
   chargeFx.wasFull = full;
@@ -1281,10 +1694,10 @@ function bossLayer(dt) {
   }
   bossSecondary(B, dt);
   bossReact.flash = Math.max(0, bossReact.flash - dt * 5);
-  for (const m of bossMats) if (m.emissive) m.emissive.copy(BOSS_FLASH).multiplyScalar(0.55 * bossReact.flash * bossReact.flash);
+  for (const m of bossMats) if (m.emissive) m.emissive.copy(BOSS_FLASH).multiplyScalar((TRAILER ? 0.22 : 0.55) * bossReact.flash * bossReact.flash);
 }
 
-const HERO_ACT_CLIPS = new Set(Object.values(H.verbs).map((v) => v.clip).concat(['heavy', 'mh_judgment', 'lunge_s', 'lunge_m', 'lunge_h', 'at_sweep', 'at_sweep_rev', 'at_rift_plant', 'gs_sweep', 'gs_sweep_rev', 'gs_rift'], Object.values(GS_SET).map((g) => g.clip)));
+const HERO_ACT_CLIPS = new Set(Object.values(H.verbs).map((v) => v.clip).concat(['heavy', 'mh_judgment', 'lunge_s', 'lunge_m', 'lunge_h', 'at_sweep', 'at_sweep_rev', 'at_rift_plant', 'gs_sweep', 'gs_sweep_rev', 'gs_rift'], DANCE_CLIPS, Object.values(GS_SET).map((g) => g.clip)));
 const HERO_LOCO_CLIPS = new Set(['idle', 'walk', 'run', 'block', 'parry', GS_GUARD.clip]);
 // blend windows (s): attacks enter fast so startup stays readable; recovery settles slowly into stance
 function heroBlend(nc, oc) {
@@ -1304,6 +1717,7 @@ function poseHero(alpha, presentDt) {
   heroLayer(presentDt);
   tipFloorGuard();
   leftGripIK(presentDt);
+  tipFloorPost();
   if (presentDt > 0) jerk.hero.sample();
   if (trace.on && presentDt > 0) {
     const r = jerkRaw.na ? jerkRaw.acc[jerkRaw.na - 1] : null, f = jerk.hero.na ? jerk.hero.acc[jerk.hero.na - 1] : null;
@@ -1326,27 +1740,41 @@ const _gw = new THREE.Vector3(), _gx = new THREE.Vector3();
 // If the tip is below TIP_CLEAR the socket is pitched about the right fist by exactly the angle that lifts it back
 // (a 6 cm lift on a 1.6 m blade is about 2 degrees). Runs before leftGripIK, so the off hand follows the grip.
 const TIP_GUARD_ON = qs.get('tipguard') !== '0', TIP_CLEAR = 0.04;
-const tipGuard = { base: null, n: 0 };
+const tipGuard = { base: new Map(), n: 0 };   // v2.24: base pose per socket (great sword, glaive, sabre)
 const _tg0 = new THREE.Vector3(), _tg1 = new THREE.Vector3(), _tgq = new THREE.Quaternion(), _tgp = new THREE.Quaternion(), _tgu = new THREE.Vector3(0, 1, 0);
 function tipFloorGuard() {
-  const S = heroGreat.socket;
-  if (!tipGuard.base) tipGuard.base = S.quaternion.clone();
-  S.quaternion.copy(tipGuard.base);
-  if (!TIP_GUARD_ON || H.weapon < 1) return;
+  // v2.24: guards whichever blade is in hand; the default hero's one-hand sword stays unguarded (unchanged v2.23)
+  const W = heroSword, S = W.socket;
+  if (!tipGuard.base.has(S)) tipGuard.base.set(S, S.quaternion.clone());
+  S.quaternion.copy(tipGuard.base.get(S));
+  // v2.27: dance verbs guard the one-hand sword too (dz_l2's rising wind-up dragged the tip 12 cm under the floor)
+  const danceAct = H.state === HERO_STATE.ACTION && H.verb && H.verb.charCodeAt(0) === 68 && H.verb.charCodeAt(1) === 95;   // 'D_'
+  if (!TIP_GUARD_ON || (H.weapon < 1 && !heroSabre && !danceAct)) return;
+  for (let it = 0; it < 3; it++) if (!tipLiftPass(W, S)) break;   // v2.24: iterate; one pass undershoots on the 1.9 m glaive
+}
+// v2.24: the grip IK pull-in rotates RightArm after the guard ran, which can re-sink the 1.9 m glaive by a few cm.
+// A second, non-resetting pass after leftGripIK fixes it; the socket pivots about the right fist, so the off-hand
+// target (one hand-width down the grip) moves under 4 mm. New characters only: the default hero stays v2.23-exact.
+function tipFloorPost() {
+  if (!TIP_GUARD_ON || CHAR === 'hero') return;
+  for (let it = 0; it < 3; it++) if (!tipLiftPass(heroSword, heroSword.socket)) break;
+}
+function tipLiftPass(W, S) {
   hero.model.updateMatrixWorld(true);
-  S.getWorldPosition(_tg0); heroGreat.tip.getWorldPosition(_tg1);
-  const floor = colliders.terrainY(_tg1.z) + TIP_CLEAR;
-  if (_tg1.y >= floor) return;
-  _tg1.sub(_tg0); const L = _tg1.length(); if (L < 1e-3) return;
+  S.getWorldPosition(_tg0); W.tip.getWorldPosition(_tg1);
+  const floor = colliders.terrainY(_tg1.z) + TIP_CLEAR + 0.002;
+  if (_tg1.y >= floor - 0.002) return false;
+  _tg1.sub(_tg0); const L = _tg1.length(); if (L < 1e-3) return false;
   const yNow = _tg1.y / L, yWant = Math.min(1, (floor - _tg0.y) / L);
   const a = Math.asin(Math.max(-1, Math.min(1, yWant))) - Math.asin(Math.max(-1, Math.min(1, yNow)));
-  if (!(a > 0)) return;
-  _tg0.crossVectors(_tg1, _tgu); if (_tg0.lengthSq() < 1e-8) return; _tg0.normalize().negate();   // axis lifting the tip
+  if (!(a > 0)) return false;
+  _tg0.crossVectors(_tg1, _tgu); if (_tg0.lengthSq() < 1e-8) return false; _tg0.normalize().negate();   // axis lifting the tip
   _tgq.setFromAxisAngle(_tg0, -a);
   // world rotation about the socket origin -> local: q_local' = inv(parentWorld) * dq * parentWorld * q_local
   S.parent.getWorldQuaternion(_tgp);
   const dq = _tgq.premultiply(_tgp.clone().invert()).multiply(_tgp);
   S.quaternion.premultiply(dq); tipGuard.n++;
+  return true;
 }
 function alignBone(bone, from, to) {   // rotate bone in world space so world direction `from` points along `to`
   _gu.copy(from).normalize(); _gv.copy(to).normalize();
@@ -1443,8 +1871,9 @@ function poseHeroBase(alpha, presentDt) {
   const st = H.state;
   if (st === HERO_STATE.ACTION) {
     const v = H.verbs[H.verb];
-    if (v.sweep) {
-      // v2.22 sweep: the layered at_* clip at the sim frame, 1:1 (the sim walks the same root curve, feet stay planted)
+    if (v.sweep || (v.dance && AT_OK[v.foot] !== undefined)) {
+      // v2.22 sweep / v2.27 dance step: the layered clip at the sim frame, 1:1 (the sim walks the same root curve,
+      // feet stay planted)
       const c = AT_OK[v.foot] !== undefined ? v.foot : hero.actions[v.clip] ? v.clip : 'heavy';
       // root sits at lerp(actF-1, actF, alpha) on the curve, so the clip samples the same instant (else feet skate)
       pose(hero, 1, c, 1, Math.min(Math.max(0, H.actF - 1 + alpha) / 60, hero.dur[c] - 0.001)); return;
@@ -1572,8 +2001,9 @@ function poseBoss(alpha) {
   }
   orbMesh.visible = B.orb.active;
   if (B.orb.active) { orbMesh.position.set(B.orb.x, B.orb.y, B.orb.z); orbMat.color.setHex(B.orb.reflected ? 0x8fd0ff : 0xffb04a); }
-  if (B.verb === 7 && B.state === BRAIN_STATE.ACTION && (B.f % 6) === 0) fx.afterimage(BOSS_ID, false, 0.6);
+  if (!TRAILER && B.verb === 7 && B.state === BRAIN_STATE.ACTION && (B.f % 6) === 0) fx.afterimage(BOSS_ID, false, 0.6);
   breathFx(B);
+  if (TRAILER) trailerBossFx(B);
 }
 
 // Fire breath: flame cone from the jaw while the breath verb is live (window padded so the flame leads and trails
@@ -1639,6 +2069,7 @@ let dispYaw = null;
 const PLANT_F = 8;   // retarget_bake WARM: first frame with pinned feet on the v2.22 footwork clips
 // frames into a planted-foot clip (sweep / sweep_rev / rift plant on the great sword), or -1
 function heroPlantF() {
+  if (H.state === HERO_STATE.ACTION && H.weapon < 1) { const v = H.verbs[H.verb]; return v && v.dance && AT_OK[v.foot] !== undefined ? H.actF : -1; }
   if (H.weapon < 1) return -1;
   if (H.state === HERO_STATE.RIFT) return AT_OK.at_rift_plant !== undefined ? Math.max(0, H.riftF) : -1;
   if (H.state === HERO_STATE.ACTION) { const v = H.verbs[H.verb]; return v && v.foot && AT_OK[v.foot] !== undefined ? H.actF : -1; }
@@ -1650,7 +2081,10 @@ let wasFinisher = false, finHitShown = false;
 const lbStyle = document.createElement('style');
 lbStyle.textContent = '.ec-lb{position:fixed;left:0;right:0;height:11vh;background:#000;z-index:5;pointer-events:none;transform:scaleY(0);will-change:transform}' +
   '.ec-lb.t{top:0;transform-origin:top}.ec-lb.b{bottom:0;transform-origin:bottom}' +
-  (recMode ? 'body,canvas{cursor:none!important}.ec-credit,.ec-fps,#stats{display:none!important}' : '');
+  (recMode ? 'body,canvas{cursor:none!important}.ec-credit,.ec-fps,#stats{display:none!important}' : '') +
+  (TRAILER ? '.ec-ret{display:none!important}.ec-hud>*:not(.ec-flash):not(.ec-banner){visibility:hidden!important}.ec-hud .ec-banner,.ec-hud .ec-banner *{visibility:visible!important}' : '') +
+  // ?ad=1 (trailer only): clean plate for social ads - no banner text, no cue text, no letterbox bars, so every frame cuts
+  (TRAILER && qs.get('ad') === '1' ? '.ec-banner,.ec-cue,.ec-lb,.ec-road{display:none!important}' : '');
 document.head.appendChild(lbStyle);
 const lbTop = document.createElement('div'), lbBot = document.createElement('div');
 lbTop.className = 'ec-lb t'; lbBot.className = 'ec-lb b'; document.body.append(lbTop, lbBot);
@@ -1689,14 +2123,70 @@ bus.on('actor/death', (p) => {
       if (H.triggerF > 0) fx.mist(mx, y + 1.0, mz, 0.4, MIST.CRIMSON, 5, 0.9);
       else { fx.mist(mx, y + 1.1, mz, 0.5, MIST.VIOLET, 9, 0.9); fx.mist(mx, y + 0.3, mz, 0.6, MIST.WHITE, 3, 0.3); }
       if (!reducedMotion) loop.dilate(0.45, 8, true);
+      if (TRAILER) {   // trailer kill beat: ground ring, white flare, a longer slow-mo
+        { const ec = trailerEdge(); fx.shockwave(r.x, y + 0.08, r.z, 3.6, ec, 1.1, 0.6); _rv.set(r.x, y + 1.2, r.z); fx.flare(_rv, 2.6, ec);
+          fx.riftSlash(_rv, 6.5, trailerSwingAngle(), ec, 0, 0.4); fx.mistRGBA(r.x, y + 0.6, r.z, 0.8, 0.9, 0.5, 0.3, 0.3, 8, 1.2);
+          if (!reducedMotion) { loop.dilate(0.3, 16, true); post.kick(0.24, ec); cam.impact('heavy'); } }
+      }
       break;
     }
     return;
   }
   cam.cine(CINE.DEATH); loop.dilate(0.4, 70, true);
-  { const B = sim.brain; fx.shockwave(B.x, colliders.terrainY(B.z) + 0.22, B.z, 9, 0xffc080, 1.4, 0.9); }
+  { const B = sim.brain; fx.shockwave(B.x, colliders.terrainY(B.z) + 0.22, B.z, 9, TRAILER ? trailerEdge() : 0xffc080, 1.4, 0.9); }
   hud.banner('THE FORD IS YOURS', 'the wyvern falls', 3.0);
 });
+
+// v2.23 road camera grammar (reference #1, PBZ breakdown: one continuous take, chase cam 3-5 m, ~60 deg, push in on
+// engage, wide after a kill). Presentation only: reads sim state, never writes it.
+//   ROAD_OPEN  crane from in front of the hero over the shoulder into the chase pose (stage start)
+//   AMBUSH     raised three-quarter on the pincer, ends on the hero->nearest-foe two-shot
+//   GATE       low hero shot with the torii above, ends on the chase pose
+// Road shots always end on the gameplay pose, so the hand-back is a settle, never a cut. ?roadcam=0 = legacy rig.
+const ROADCAM_ON = qs.get('roadcam') !== '0';
+const roadCam = { leg: -1, amb: -1, gate: false, want: 0, sgn: 1 };
+const ROAD_LOOKAHEAD = 7.0;   // m down the pass the chase yaw aims at (smooths the S-curve)
+function roadYawAt(x, z) {
+  // forward = toward the gate (-Z) along roadX; camera yaw convention: forward = (-sin y, -cos y)
+  const tz = Math.max(ROAD.GATE_Z - 6, z - ROAD_LOOKAHEAD), fx = roadX(tz) - x, fz = tz - z;
+  return Math.atan2(-fx, -fz);
+}
+function roadCamLayer() {
+  cam.roadMode = ROADCAM_ON && sim.roadActive;
+  if (!cam.roadMode) { roadCam.leg = -1; roadCam.amb = -1; roadCam.gate = false; return; }
+  const hx = camHero.position.x, hz = camHero.position.z, hy = camHero.position.y;
+  cam.roadYaw = roadYawAt(hx, hz);
+  // subject: hero chest; during the ambush shot the pincer centroid pulls it toward the foes
+  cam.cineFocus.set(hx, hy + 1.2, hz);
+  cam.cineFitR = 0;
+  if (cam.cineKind === CINE.AMBUSH) {
+    // bbox centre of hero + live foes (not the hero-weighted mean, which left the far foe on the frame edge),
+    // and the radius the lens must hold: CameraDirector backs the AMBUSH arc off until it fits
+    let x0 = hx, x1 = hx, z0 = hz, z1 = hz;
+    for (const d of sim.duelists) if (d.alive && Math.hypot(d.x - hx, d.z - hz) < 16) {
+      x0 = Math.min(x0, d.x); x1 = Math.max(x1, d.x); z0 = Math.min(z0, d.z); z1 = Math.max(z1, d.z); }
+    const cx = (x0 + x1) * 0.5, cz = (z0 + z1) * 0.5;
+    cam.cineFocus.x = cx; cam.cineFocus.z = cz;
+    cam.cineFitR = Math.hypot(x1 - x0, z1 - z0) * 0.5 + 1.2;   // + body half-width and sword reach
+  }
+  if (roadCam.leg !== sim.roadLeg) {
+    roadCam.leg = sim.roadLeg; roadCam.amb = -1; roadCam.gate = false; roadCam.sgn = sim.roadLeg ? -1 : 1;
+    if (!reducedMotion) cam.cine(CINE.ROAD_OPEN, cam.roadYaw, roadCam.sgn);
+  }
+  if (sim.ambushLive && sim.ambushIdx !== roadCam.amb) {
+    roadCam.amb = sim.ambushIdx;
+    // end on the duel two-shot (camera behind the hero on the hero->nearest-foe line); arc from the far side
+    let best = null, bd = 1e9;
+    for (const d of sim.duelists) if (d.alive) { const dd = Math.hypot(d.x - hx, d.z - hz); if (dd < bd) { bd = dd; best = d; } }
+    const endYaw = best ? Math.atan2(-(best.x - hx), -(best.z - hz)) : cam.roadYaw;
+    let e = endYaw - cam.orbitYaw; e -= Math.round(e / (2 * Math.PI)) * 2 * Math.PI;
+    if (!reducedMotion) cam.cine(CINE.AMBUSH, endYaw, e >= 0 ? 1 : -1);
+  }
+  if (!roadCam.gate && sim.roadCleared && Math.hypot(hx - roadX(ROAD.GATE_Z), hz - ROAD.GATE_Z) < 13) {
+    roadCam.gate = true; if (!reducedMotion) cam.cine(CINE.GATE, cam.roadYaw, -roadCam.sgn);
+  }
+}
+bus.on('wave/clear', () => { if (cam.roadMode) cam.release(); });
 
 let lockOn = false;
 function chooseCamTarget() {
@@ -1769,6 +2259,13 @@ function update(realDt, alpha, presentDt, noRender = false) {
   const attacking = H.state === HERO_STATE.ACTION || H.state === HERO_STATE.FINISHER || (H.state === HERO_STATE.RIFT && H.riftF >= HERO_RIFT.FINALE - 8);
   if (attacking) { heroSword.hilt.getWorldPosition(_a); heroSword.tip.getWorldPosition(_b);
     const finisher = H.state === HERO_STATE.FINISHER;
+    if (TRAILER) {
+      // trailer: ribbon only on the outer 45% of the blade (a 2.2 m glaive drew a flat full-length sheet) and tinted
+      // by the weapon's own edge colour; the tip motion is kept for screen-aligned contact cuts
+      _a.lerp(_b, 0.7);   // outer 30%: a thin bright arc, not a translucent sheet
+      trlTip.prev.copy(trlTip.cur); trlTip.cur.copy(_b); trlTip.live = trlTip.f === sim.frame - 1 || trlTip.f === sim.frame ? trlTip.live + 1 : 0; trlTip.f = sim.frame;
+      fx.streakSample(HERO_ID, _a, _b, finisher ? INK.FIN : trailerEdge(), 0.16);
+    } else
     fx.streakSample(HERO_ID, _a, _b, INK_ON ? (finisher ? INK.FIN : INK.JADE) : 0xff1f14, INK_ON ? INK.LINGER : undefined); streak.hero = true; }
   else if (streak.hero) { fx.streakEnd(HERO_ID); streak.hero = false; }
   dmcLayer(presentDt);
@@ -1778,6 +2275,7 @@ function update(realDt, alpha, presentDt, noRender = false) {
 
   camHero.position.copy(hero.root.position); camHero.position.x = camSimX; camHero.position.z = camSimZ; camHero.yaw = H.yaw;
   chooseCamTarget();
+  roadCamLayer();
   // cinematic subject: the wyvern's body-to-head midpoint (tracks the landing, the roar and the fall)
   // C13 occluder: the wyvern body centre (pelvis->chest), only while grounded near the hero
   cam.occluder.active = sim.bossActive && !sim.brain.airborne; cam.occAvoid = OCC_ON;
@@ -1802,7 +2300,8 @@ function update(realDt, alpha, presentDt, noRender = false) {
   if (gFin && !gstat.wasFin) cam.cine(CINE.FINISHER);
   if (gFin && sim.gauntlet.finisherF >= 60 && !gstat.finHit) {
     gstat.finHit = true; gview.HEAD.getWorldPosition(_a); hud.popDamage(innerWidth * 0.5, innerHeight * 0.42, 180, 'fin', 0);
-    hud.flash(reducedMotion ? 0.2 : 0.7); fx.shockwave(gview.root.position.x, colliders.terrainY(gview.root.position.z) + 0.25, gview.root.position.z, 6.5, 0x9fe8ff, 1.2, 0.6);
+    hud.flash(reducedMotion ? 0.2 : TRAILER ? 0.22 : 0.7); if (TRAILER && !reducedMotion) post.kick(0.45, trailerEdge());
+    fx.shockwave(gview.root.position.x, colliders.terrainY(gview.root.position.z) + 0.25, gview.root.position.z, 6.5, TRAILER ? trailerEdge() : 0x9fe8ff, 1.2, 0.6);
     _n.set(0, 1, 0); fx.burstSparks(_a, _n, 1.6); gview.hit(H.facingX(), H.facingZ(), 1.4);
   }
   if (!gFin) gstat.finHit = false;
@@ -1812,12 +2311,14 @@ function update(realDt, alpha, presentDt, noRender = false) {
   // finisher blow lands on brain frame 60 (WyvernBrain FINISHER_HIT_F): flash + giant number, once per finisher
   if (fin && sim.brain.finisherF >= 60 && !finHitShown) {
     finHitShown = true; HEAD.getWorldPosition(_a); hud.popDamage(innerWidth * 0.5, innerHeight * 0.42, 160, 'fin', 0);
-    hud.flash(reducedMotion ? 0.2 : 0.7); fx.shockwave(boss.root.position.x, colliders.terrainY(boss.root.position.z) + 0.25, boss.root.position.z, 6.5, 0xffd080, 1.2, 0.6);
-    _n.set(0, 1, 0); fx.burstSparks(_a, _n, 1.6);
+    // trailer: a 0.7 screen-blend flash read as a flat lavender frame in the ad review; a short coloured kick instead
+    hud.flash(reducedMotion ? 0.2 : TRAILER ? 0.22 * TRL_FINFX : 0.7); if (TRAILER && !reducedMotion) post.kick(0.45 * TRL_FINFX, trailerEdge());
+    fx.shockwave(boss.root.position.x, colliders.terrainY(boss.root.position.z) + 0.25, boss.root.position.z, 6.5, TRAILER ? trailerEdge() : 0xffd080, 1.2, 0.6);
+    _n.set(0, 1, 0); if (TRL_FINFX > 0.05) fx.burstSparks(_a, _n, 1.6 * TRL_FINFX);
   }
   if (!fin) finHitShown = false;
   wasFinisher = fin;
-  letterbox(Math.max(cam.cineActive ? cam.cineW : 0, reducedMotion ? 0 : dmc.riftLb * 0.6));
+  letterbox(Math.max(cam.cineActive ? cam.cineLb : 0, reducedMotion ? 0 : dmc.riftLb * 0.6));
   cam.update(presentDt);
   camera.getWorldDirection(_dir); camYaw = Math.atan2(-_dir.x, -_dir.z);
   placeFill();
@@ -1828,6 +2329,8 @@ function update(realDt, alpha, presentDt, noRender = false) {
     roadStage.update(H.z, sim.roadCleared, presentDt, arenaRig, roadSunDir(), ROAD_LOOK.sunDist);
   }
   world.update(loop.simFrame / 60);
+  // trailer: thin the haze. Stage looks rewrite fog.density on a stage change, so rescale whenever it moved.
+  if (TRAILER_LOOK && scene.fog && scene.fog.density !== trlFogSet) { scene.fog.density *= TRL_FOG; trlFogSet = scene.fog.density; }
   if (!noRender) post.render(presentDt);
 }
 
@@ -1839,6 +2342,8 @@ const fullscreen = new Fullscreen().init({ visible: !recMode });
 const FS_ON_BEGIN = !recMode && qs.get('fs') !== '0';
 const hud = new Hud().init({
   credit, touch: touch.visible,
+  chars: { current: CHAR, list: [{ id: 'hero', name: 'THE DUELIST', weapon: 'Sword - claims boss blades' }, { id: 'vesper', name: 'VESPER', weapon: 'Cinder Sabre - fast, rolls' }, { id: 'kael', name: 'KAEL', weapon: 'Astral Glaive - longest reach' }] },
+  onChar: (id) => { try { localStorage.setItem('ec.char', id); } catch (e) {} const u = new URL(location.href); u.searchParams.set('char', id); location.href = u.toString(); },
   onStart: () => { if (FS_ON_BEGIN) fullscreen.request(); input.releaseAll(); sim.start(); resetPresentation(); },
   onRetry: () => { input.releaseAll(); input.clearBuffer(); sim.retry(); resetPresentation(); },
   onRestart: () => { input.releaseAll(); input.clearBuffer(); setPaused(false); sim.reset('title'); sim.start(); resetPresentation(); },
@@ -1938,8 +2443,10 @@ function lateUpdate(dt) {
   }, dt);
   hudFrame = loop.simFrame;
   touch.update && touch.update();
-  touch.setAvailable(A.DODGE, H.stamina >= 1);
-  touch.setAvailable(A.ROLL, H.stamina >= 1);
+  // v2.23: two-handers cannot roll or quickstep (HeroSim GREAT_NO_EVADE) - grey the buttons so touch shows it
+  const canEvade = !(H.wp && GREAT_NO_EVADE);
+  touch.setAvailable(A.DODGE, canEvade && H.stamina >= 1);
+  touch.setAvailable(A.ROLL, canEvade && H.stamina >= 1);
   touch.setAvailable(A.HEAVY, H.stamina >= 1);
   touch.setAvailable(A.SNATCH, H.stamina >= HERO_SNATCH.STAMINA && H.snatchCd === 0);
   touch.setAvailable(A.SWEEP, !!H.wp && H.stamina >= HERO_SWEEP.SWEEP.stamina);
@@ -1949,6 +2456,19 @@ function lateUpdate(dt) {
 }
 
 const loop = new Loop({ fixedUpdate, update, lateUpdate, reducedMotion });
+// ?flow=1: plain real-time gameplay for footage - no hit-stop, no slow-mo (sim or presentation), no camera shake.
+// Sim outcomes are unchanged (dilation never altered them), only the pacing on screen.
+const FLOW = qs.get('flow') === '1';
+// v2.28: hit-stop / slow-mo on hit is OFF in normal play too (user call: the dragon fight plays at 1.0x, weight comes
+// from the authored strikes, impact shake and VFX). ?hitstop=1 restores the v2.27 dilation for A/B.
+if (qs.get('hitstop') !== '1') loop.noDilate = true;
+if (FLOW) { loop.noDilate = true; cam.impact = cam.deflect = cam.triggerPush = cam.phantomStep = () => {}; }   // no shake, no zoom punch
+H.comboOn = qs.get('combo10') !== '0';
+H.danceOn = DANCE_ON && ['dz_l1', 'dz_l2', 'dz_l3', 'dz_l4', 'dz_l5', 'dz_h1', 'dz_h2'].every((c) => AT_OK[c] !== undefined);
+// rec showcase only: ?bdmg=0.5 scales damage the wyvern takes so a filmed fight lasts long enough for full strings
+// rec showcase only: ?nopick=1 keeps a one-hand dancer from walking into the ford great sword mid-take
+if (recMode && qs.get('nopick') === '1') { const _sb = sim._startBoss.bind(sim); sim._startBoss = () => { _sb(); sim.pickup.active = false; }; sim.pickup.active = false; }
+if (recMode && qs.get('bdmg')) sim.brain.dmgScale = Math.max(0.1, Math.min(1, +qs.get('bdmg') || 1));
 
 // ------------------------------------------------------------------ prewarm (simulation-transparent)
 {
@@ -1967,6 +2487,9 @@ const loop = new Loop({ fixedUpdate, update, lateUpdate, reducedMotion });
   gview.dome.position.set(0, 0, -10); gview.dome.scale.setScalar(3); gview.wave.position.set(0, 0.08, -8); gview.wave.scale.setScalar(3);
   pickupRoot.visible = true; pickupRoot.position.set(4.2, 1.4, -4.6); heroGreat.socket.visible = true;
   dropRoot.visible = true; dropRoot.position.set(-4.2, 1.4, -4.6);
+  // v2.25: every generated weapon variant drawn once (each mesh material is its own program family)
+  for (const r of [heroGreat, dropSword, pickupSword]) if (r.gen) for (const k in r.gen) r.gen[k].mesh.visible = true;
+  if (heroSabre) heroSabre.socket.visible = true; if (heroGlaive) heroGlaive.socket.visible = true;
   lbTop.style.transform = 'scaleY(0)';
   renderer.setRenderTarget(null);
   const arena0 = arena;
@@ -1980,6 +2503,7 @@ const loop = new Loop({ fixedUpdate, update, lateUpdate, reducedMotion });
   fx.prewarmEnd();
   for (const m of poolMeshes) m.visible = false; orbMesh.visible = false;
   gview.hideHazards(); gview.root.visible = sim.stage3Active;
+  showGen(heroGreat, Math.max(1, Math.min(4, H.weapon))); showGen(pickupSword, 1); showGen(dropSword, dropGlow.w > 0 ? dropGlow.w : 1);
   setHeroWeapon(H.weapon); pickupRoot.visible = sim.pickup.active && sim.bossActive; dropRoot.visible = false;
   for (const s of slots) s.root.visible = !!s.bound;
   boss.root.visible = sim.bossActive;
@@ -2115,7 +2639,10 @@ window.__ember = {
   camProbe() {
     const v = new THREE.Vector3(H.x, colliders.terrainY(H.z) + 1.2, H.z).project(camera), f = new THREE.Vector3();
     camera.getWorldDirection(f);
-    return { nx: v.x, ny: v.y, nz: v.z, yaw: Math.atan2(f.x, f.z), fov: camera.fov, boom: cam.cur.boom, pulledIn: cam.pulledIn, dist: camera.position.distanceTo(new THREE.Vector3(H.x, camera.position.y, H.z)), shot: cam.shot, trauma: cam.trauma, timeScale: loop.timeScale, state: GAME_STATE_NAMES[sim.state], cine: cam.cineActive ? cam.cineW : 0 };
+    return { nx: v.x, ny: v.y, nz: v.z, yaw: Math.atan2(f.x, f.z), fov: camera.fov, boom: cam.cur.boom, pulledIn: cam.pulledIn, dist: camera.position.distanceTo(new THREE.Vector3(H.x, camera.position.y, H.z)), shot: cam.shot, trauma: cam.trauma, timeScale: loop.timeScale, state: GAME_STATE_NAMES[sim.state], cine: cam.cineActive ? cam.cineW : 0,
+      cineKind: CINE_NAMES[cam.cineKind], road: cam.roadMode, roadYaw: cam.roadMode ? cam.roadYaw + Math.PI : null, assist: +cam.assistW.toFixed(3), cx: camera.position.x, cy: camera.position.y, cz: camera.position.z, hz: H.z, amb: sim.ambushIdx, live: sim.ambushLive, fitR: +(cam.cineFitR || 0).toFixed(2), fitD: +(cam._fitD || 0).toFixed(2),
+      cineT: +cam.cineT.toFixed(2), camHero: +Math.hypot(camera.position.x - H.x, camera.position.z - H.z).toFixed(2),
+      foes: cam.roadMode ? sim.duelists.filter((d) => d.alive && Math.hypot(d.x - H.x, d.z - H.z) < 16).map((d) => { const p = new THREE.Vector3(d.x, colliders.terrainY(d.z) + 1.1, d.z).project(camera); return [+p.x.toFixed(3), +p.y.toFixed(3), p.z < 1 ? 1 : 0]; }) : [] };
   },
   jerk() { return { inert: INERT_ON, smooth: clipSmooth, heroKeys: hero.actions.light_1.getClip().tracks.map((t) => t.times.length).slice(0, 3), hero: jerk.hero.report(), boss: jerk.boss.report(), blends: { hero: hero.inert.blends, boss: boss.inert.blends } }; },
   dbgInert() { const r = []; for (const b of hero.inert.bones) { const q = b.quaternion; r.push([b.name, +q.x.toFixed(3), +q.y.toFixed(3), +q.z.toFixed(3), +q.w.toFixed(3)]); } return { r, t: hero.inert.t, dur: hero.inert.dur, clip: hero.inert.clip, st: H.state }; },
@@ -2139,7 +2666,7 @@ window.__ember = {
   place(x, z, yaw = 0) { const w = H.weapon; H.reset(x, z, yaw); if (w > 0) { H.weapon = 0; H.equip(w); } return [H.x, H.z]; },   // QA: open-ground review spot   // QA: one command flag on the next sim step (sweep / attack / heavy / trigger ...)
   // v2.22 QA: foot bone world positions (m), sword tip height above terrain, sweep counters
   v222() {
-    const o = { sweeps: H.sweeps, knocks: H.knocks, tipY: null, feet: null, f: H.state === HERO_STATE.ACTION ? H.actF : H.state === HERO_STATE.RIFT ? H.riftF : -1,
+    const o = { sweeps: H.sweeps, knocks: H.knocks, dealt: H.damageDealt, tipY: null, feet: null, f: H.state === HERO_STATE.ACTION ? H.actF : H.state === HERO_STATE.RIFT ? H.riftF : -1,
       sc: +(hero.root.scale.x * hero.pivot.scale.x * hero.model.scale.x).toFixed(4), trig: H.triggerF, hs: H.state, ct: hero.pt,
       req: H.dbgReq, push: H.dbgPush, pre: H.dbgPre, x0: H.dbgX0, lim: [colliders.halfX, colliders.halfZ],
       x: H.x, z: H.z, yaw: H.yaw, rx: hero.root.position.x, rz: hero.root.position.z, ry: hero.root.rotation.y };
@@ -2172,14 +2699,27 @@ window.__ember = {
   reviewCam(p, t) { loop.stop(); camera.position.set(p[0], p[1], p[2]); camera.lookAt(t[0], t[1], t[2]); placeFill(); post.render(0); return true; },
   // QA: hold the hero in one clip frame (optionally with the grip IK applied) and frame a close-up of the hands
   holdPose(clip, f, ik = true, view = 'left', dist = 1.4) {
-    loop.stop(); setHeroWeapon(1); heroSword = heroGreat;
+    // v2.24: shows the character's own loadout (Kael glaive, Vesper sabre one-handed, hero great sword)
+    const hw = heroGlaive ? 5 : heroSabre ? 0 : 1; loop.stop(); setHeroWeapon(hw);
     pose(hero, 1, clip, 1, f / 60); hero.model.updateMatrixWorld(true);
-    const saveW = H.weapon; H.weapon = 1; GRIP.w = ik ? 1 : 0; if (ik) leftGripIK(0); H.weapon = saveW;
+    const saveW = H.weapon; H.weapon = Math.max(1, hw); if (CHAR !== 'hero') tipFloorGuard(); GRIP.w = ik && hw >= 1 ? 1 : 0; if (ik && hw >= 1) leftGripIK(0); tipFloorPost(); H.weapon = saveW;
     const c = new THREE.Vector3(), r = new THREE.Vector3(); heroBones.LeftHand.getWorldPosition(c); heroBones.RightHand.getWorldPosition(r); c.add(r).multiplyScalar(0.5);
     const yaw = H.yaw, fx = -Math.sin(yaw), fz = -Math.cos(yaw), sx = view === 'left' ? -1 : view === 'right' ? 1 : 0;
     const dx = view === 'front' ? fx : -fz * sx, dz = view === 'front' ? fz : fx * sx;
     camera.position.set(c.x + dx * dist, c.y + 0.25, c.z + dz * dist); camera.lookAt(c); placeFill(); post.render(0);
     return true;
+  },
+  // v2.24 QA: current weapon geometry in hero-root space (x right, y up, z forward): hilt / tip, blade dir, hand
+  // gaps (m), and the closest blade point to the Head / Spine02 bones (clip check). Call after holdPose.
+  dbgWeapon() {
+    const S = heroSword, a = new THREE.Vector3(), b = new THREE.Vector3(), h = new THREE.Vector3(), l = new THREE.Vector3(), r = new THREE.Vector3(), p = new THREE.Vector3();
+    hero.root.updateMatrixWorld(true); S.hilt.getWorldPosition(a); S.tip.getWorldPosition(b);
+    heroBones.RightHand.getWorldPosition(r); heroBones.LeftHand.getWorldPosition(l);
+    const segD = (bone) => { bone.getWorldPosition(h); const ab = p.subVectors(b, a), t = Math.max(0, Math.min(1, h.clone().sub(a).dot(ab) / ab.lengthSq())); return +a.clone().addScaledVector(ab, t).distanceTo(h).toFixed(3); };
+    const inv = new THREE.Matrix4().copy(hero.root.matrixWorld).invert(), loc = (v) => { const q = v.clone().applyMatrix4(inv); return [+q.x.toFixed(3), +q.y.toFixed(3), +(-q.z).toFixed(3)]; };
+    const d = b.clone().sub(a).normalize().transformDirection(inv);
+    return { ch: CHAR, w: H.weapon, hilt: loc(a), tip: loc(b), dir: [+d.x.toFixed(3), +d.y.toFixed(3), +(-d.z).toFixed(3)], len: +a.distanceTo(b).toFixed(3),
+      rGap: +r.distanceTo(a).toFixed(3), lGap: +l.distanceTo(a).toFixed(3), head: segD(heroBones.Head), chest: segD(heroBones.Spine02), tipY: +(b.y - colliders.terrainY(b.z)).toFixed(3) };
   },
   // QA: raw-clip grip residual (mm) at one frame with the IK applied and no presentation layers
   dbgHeroPose() { const r = {}; hero.model.traverse((o) => { if (o.isBone) { const q = o.quaternion, p = o.position; r[o.name] = [q.x, q.y, q.z, q.w, p.x, p.y, p.z].map((v) => +v.toFixed(4)); } }); const s = heroGreat.socket.quaternion; return { pc: hero.pc, pt: hero.pt, bones: r, sock: [s.x, s.y, s.z, s.w].map((v) => +v.toFixed(4)), rs: hero.model.scale.toArray(), rp: hero.model.position.toArray() }; },
@@ -2191,6 +2731,7 @@ window.__ember = {
     heroGreat.socket.localToWorld(t); return { eMm: +(a.distanceTo(t) * 1000).toFixed(1), dbg: GRIP.dbg };
   },
   heroClips: () => Object.keys(hero.actions),
+  charSocket: () => ({ char: CHAR, socket: HERO_SOCKET }),   // v2.24: promo renders reuse the retargeted RightHand socket
   // QA: left / right FIST centres (skin-weighted hand vertices) in great-sword socket space per clip frame
   gripScan(clip, step = 2) {
     const a = hero.actions[clip]; if (!a) return null;
@@ -2214,7 +2755,18 @@ window.__ember = {
     hero.root.position.copy(r0); return out;
   },
   forceBossVerb(name) { const v = BossVerb[name]; if (v === undefined) return false; sim.brain.forceNext = v; return true; },
-  advance(n = 1) { for (let i = 0; i < n; i++) { loop.advance(1 / 60); } return { state: GAME_STATE_NAMES[sim.state], frame: sim.frame, cine: CINE_NAMES[cam.cineKind] }; },
+  advance(n = 1) { for (let i = 0; i < n; i++) { loop.advance(1 / 60); } return { state: GAME_STATE_NAMES[sim.state], frame: sim.frame, cine: CINE_NAMES[cam.cineKind],
+    // recorder beat log: rifts, triggers, finishers, perfect deflects, hero state, time scale
+    ev: [H.rifts, H.triggers, sim.stats.finishers || 0, runStats.perfect || 0, H.state, +loop.timeScale.toFixed(2), runStats.hits || 0, sim.stats.heroHits || 0,
+  sim.brain ? sim.brain.verb : -1, sim.brain ? sim.brain.state : -1, +(post.flash || 0).toFixed(2),
+  // hero + boss screen x (0..1) so a 9:16 cut can follow the action
+  +(_scrX(H.x, 1.0, H.z)).toFixed(3), sim.bossActive ? +(_scrX(boss.root.position.x, 2.0, boss.root.position.z)).toFixed(3)
+    : sim.stage3Active ? +(_scrX(gview.root.position.x, 2.0, gview.root.position.z)).toFixed(3)
+    : sim.stage2Active && sim.warden && sim.warden.alive ? +(_scrX(slots[0].root.position.x, 1.4, slots[0].root.position.z)).toFixed(3) : -1,
+  // cols 15/16: active verb (VERB_IDX, 0 = none) and charge level, so a cut can hold whole combo strings
+  H.state === HERO_STATE.ACTION ? (VERB_IDX[H.verb] || 0) : 0, +(H.chargeLvl || 0).toFixed(2),
+  // cols 17/18: combo depth of the playing verb (1..10, 0 = none) and its heavy-press bitmask (HUD pips)
+  H.state === HERO_STATE.ACTION ? H.comboN : 0, H.comboMask] }; },
   begin() { if (sim.state === GameState.TITLE) { input.releaseAll(); sim.start(); resetPresentation(); } return GAME_STATE_NAMES[sim.state]; },
   pump(n) { const p = loop.paused; loop.paused = false; for (let i = 0; i < n; i++) loop.step(); loop.paused = p; update(0, 1, 0); return sim.frame; },
   dispose() {

@@ -432,7 +432,7 @@ export class WyvernBrain {
     if (this.state === BRAIN_STATE.DEAD) return 0;
     if (!fromFinisher && (this.invuln || this.finisherF >= 0)) return 0;
     const head = part === 'head';
-    const d = Math.round(dmg * (head ? 1.5 : 1) * (backstab && this.simFrame <= this.backstabUntil ? 1.5 : 1));
+    const d = Math.round(dmg * (this.dmgScale || 1) * (head ? 1.5 : 1) * (backstab && this.simFrame <= this.backstabUntil ? 1.5 : 1));
     this.hp = Math.max(0, this.hp - d);
     if (this.state !== BRAIN_STATE.STAGGER && this.state !== BRAIN_STATE.FALL) {
       this.posture = Math.min(BOSS.POSTURE_MAX, this.posture + posture * (head ? 2 : 1));

@@ -22,6 +22,7 @@ export class Loop {
     this.accumulator = 0;
     this.timeScale = 1;
     this.presentScale = 1;
+    this.noDilate = false;
     this.alpha = 0;
     this.running = false;
     this.paused = false;
@@ -40,6 +41,7 @@ export class Loop {
   // Slow the sim to `scale` for `simFrames` frames. Overlapping requests: the slowest wins.
   // Reduced motion keeps dilation (it is gameplay readable) but never below 0.5x.
   dilate(scale, simFrames, presentationOnly = false) {
+    if (this.noDilate) return;          // ?flow=1: real-time play, no hit-stop / slow-mo of any kind (sim or presentation)
     let slot = -1;
     for (let i = 0; i < MAX_DILATIONS; i++) if (this._dLeft[i] <= 0) { slot = i; break; }
     if (slot < 0) {                     // pool full: replace the request that ends soonest

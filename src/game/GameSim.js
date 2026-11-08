@@ -1,4 +1,4 @@
-// GameSim - the whole run as one deterministic unit (owner: game). No THREE, no DOM, no Math.random.
+﻿// GameSim - the whole run as one deterministic unit (owner: game). No THREE, no DOM, no Math.random.
 // Flow: TITLE -> INTRO -> WAVE 1 -> WAVE_CLEAR -> WAVE 2 -> WAVE_CLEAR -> BOSS -> VICTORY | DEFEAT.
 // Owns HeroSim, the wave duelists and the WyvernBrain; the page (src/game/main.js) only feeds a hero command
 // per fixed step and draws what this produces. Same seed + same commands -> same run (hash()).
@@ -50,7 +50,7 @@ export const GREAT_PICKUP = Object.freeze({ X: 4.2, Z: -4.6, R: 1.1 });
 const BOSS_ID = 100, HERO_ID = 1, GAUNTLET_ID = 200;
 
 export class GameSim {
-  constructor({ seed = SIM.SEED_DEFAULT, timing, colliders = null, bus = null, god = false, startAt = 'title', dodgeProfile = null, stage3 = false, stage3Colliders = null, stage2Colliders = null, weapon = 0, roadColliders = null, road = true }) {
+  constructor({ seed = SIM.SEED_DEFAULT, timing, colliders = null, bus = null, god = false, startAt = 'title', dodgeProfile = null, stage3 = false, stage3Colliders = null, stage2Colliders = null, weapon = 0, roadColliders = null, road = true, character = 'hero' }) {
     // v2.20 road: between two bosses the hero walks a 120 m pass and fights three ambushes (src/shared/road.js).
     // Needs the road collider doc; without it (old fixtures) DOOR/GATE jump straight to the next stage as before.
     this.roadColliders = roadColliders; this.road = !!(road && roadColliders);
@@ -68,6 +68,7 @@ export class GameSim {
     this.stage2Colliders = stage2Colliders;
     this.hero = new HeroSim({ timing, colliders, god, dodgeProfile });
     this.hero.id = HERO_ID;
+    this.hero.setCharacter(character);   // v2.24 loadout before the first reset below (hero = unchanged)
     // style meter (DMC layer): fed from the authoritative hit / contact sinks, never from visuals
     this.style = new StyleMeter();
     this.hero.contactSink = (R) => { this._styleContact(R); if (this.onHeroContact) this.onHeroContact(R); };
@@ -152,7 +153,7 @@ export class GameSim {
   _startBoss() {
     this.duelists.length = 0; this.wave = WAVES.length; this.bossActive = true; this.bossStartF = this.frame;
     this.brain.startIntro();
-    if (this.hero.weapon === 0) { this.pickup.active = true; this.pickup.takenF = -1; }
+    if (this.hero.weapon === 0 && this.hero.lockW < 0) { this.pickup.active = true; this.pickup.takenF = -1; }   // v2.24: signature-weapon characters skip the pickup
     this._setState(GameState.BOSS);
   }
 
@@ -430,7 +431,7 @@ export class GameSim {
   }
 
   // weapon perk: drops scale the Ember Trigger gauge earned from style (great sword 1.0 = unchanged)
-  _styleAdd(kind) { const g = this.style.add(kind); if (g > 0) this.hero.addGauge(this.hero.wp ? g * this.hero.wp.GAUGE : g); }
+  _styleAdd(kind) { const g = this.style.add(kind); if (g > 0) this.hero.addGauge(this.hero.wp ? g * this.hero.wp.GAUGE : this.hero.sig ? g * this.hero.sig.GAUGE : g); }
 
   _styleContact(R) {
     const O = Outcome;
