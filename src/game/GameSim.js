@@ -118,7 +118,7 @@ export class GameSim {
     this.stats = { kills: 0, waveTimes: [], bossF: 0, totalF: 0, perfects: 0, phantoms: 0, finishers: 0, damageTaken: 0, damageDealt: 0 };
     this.state = GameState.TITLE;
     if (startAt === 'wave2') { this._spawnWave(1); this._setState(GameState.WAVE); }
-    else if (startAt === 'boss') this._startBoss();
+    else if (startAt === 'boss') { if (this.carry > 0) this.hero.equip(this.carry); this._startBoss(); }   // ?wpn=N review carry (was ignored on boss entry)
     else if (startAt === 'stage3') this._startStage3();
     else if (startAt === 'stage2') this._startStage2();
     else if (startAt === 'road0') this._startRoad(0);

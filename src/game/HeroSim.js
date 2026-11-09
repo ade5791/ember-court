@@ -45,6 +45,49 @@ export const HERO_SWEEP = Object.freeze({
     stamina: 24, dmg: 18, posture: 24, reach: 1.35, arc: -0.17, knock: 1.4 },
   KNOCK_F: 10,
 });
+// v2.30 great sword weight pass (ref #12, God Eater 2 long blade; docs/COMBO_SPEC.md "Great sword reference").
+// COIL: two-hander LIGHT_1 / LIGHT_2 startup is lengthened to `startup` frames (was 13 / 12 after the SWING stretch).
+//   The extra frames are spent winding up (presentation warps clip `coil` = [clipFrom, clipTo, frames], then the
+//   release covers the rest of startup), so the cut coils long and releases fast. Chain window and dodge cancel shift
+//   by the same delta, so the 10-press route keeps its rhythm.
+// WAVE (Hatou-giri style): long coil, short melee snap, then a ground line travels forward from the blade (speed m/frame,
+//   range m, lateral half-width m) hitting every foe it crosses exactly once (own actionId, launched at end of ACTIVE).
+// LEAP (leap wheel): planted take-off (`takeoff` frames, no travel), an airborne arc of `air` frames (height m, up to
+//   `travel` m forward, shortened when a foe is near), the vertical chop lands on the first ACTIVE frame, deep recovery.
+//   Feet only travel while airborne, so planted feet never slide; no i-frames (not an evade, GREAT_NO_EVADE holds).
+const NO_TARGETS = Object.freeze([]);
+export const GS_COIL = Object.freeze({
+  LIGHT_1: Object.freeze({ startup: 24, coil: [36, 50, 16] }),
+  LIGHT_2: Object.freeze({ startup: 22, coil: [34, 50, 14] }),
+});
+export const HERO_GREAT_X = Object.freeze({
+  WAVE: Object.freeze({ clip: 'gs_overhead', startup: 26, active: 4, total: 72, chain: [56, 71], dodgeFrom: 60, stamina: 30, lunge: 0.3,
+    dmg: 22, posture: 22, reach: 1.35, wave: Object.freeze({ speed: 0.34, range: 8.0, half: 0.9, dmg: 18, posture: 16 }) }),
+  LEAP: Object.freeze({ clip: 'gs_overhead', startup: 34, active: 6, total: 80, chain: [60, 79], dodgeFrom: 64, stamina: 30, lunge: 0,
+    dmg: 34, posture: 36, reach: 1.6, leap: Object.freeze({ takeoff: 10, air: 24, height: 0.85, travel: 2.2 }) }),
+});
+// Great-sword phases for timing-table verb k (SWING stretch + coil). Shared by the sim and the presentation warp.
+export function greatPhases(k, phases) {
+  const s = scalePhases(phases, GREATSWORD.SWING), c = GS_COIL[k];
+  if (c && c.startup > s[0].specF) s[0] = { ...s[0], specF: c.startup };
+  return s;
+}
+function coilVerb(v, k) {
+  const c = GS_COIL[k]; if (!c || c.startup <= v.startup) return v;
+  const d = c.startup - v.startup, o = { ...v, phases: v.phases.map((p) => ({ ...p })) };
+  o.phases[0].specF = c.startup; let f = 0; for (const p of o.phases) { p.start = f; f += p.specF; }
+  o.total = f; o.startup = c.startup; o.chain = v.chain ? [v.chain[0] + d, v.chain[1] + d] : null; o.dodgeFrom = v.dodgeFrom + d;
+  return o;
+}
+function greatXVerb(k) {
+  const s = HERO_GREAT_X[k], rec = s.total - s.startup - s.active;
+  const phases = [
+    { phase: 'STARTUP', specF: s.startup, clipF: [0, s.startup], start: 0 },
+    { phase: 'ACTIVE', specF: s.active, clipF: [s.startup, s.startup + s.active], start: s.startup },
+    { phase: 'RECOVERY', specF: rec, clipF: [s.startup + s.active, s.total], start: s.startup + s.active },
+  ];
+  return { ...s, name: k, phases, chainTo: null };
+}
 // Rift footwork (MotionBricks at_rift_plant, 87 f): the whole rift follows its root curve (a short planted brace).
 export const HERO_RIFT_FOOT = Object.freeze({ CLIP: 'at_rift_plant' });
 // v2.27 DANCE set (one-handed blades: the Duelist and Vesper). docs/DANCE_COMBAT.md. Every strike is a weight
@@ -91,8 +134,9 @@ function sweepVerb(k) {
 // affordable. Presentation follows the sim verb + actF only, so the animation sequence is exactly the button sequence.
 export const COMBO = Object.freeze({ MAX: 10, CHAIN_STAMINA: 0.35, CHAIN_LEAD: 3 });
 export const COMBO_ROUTE = Object.freeze({
-  great: Object.freeze({ LOCO: ['LIGHT_1', 'HEAVY'], LIGHT_1: ['LIGHT_2', 'HEAVY'], LIGHT_2: ['LIGHT_3', 'HEAVY'], LIGHT_3: ['SWEEP', 'HEAVY'],
-    SWEEP: ['SWEEP_REV', 'HEAVY'], SWEEP_REV: ['LIGHT_2', 'HEAVY'], HEAVY: ['LIGHT_2', 'SWEEP'] }),
+  // v2.30: heavy after the third light or the reverse sweep is the WAVE slash; heavy out of a sweep (or a wave) is the LEAP
+  great: Object.freeze({ LOCO: ['LIGHT_1', 'HEAVY'], LIGHT_1: ['LIGHT_2', 'HEAVY'], LIGHT_2: ['LIGHT_3', 'HEAVY'], LIGHT_3: ['SWEEP', 'WAVE'],
+    SWEEP: ['SWEEP_REV', 'LEAP'], SWEEP_REV: ['LIGHT_2', 'WAVE'], HEAVY: ['LIGHT_2', 'SWEEP'], WAVE: ['LIGHT_2', 'LEAP'], LEAP: ['LIGHT_1', 'HEAVY'] }),
   std: Object.freeze({ LOCO: ['LIGHT_1', 'HEAVY'], LIGHT_1: ['LIGHT_2', 'HEAVY'], LIGHT_2: ['LIGHT_3', 'HEAVY'], LIGHT_3: ['LIGHT_1', 'HEAVY'],
     HEAVY: ['LIGHT_2', 'HEAVY'] }),
   // v2.27 Duelist dance route: five different light steps in a row (A x5 never repeats a move), and a heavy from
@@ -109,6 +153,15 @@ export const HERO_DODGE = Object.freeze({ total: 34, travel: 3.0, travelF: [2, 2
 export const STEP_DIR = Object.freeze({ NONE: 0, F: 1, B: 2, L: 3, R: 4 });
 // v2.23: two-handers never roll or sidestep (user direction). Exported so fixtures can assert it.
 export const GREAT_NO_EVADE = true;
+// v2.29 attack steering (feel pass: "hard to move and attack at the same time").
+//  AIM: during STARTUP the stick turns the swing toward the stick (at AIM_RATE x TURN per frame, at most AIM_MAX rad
+//       per swing) when no foe is inside the assist range (the assist snap already aims it). Footwork verbs rotate
+//       their whole root curve (footYaw0), so travel and facing stay in step.
+//  MOVE CANCEL: from MOVE_AFTER frames past the end of ACTIVE (two-handers MOVE_AFTER_GREAT) a stick push with no
+//       buffered follow-up ends the recovery straight into locomotion at >= walk speed, instead of finishing the clip.
+//  Off with ?steer=0 (setAttackSteer(false)); the 10-press combo strings are unaffected (a buffered press wins).
+export const ATTACK_STEER = { on: true, STICK: 0.35, AIM_RATE: 0.55, AIM_MAX: 0.70, MOVE_AFTER: 6, MOVE_AFTER_GREAT: 14 };
+export function setAttackSteer(on) { ATTACK_STEER.on = !!on; }
 export const STEP_CLIP = Object.freeze(['dodge', 'dodge_F', 'dodge_B', 'dodge_L', 'dodge_R']);
 export const HERO_FINISHER_F = 96;          // matches the boss finisher length (WyvernBrain FINISHER_F)
 // Finisher presentation: Sword Judgment (clip 102). Blade lands on clip frame 62, the boss takes the blow on sim
@@ -195,8 +248,11 @@ export class HeroSim {
     }
     // great-sword frame data: same verbs stretched by GREATSWORD.SWING (this.verbs swaps on equip / reset)
     this.verbsStd = this.verbs; this.verbsGreat = {};
-    for (const k in this.verbsStd) this.verbsGreat[k] = scaleVerb(this.verbsStd[k], GREATSWORD.SWING);
+    for (const k in this.verbsStd) this.verbsGreat[k] = coilVerb(scaleVerb(this.verbsStd[k], GREATSWORD.SWING), k);
     this.verbsGreat.SWEEP = sweepVerb('SWEEP'); this.verbsGreat.SWEEP_REV = sweepVerb('SWEEP_REV');
+    this.verbsGreat.WAVE = greatXVerb('WAVE'); this.verbsGreat.LEAP = greatXVerb('LEAP');
+    this.wave = { live: false, x: 0, z: 0, dx: 0, dz: -1, d: 0, aid: 0, hitN: 0, ids: new Int32Array(8) };
+    this._waveV = { name: 'WAVE_LINE', dmg: 0, posture: 0, reach: 0, charge: 0, great: true, wave: true };
     for (const k in HERO_DANCE) if (k.startsWith('D_')) this.verbsStd[k] = danceVerb(k);   // one-handed only
     this.danceOn = true;         // v2.27 dance routes for one-handed blades (main.js ?dance=0 restores v2.26)
     for (const set of [this.verbsStd, this.verbsGreat]) for (const k in set) {
@@ -228,6 +284,7 @@ export class HeroSim {
     this.lastEvent = ''; this.lastEventFrame = -999; this.lastStaminaFail = -999;
     this.maxBackwardDot = 1;
     this._hitN = 0;
+    this.wave.live = false; this.waves = 0; this.waveSeq = 0; this.waveHits = 0; this.leaps = 0; this.y = 0; this.airborne = false; this.leapDist = 0;
     this.charging = false; this.chargeF = 0; this.chargeLvl = 0; this.chargedHits = 0;
     this.hpIdle = 0; this.hpRegained = 0;
     this.weapon = WEAPON.SWORD; this.wp = null; this.verbs = this.verbsStd;
@@ -374,7 +431,16 @@ export class HeroSim {
     this.queued = null; this.blocking = false;
     this.charging = name === 'HEAVY'; this.chargeF = 0; this.chargeLvl = 0;
     const ay = this._assistYaw(targets); if (ay !== null) this.yaw = ay;
-    this.footYaw0 = this.yaw; if (v.sweep) { this.sweeps++; this._event('sweep'); }
+    this.footYaw0 = this.yaw; this.aimAcc = 0; this.aimFree = ay === null;
+    if (v.sweep) { this.sweeps++; this._event('sweep'); }
+    if (v.leap) {
+      // leap length: full travel in the open, shortened so the chop lands at reach on the nearest foe ahead
+      let near = Infinity; const fx = this.facingX(), fz = this.facingZ();
+      for (let i = 0; i < (targets ? targets.length : 0); i++) { const t = targets[i]; if (!t || !t.targetable) continue;
+        const dx = t.x - this.x, dz = t.z - this.z, d = Math.hypot(dx, dz); if (d > 0.3 && (dx * fx + dz * fz) / d < 0.5) continue;
+        near = Math.min(near, d - (t.radius || 0) - this.radius); }
+      this.leapDist = Math.max(0, Math.min(v.leap.travel, near - v.reach * 0.75)); this.leaps++; this._event('leap');
+    }
     return true;
   }
 
@@ -425,7 +491,7 @@ export class HeroSim {
   }
 
   // One fixed step. cmd: makeHeroCommand(); targets: [{ x, z, radius, targetable, id, onHeroHit(hero, verbDef, part) }]
-  step(cmd, targets) {
+  step(cmd, targets = NO_TARGETS) {
     this.frame++;
     this.prevX = this.x; this.prevZ = this.z; this.prevYaw = this.yaw;
     if (this.deflectF >= 0 && ++this.deflectF > 20) this.deflectF = -1;
@@ -535,9 +601,25 @@ export class HeroSim {
           if (this.actF >= holdAt) { this.charging = false; if (this.chargeLvl > 0) this._event('release'); }
         }
         this.actF++;
+        // v2.29 aim: the stick steers the swing during STARTUP (bounded), footwork curves rotate with it
+        const stl = Math.hypot(cmd.mx, cmd.mz), ST = ATTACK_STEER;
+        if (ST.on && this.aimFree && stl > ST.STICK && this.actF <= v.startup && this.aimAcc < ST.AIM_MAX) {
+          const d = wrap(Math.atan2(-cmd.mx, -cmd.mz) - this.yaw);
+          const lim = Math.min(TURN * ST.AIM_RATE * (this.wp ? this.wp.TURN : 1), ST.AIM_MAX - this.aimAcc);
+          const r = Math.max(-lim, Math.min(lim, d));
+          this.aimAcc += Math.abs(r);
+          if (v.foot) this.footYaw0 = wrap(this.footYaw0 + r); else this.yaw = wrap(this.yaw + r);
+        }
         // lunge during startup->active, scaled down when a target is already inside reach
         const lungeF = v.startup + v.active;
-        if (v.foot) {
+        if (v.leap) {
+          // v2.30 leap wheel: planted take-off, ballistic arc ending on the first ACTIVE frame, planted landing
+          const L = v.leap, a0 = v.startup - L.air, u = (this.actF - a0) / L.air;
+          if (this.actF > a0 && this.actF <= v.startup) {
+            const s = this.leapDist / L.air; mx = this.facingX() * s; mz = this.facingZ() * s;
+            this.y = 4 * L.height * u * (1 - u); this.airborne = this.actF < v.startup;
+          } else { this.y = 0; this.airborne = false; }
+        } else if (v.foot) {
           // sweep: travel + turn come from the MotionBricks root curve, in the start facing frame (planted feet)
           const s = footStep(v.foot, this.actF, this._foot), fx0 = -Math.sin(this.footYaw0), fz0 = -Math.cos(this.footYaw0);
           mx = fx0 * s[0] + fz0 * s[1]; mz = fz0 * s[0] - fx0 * s[1];
@@ -551,6 +633,7 @@ export class HeroSim {
         // contact: ACTIVE window, reach + target radius, inside a 70 degree half-cone, once per (actionId, target)
         const ph = this.phase();
         if (ph === 'ACTIVE') this._resolveSwing(v, targets);
+        if (v.wave && this.actF === v.startup + v.active) this._launchWave(v);
         // buffered follow-ups
         if (this.comboOn) {
           const r = this._route()[this.verb], room = this.comboN < COMBO.MAX;
@@ -571,6 +654,14 @@ export class HeroSim {
         const cw = this.comboOn ? v.comboChain : v.chain;
         if (this.queued && !evade && cw && this.actF >= cw[0] && this.actF <= cw[1]) {
           const q = this.queued; this.state = HERO_STATE.LOCO; if (!this._startVerb(q, targets, this.comboOn, this.queuedBtn)) this.state = HERO_STATE.LOCO;
+          break;
+        }
+        // v2.29 move cancel: a stick push in late recovery (no buffered follow-up) walks straight out of the swing
+        if (ST.on && !this.queued && !this.charging && stl > ST.STICK
+          && this.actF >= v.startup + v.active + (this.wp ? ST.MOVE_AFTER_GREAT : ST.MOVE_AFTER) && this.actF < v.total) {
+          this.state = HERO_STATE.LOCO; this.actF = 0; this.chargeLvl = 0;
+          this.speed = Math.max(this.speed, SIM.WALK_SPEED * (this.wp ? this.wp.MOVE : 1));
+          this.moveCancels = (this.moveCancels || 0) + 1; this._event('move_cancel');
           break;
         }
         if (this.actF >= v.total) {
@@ -614,6 +705,9 @@ export class HeroSim {
       }
     }
 
+    // v2.30: the leap height only lives inside a LEAP action (a hit or any state change lands the hero at once)
+    if (this.y !== 0 && !(this.state === HERO_STATE.ACTION && this.verbs[this.verb] && this.verbs[this.verb].leap)) { this.y = 0; this.airborne = false; }
+    if (this.wave.live) this._stepWave(targets);
     // stamina regen (slower while blocking, none while acting)
     if (this.state === HERO_STATE.LOCO || this.state === HERO_STATE.HITSTUN) {
       if (++this.staminaIdle > STAMINA_DELAY) this.stamina = Math.min(SIM.STAMINA_MAX, this.stamina + STAMINA_REGEN * (this.blocking ? BLOCK_REGEN_SCALE : 1));
@@ -702,6 +796,34 @@ export class HeroSim {
       if (dealt > 0) { this.damageDealt += dealt; if (v.charge) this.chargedHits++; this.addGauge(dealt * HERO_TRIGGER.HIT_GAIN); }
       if (this.hitSink) this.hitSink(t, dealt, v);
     }
+  }
+
+  // v2.30 wave slash: a ground line launched from the blade along the facing. One actionId for the whole line; every
+  // foe whose centre comes within half-width (+ radius) of the line front, ahead of the hero, is hit once.
+  _launchWave(v) {
+    const W = this.wave, P = v.wave;
+    W.live = true; W.x = this.x + this.facingX() * 0.6; W.z = this.z + this.facingZ() * 0.6; W.dx = this.facingX(); W.dz = this.facingZ();
+    // own contact id space (negative): actionId counts player actions (combo strings, swing tracking), not contacts
+    W.d = 0; W.prevD = 0; W.hitN = 0; W.aid = -(++this.waveSeq); W.speed = P.speed; W.range = P.range; W.half = P.half;
+    const g = this._waveV, m = this.wp || { DMG: 1, POSTURE: 1 }, tk = this.triggerF > 0;
+    g.dmg = Math.round(P.dmg * m.DMG * (tk ? HERO_TRIGGER.DMG : 1)); g.posture = Math.round(P.posture * m.POSTURE * (tk ? HERO_TRIGGER.POSTURE : 1));
+    g.reach = P.range; this.waves++; this._event('wave');
+    this._hitN = 0;   // the melee snap and the line are separate contacts (different actionIds)
+  }
+  _stepWave(targets) {
+    const W = this.wave; W.prevD = W.d; W.d = Math.min(W.range, W.d + W.speed);
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i]; if (!t || !t.targetable) continue;
+      let seen = false; for (let k = 0; k < W.hitN; k++) if (W.ids[k] === t.id) { seen = true; break; }
+      if (seen) continue;
+      const rx = t.x - W.x, rz = t.z - W.z, along = rx * W.dx + rz * W.dz, lat = Math.abs(rx * W.dz - rz * W.dx), r = t.radius || 0;
+      if (along < -r || along > W.d + r || lat > W.half + r) continue;
+      if (W.hitN < W.ids.length) W.ids[W.hitN++] = t.id;
+      const dealt = t.onHeroHit ? t.onHeroHit(this, this._waveV, W.aid) : 0;
+      if (dealt > 0) { this.damageDealt += dealt; this.waveHits++; this.addGauge(dealt * HERO_TRIGGER.HIT_GAIN); }
+      if (this.hitSink) this.hitSink(t, dealt, this._waveV);
+    }
+    if (W.d >= W.range) W.live = false;
   }
 
   // Trigger burst: radial shove that hits every targetable foe in BURST_R once (light damage, heavy posture).
