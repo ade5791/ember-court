@@ -144,7 +144,7 @@ progress(0.35);
 // ------------------------------------------------------------------ actors
 const loader = new GLTFLoader();
 const [heroGltf, enemyGltf, bossGltf, bossManifest, timing, heroCombat, heroLunge, gauntletGltf, gauntletManifest, heroAttacks] = await Promise.all([
-  loader.loadAsync(ROOT + 'characters/hero/out/character_v222.glb'),   // v2.22: gs set + Blender-authored gs_sweep / gs_sweep_rev / gs_rift
+  loader.loadAsync(ROOT + 'characters/hero/out/' + (qs.get('var') === '0' ? 'character_v222.glb' : 'character_v232.glb')),   // v2.22 gs set + gs_sweep / gs_sweep_rev / gs_rift; v2.32 adds gs_l1a..gs_l3c
   loader.loadAsync(ROOT + 'characters/enemy/out/character.glb'),
   loader.loadAsync(ROOT + 'characters/boss/wyvern.glb'),
   fetch(ROOT + 'characters/boss/wyvern.manifest.json').then((r) => r.json()),
@@ -215,6 +215,8 @@ for (const k in GS_SET) {
   if (!ph || ph.length !== GS_SET[k].clipF.length) { console.warn('great sword clip set skipped (phase mismatch):', k); continue; }
   GS_WARP[k] = buildWarp(gsWarpPhases(k, ph));
 }
+// v2.32 two-handed light variants, three authored arcs per light verb (see heroLightVar)
+const GS_LIGHT_VAR = { LIGHT_1: ['gs_l1a', 'gs_l1b', 'gs_l1c'], LIGHT_2: ['gs_l2a', 'gs_l2b', 'gs_l2c'], LIGHT_3: ['gs_l3a', 'gs_l3b', 'gs_l3c'] };
 const GS_GUARD = { clip: 'gs_guard', blockT: 16 / 60, parryT0: 3 / 60 };
 // MotionBricks guarded quickstep (NVIDIA MotionBricks bake): sim travel curve + clip-time map from one root curve
 const QUICKSTEP = buildQuickstep(heroCombat, HERO_DODGE.travelF[1] - HERO_DODGE.travelF[0] + 1);
@@ -504,6 +506,12 @@ const DANCE_ON = qs.get('dance') !== '0';
 const MOCAP_ON = qs.get('mocap') !== '0';
 const heroDance = DANCE_ON ? await fetch(ROOT + (MOCAP_ON ? 'motion/mb/hero.dance.attacks.video.json' : 'motion/mb/hero.dance.attacks.json')).then((r) => (r.ok ? r.json() : null)).catch(() => null) : null;
 if (heroDance && heroDance.clips && heroAttacks && heroAttacks.clips) Object.assign(heroAttacks.clips, heroDance.clips);
+// v2.32 variants: a repeated light never replays its last animation. Two-handers cycle three authored arcs per light
+// (tools/blender/author_v232.py, 1:1 with the sim frame data); the dance lights alternate with a second sword arc
+// over the same footwork (tools/mb/run_dance_var.ps1). ?var=0 restores v2.31 (one animation per verb).
+const VAR_ON = qs.get('var') !== '0';
+const heroDanceVar = VAR_ON && heroDance ? await fetch(ROOT + 'motion/mb/hero.dance.attacks.var.json').then((r) => (r.ok ? r.json() : null)).catch(() => null) : null;
+if (heroDanceVar && heroDanceVar.clips && heroDance) { Object.assign(heroAttacks.clips, heroDanceVar.clips); Object.assign(heroDance.clips, heroDanceVar.clips); }
 const DANCE_CLIPS = heroDance && heroDance.clips ? Object.keys(heroDance.clips) : [];
 if (heroAttacks && heroAttacks.clips) {
   const bn = {}; heroGltf.scene.traverse((o) => { if (o.isBone) bn[o.name] = o; });
@@ -1761,7 +1769,7 @@ function heroLayer(dt) {
     // diagonal cut (LIGHT_2 right-high to left-low, LIGHT_3 the mirror). Arms and blade ride the spine; the grip IK
     // runs after this, so both hands stay on the hilt. Presentation only.
     const g = H.weapon >= 1 && GS_SET[H.verb];
-    if (g && g.roll) {
+    if (g && g.roll && !heroLightVar()) {   // v2.32 variant arcs are authored diagonals already
       const ramp = f < a ? f / Math.max(1, a) : f < e + 6 ? 1 : Math.max(0, 1 - (f - e - 6) / 20);
       const r = g.roll * Math.sin(Math.min(1, ramp) * Math.PI * 0.5);
       _ax2.set(fx_, 0, fz_); rotWorld(HB.s2, _ax2, r * 0.45); rotWorld(HB.s1, _ax2, r * 0.55);
@@ -1828,7 +1836,7 @@ function bossLayer(dt) {
   for (const m of bossMats) if (m.emissive) m.emissive.copy(BOSS_FLASH).multiplyScalar((TRAILER ? 0.22 : 0.55) * bossReact.flash * bossReact.flash);
 }
 
-const HERO_ACT_CLIPS = new Set(Object.values(H.verbs).map((v) => v.clip).concat(['heavy', 'mh_judgment', 'lunge_s', 'lunge_m', 'lunge_h', 'at_sweep', 'at_sweep_rev', 'at_rift_plant', 'gs_sweep', 'gs_sweep_rev', 'gs_rift'], DANCE_CLIPS, Object.values(GS_SET).map((g) => g.clip)));
+const HERO_ACT_CLIPS = new Set(Object.values(H.verbs).map((v) => v.clip).concat(Object.values(GS_LIGHT_VAR).flat(), ['heavy', 'mh_judgment', 'lunge_s', 'lunge_m', 'lunge_h', 'at_sweep', 'at_sweep_rev', 'at_rift_plant', 'gs_sweep', 'gs_sweep_rev', 'gs_rift'], DANCE_CLIPS, Object.values(GS_SET).map((g) => g.clip)));
 const HERO_LOCO_CLIPS = new Set(['idle', 'walk', 'run', 'block', 'parry', GS_GUARD.clip]);
 // blend windows (s): attacks enter fast so startup stays readable; recovery settles slowly into stance
 function heroBlend(nc, oc) {
@@ -1997,6 +2005,15 @@ function contactDeadline() {
 function heroClipT() { const w = WARP_ON && (H.weapon >= 1 ? WARP_GS : WARP)[H.verb]; return w ? w.clipTime(H.actF) : H.verbClipTime(H.actF); }
 // great sword equipped and its two-handed clip is present -> that clip; else null (standard set)
 function heroGsVerb() { const g = H.weapon >= 1 && GS_SET[H.verb]; return g && GS_WARP[H.verb] && hero.actions[g.clip] ? g : null; }
+// v2.32 light variants (presentation only; sim timing / contact / travel identical). H.varIdx counts uses of the verb.
+function heroLightVar() {
+  if (!VAR_ON || H.state !== HERO_STATE.ACTION) return null;
+  const n = Math.max(0, (H.varIdx | 0) - 1);
+  if (H.weapon >= 1) { const L = GS_LIGHT_VAR[H.verb], c = L && L[n % L.length]; return c && hero.actions[c] ? c : null; }
+  const v = H.verbs[H.verb];
+  if (v && v.dance && !v.heavy && n % 2 === 1) { const c = v.foot + 'b'; return AT_OK[c] !== undefined ? c : null; }
+  return null;
+}
 const heroGsGuard = () => H.weapon >= 1 && !!hero.actions[GS_GUARD.clip];
 // v2.30 recovery hold: the last GS_HOLD_F frames of a great-sword verb ease the arms into gs_drag (blade low and out
 // to the right), and loco keeps it for GS_HOLD_TAIL frames after the action ends before the ready carry returns.
@@ -2018,14 +2035,16 @@ function poseHeroBase(alpha, presentDt) {
     if (v.sweep || (v.dance && AT_OK[v.foot] !== undefined)) {
       // v2.22 sweep / v2.27 dance step: the layered clip at the sim frame, 1:1 (the sim walks the same root curve,
       // feet stay planted)
-      const c = AT_OK[v.foot] !== undefined ? v.foot : hero.actions[v.clip] ? v.clip : 'heavy';
+      const c = heroLightVar() || (AT_OK[v.foot] !== undefined ? v.foot : hero.actions[v.clip] ? v.clip : 'heavy');
       // root sits at lerp(actF-1, actF, alpha) on the curve, so the clip samples the same instant (else feet skate)
       const ct = Math.min(Math.max(0, H.actF - 1 + alpha) / 60, hero.dur[c] - 0.001);
       if (hw > 0) pose(hero, 2, c, 1, ct, 'gs_drag', hw, 0); else pose(hero, 1, c, 1, ct);
       return;
     }
     const ln = LUNGE_FOR[H.verb], ld = ln && lungeOk[ln];
-    const gs = heroGsVerb(), clip = gs ? gs.clip : v.clip, ct = gs ? GS_WARP[H.verb].clipTime(H.actF) : heroClipT();
+    const lv = H.weapon >= 1 ? heroLightVar() : null;
+    const gs = heroGsVerb(), clip = lv || (gs ? gs.clip : v.clip);
+    const ct = lv ? Math.min(Math.max(0, H.actF - 1 + alpha) / 60, hero.dur[lv] - 0.001) : gs ? GS_WARP[H.verb].clipTime(H.actF) : heroClipT();
     if (ld) {
       // footwork covers the sim lunge window (startup+active) and settles through early recovery
       const lf = v.startup + v.active, span = lf * 1.5, u = Math.min(1, (H.actF + alpha) / span);
@@ -2964,7 +2983,9 @@ window.__ember = {
   // cols 17/18: combo depth of the playing verb (1..10, 0 = none) and its heavy-press bitmask (HUD pips)
   H.state === HERO_STATE.ACTION ? H.comboN : 0, H.comboMask,
   // col 19: carried weapon id (0 sword, 1 great sword, 2 fang, 3 odachi, 4 frostbrand) for film cutting
-  H.weapon | 0] }; },
+  H.weapon | 0,
+  // col 20 (v2.32): the clip actually playing for the active verb, so a cut can prove no animation repeats
+  H.state === HERO_STATE.ACTION ? (heroLightVar() || (H.weapon >= 1 && GS_SET[H.verb] ? GS_SET[H.verb].clip + ':' + H.verb : (H.verbs[H.verb].foot || H.verbs[H.verb].clip))) : ''] }; },
   begin() { if (sim.state === GameState.TITLE) { input.releaseAll(); sim.start(); resetPresentation(); } return GAME_STATE_NAMES[sim.state]; },
   pump(n) { const p = loop.paused; loop.paused = false; for (let i = 0; i < n; i++) loop.step(); loop.paused = p; update(0, 1, 0); return sim.frame; },
   dispose() {

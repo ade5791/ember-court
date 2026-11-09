@@ -279,6 +279,7 @@ export class HeroSim {
     this.stepDirX = 0; this.stepDirZ = 1; this.stepToward = 0; this.pushX = 0; this.pushZ = 0; this._lpx = 0; this._lpz = 0; this._lpF = 0; this.plantDX = 0; this.plantDZ = 0; this.stepKind = STEP_DIR.NONE;
     this.queued = null; this.queuedBtn = 0; this.hitstunLen = HITSTUN_F;
     this.comboN = 0; this.comboMask = 0; this.comboMax = 0; this.combos10 = 0;
+    this.varCnt = this.varCnt || {}; for (const k in this.varCnt) this.varCnt[k] = 0; this.varIdx = 0;
     this.frame = 0; this.hitsTaken = 0; this.damageTaken = 0; this.damageDealt = 0; this.flash = 0;
     this.perfects = 0; this.deflects = 0; this.phantoms = 0; this.finishers = 0;
     this.lastEvent = ''; this.lastEventFrame = -999; this.lastStaminaFail = -999;
@@ -428,6 +429,9 @@ export class HeroSim {
     if (this.comboN > this.comboMax) this.comboMax = this.comboN;
     if (this.comboN === COMBO.MAX) { this.combos10++; this._event('combo10'); }
     this.state = HERO_STATE.ACTION; this.verb = name; this.actF = 0; this.actionId++; this._hitN = 0;
+    // v2.32: per-verb use counter -> presentation variant (main.js VARIANTS). A repeated light never replays the
+    // same animation as its previous use; sim timing, contact and travel are identical across variants.
+    this.varIdx = this.varCnt[name] = (this.varCnt[name] | 0) + 1;
     this.queued = null; this.blocking = false;
     this.charging = name === 'HEAVY'; this.chargeF = 0; this.chargeLvl = 0;
     const ay = this._assistYaw(targets); if (ay !== null) this.yaw = ay;
