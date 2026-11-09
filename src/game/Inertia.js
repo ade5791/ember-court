@@ -116,11 +116,18 @@ export class Inertializer {
     if (this.springOn) {
       const u = deadline < 0.1 ? deadline / 0.1 : 1, g = u * u * (3 - 2 * u);
       const PM = this.plantClips && this.plantClips.has(clip) ? this.plantMask : null;
+      // These contact-IK clips have an eight-frame unplanted entry. Skipping
+      // their legs immediately snapped the old stance into the next step.
+      // Settle the offset before the FIRST contact, not after it: all planted
+      // samples and sim-owned root curves remain exactly as baked.
+      const pu = Math.max(0, Math.min(1, time / (8 / 60)));
+      const plantW = 1 - pu * pu * (3 - 2 * pu);
       for (let i = 0; i < n; i++) {
-        if (PM && PM[i]) continue;
+        const w = g * (PM && PM[i] ? plantW : 1);
+        if (w <= 0) continue;
         const b = B[i], k = i * 3;
-        qexp(XR, k, g, _o); b.quaternion.premultiply(_o);
-        b.position.x += XP[k] * g; b.position.y += XP[k + 1] * g; b.position.z += XP[k + 2] * g;
+        qexp(XR, k, w, _o); b.quaternion.premultiply(_o);
+        b.position.x += XP[k] * w; b.position.y += XP[k + 1] * w; b.position.z += XP[k + 2] * w;
       }
     }
     if (this.has) { PLQ.set(LQ); PLP.set(LP); this.hasPrev = true; }

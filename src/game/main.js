@@ -144,7 +144,9 @@ progress(0.35);
 // ------------------------------------------------------------------ actors
 const loader = new GLTFLoader();
 const [heroGltf, enemyGltf, bossGltf, bossManifest, timing, heroCombat, heroLunge, gauntletGltf, gauntletManifest, heroAttacks] = await Promise.all([
-  loader.loadAsync(ROOT + 'characters/hero/out/' + (qs.get('var') === '0' ? 'character_v222.glb' : 'character_v232.glb')),   // v2.22 gs set + gs_sweep / gs_sweep_rev / gs_rift; v2.32 adds gs_l1a..gs_l3c
+  // v2.33 character_v233 = v232 with the crotch cloak panel reweighted (skin weights only, mesh/bones/clips identical):
+  // great-sword panel stretch 21% -> 8% of edges over 30%. ?cloak=0 loads the v232 weights to compare.
+  loader.loadAsync(ROOT + 'characters/hero/out/' + (qs.get('var') === '0' ? 'character_v222.glb' : qs.get('cloak') === '0' ? 'character_v232.glb' : 'character_v233.glb')),   // v2.22 gs set + gs_sweep / gs_sweep_rev / gs_rift; v2.32 adds gs_l1a..gs_l3c
   loader.loadAsync(ROOT + 'characters/enemy/out/character.glb'),
   loader.loadAsync(ROOT + 'characters/boss/wyvern.glb'),
   fetch(ROOT + 'characters/boss/wyvern.manifest.json').then((r) => r.json()),
@@ -495,6 +497,19 @@ function staticArmClip(name, srcName, f) {
 }
 staticArmClip('gs_carry', 'gs_overhead', 0);
 staticArmClip('gs_drag', GS_DRAG.clip, GS_DRAG.f);
+// One continuous carry track avoids PropertyMixer changing quaternion blend
+// hemispheres as two dominant static arm layers exchange their weights.
+{
+  const ready = mbClips.find((c) => c.name === 'gs_carry');
+  const drag = mbClips.find((c) => c.name === 'gs_drag');
+  if (ready && drag) {
+    const tracks = ready.tracks.map((t) => {
+      const d = drag.tracks.find((k) => k.name === t.name);
+      return new THREE.QuaternionKeyframeTrack(t.name, [0, 1], [...t.values.slice(0, 4), ...d.values.slice(0, 4)]);
+    });
+    mbClips.push(new THREE.AnimationClip('gs_carry_move', 1, tracks));
+  }
+}
 // v2.22 layered attacks (MotionBricks contact-IK lower body + Blender-authored two-handed upper body), full skeleton
 // at 60 Hz. Hips.position carries the bake's vertical only (rootXZ is applied by the sim via src/shared/attackFoot.js,
 // so the bones carry no XZ travel). Every track must resolve, else the clip is dropped and the verb uses its gs_* clip.
@@ -519,7 +534,13 @@ if (heroAttacks && heroAttacks.clips) {
     const c = heroAttacks.clips[name], F = c.frames, fps = c.fps || 60;
     const times = Float32Array.from({ length: F }, (_, i) => i / fps), tracks = [];
     let bad = 0;
-    for (const b in c.tracks) { if (!bn[b]) { bad++; continue; } tracks.push(new THREE.QuaternionKeyframeTrack(b + '.quaternion', times, c.tracks[b])); }
+    for (const b in c.tracks) {
+      if (!bn[b]) { bad++; continue; }
+      // Remove single-frame capture/retarget kinks in dance upper bodies at
+      // load time only. The contact-IK hips, feet and sim root stay untouched.
+      const soften = qs.get('feel') !== '0' && DANCE_CLIPS.includes(name) && b !== 'Hips' && !LUNGE_BONES.includes(b);
+      tracks.push(new THREE.QuaternionKeyframeTrack(b + '.quaternion', times, soften ? gaussQuat(c.tracks[b], F, 1.2) : c.tracks[b]));
+    }
     if (c.hipsPos) tracks.push(new THREE.VectorKeyframeTrack('Hips.position', times, c.hipsPos));   // XZ already 0 in the bake
     if (bad || !bn.Hips) { console.warn('v222 attack clip dropped (unresolved tracks):', name, bad); continue; }
     mbClips.push(new THREE.AnimationClip(name, (F - 1) / fps, tracks)); AT_OK[name] = (F - 1) / fps;
@@ -1675,7 +1696,10 @@ HB.sp = heroBones.Spine;
 // the active window (sign learned per verb), so the layer always amplifies the authored arc instead of fighting it.
 const swing = { sign: { LIGHT_1: 0, LIGHT_2: 0, LIGHT_3: 0, HEAVY: 0 }, lat: 0, acc: 0, aid: -1, learned: false };
 function swingDrive(dt, fx_, fz_) {
-  if (H.state !== HERO_STATE.ACTION || H.charging || !(H.verb in swing.sign)) { swing.aid = -1; return; }
+  // Full-body authored arcs already coil and release. A sign learned from the
+  // previous variant can oppose the next cut, so do not add a second drive.
+  if (H.state !== HERO_STATE.ACTION || H.charging || !(H.verb in swing.sign) ||
+      (qs.get('feel') !== '0' && heroLightVar())) { swing.aid = -1; return; }
   const v = H.verbs[H.verb], a = v.startup, e = v.startup + v.active, f = H.actF;
   heroSword.tip.getWorldPosition(_b);
   const lat = (_b.x - hero.root.position.x) * -fz_ + (_b.z - hero.root.position.z) * fx_;   // + = hero's right
@@ -1874,6 +1898,20 @@ const _ga = new THREE.Vector3(), _gb = new THREE.Vector3(), _gc = new THREE.Vect
 const _gd = new THREE.Vector3(), _gp = new THREE.Vector3(), _gu = new THREE.Vector3(), _gv = new THREE.Vector3();
 const _gq = new THREE.Quaternion(), _gq2 = new THREE.Quaternion(), _gq3 = new THREE.Quaternion();
 const _gw = new THREE.Vector3(), _gx = new THREE.Vector3();
+// Transport the solved elbow and arm frames, rather than re-solving a shortest
+// arc from a fresh authored pose each frame (singular on rising cuts).
+const GRIP_STABLE = qs.get('gripstable') !== '0';
+const gripFrame = { valid: false, dir: new THREE.Vector3(), pole: new THREE.Vector3(),
+  arm: new THREE.Quaternion(), fore: new THREE.Quaternion() };
+const _gfq = new THREE.Quaternion(), _gfp = new THREE.Vector3();
+function alignGripFrame(b, child, target, previous) {
+  _gfq.copy(previous);
+  _gu.copy(child.position).applyQuaternion(_gfq).normalize();
+  _gv.copy(target).normalize();
+  _gq.setFromUnitVectors(_gu, _gv); _gfq.premultiply(_gq);
+  b.parent.getWorldQuaternion(_gq2);
+  b.quaternion.copy(_gq2.invert().multiply(_gfq)); b.updateMatrixWorld(true);
+}
 // v2.22 blade floor guard (presentation only, ?tipguard=0 disables): the low sweeps and the rift finale carry the
 // 1.6 m great-sword tip to within a few cm of the ground, and the hips drop of the planted-foot bake can push it under.
 // If the tip is below TIP_CLEAR the socket is pitched about the right fist by exactly the angle that lifts it back
@@ -1928,7 +1966,8 @@ function leftGripIK(dt) {
   const free = H.state === HERO_STATE.DEAD || H.state === HERO_STATE.DODGE || H.state === HERO_STATE.HITSTUN;
   const want = GRIP_ON && GRIP.on && H.weapon >= 1 && !free ? 1 : 0;
   GRIP.w = dt > 0 ? GRIP.w + (want - GRIP.w) * Math.min(1, dt * (want ? 14 : 4)) : GRIP.w;
-  if (GRIP.w < 1e-3) return;
+  if (GRIP.w < 1e-3) { gripFrame.valid = false; return; }
+  const stable = GRIP_STABLE && dt > 0 && gripFrame.valid;
   const A = heroBones.LeftArm, F = heroBones.LeftForeArm, Hd = heroBones.LeftHand, S = heroBones.LeftShoulder;
   hero.model.updateMatrixWorld(true);
   A.getWorldPosition(_ga); F.getWorldPosition(_gb); Hd.getWorldPosition(_gc);
@@ -1975,15 +2014,34 @@ function leftGripIK(dt) {
   }
   _gd.subVectors(_gt, _ga); let d = _gd.length(); const reach = (l1 + l2) * 0.999;
   const far = d > reach; d = Math.max(Math.abs(l1 - l2) + 1e-3, Math.min(reach, d)); _gd.normalize();
-  // elbow pole: hero's left and down, a little behind
-  const fx_ = H.facingX(), fz_ = H.facingZ();
-  _gp.set(fz_ * 0.6 - fx_ * 0.2, -0.8, -fx_ * 0.6 - fz_ * 0.2);
-  _gp.addScaledVector(_gd, -_gp.dot(_gd)); if (_gp.lengthSq() < 1e-6) _gp.set(0, -1, 0); _gp.normalize();
+  // Preserve the authored elbow plane. A fixed world-space pole flipped
+  // when a rising cut crossed it, undoing the continuous baked arm solve.
+  _gp.subVectors(_gb, _ga).addScaledVector(_gd, -_gp.dot(_gd));
+  if (_gp.lengthSq() < 1e-6) {
+    const fx_ = H.facingX(), fz_ = H.facingZ();
+    _gp.set(fz_ * 0.6 - fx_ * 0.2, -0.8, -fx_ * 0.6 - fz_ * 0.2);
+    _gp.addScaledVector(_gd, -_gp.dot(_gd));
+  }
+  if (_gp.lengthSq() < 1e-8) _gp.set(0, 0, 1).addScaledVector(_gd, -_gd.z);
+  _gp.normalize();
+  if (stable) {
+    _gq.setFromUnitVectors(gripFrame.dir, _gd);
+    _gfp.copy(gripFrame.pole).applyQuaternion(_gq);
+    _gfp.addScaledVector(_gd, -_gfp.dot(_gd)).normalize();
+    if (_gfp.dot(_gp) < 0) _gp.negate();
+    _gp.lerp(_gfp, Math.exp(-dt / 0.12)).normalize();
+  }
   const cosA = Math.max(-1, Math.min(1, (l1 * l1 + d * d - l2 * l2) / (2 * l1 * d))), sinA = Math.sqrt(1 - cosA * cosA);
   _ge.copy(_ga).addScaledVector(_gd, l1 * cosA).addScaledVector(_gp, l1 * sinA);
-  _gu.subVectors(_gb, _ga); _gv.subVectors(_ge, _ga); alignBone(A, _gu, _gv);
+  _gu.subVectors(_gb, _ga); _gv.subVectors(_ge, _ga);
+  if (stable) alignGripFrame(A, F, _gv, gripFrame.arm); else alignBone(A, _gu, _gv);
   F.getWorldPosition(_gb); Hd.getWorldPosition(_gc);
-  _gu.subVectors(_gc, _gb); _gv.subVectors(_gt, _gb); alignBone(F, _gu, _gv);
+  _gu.subVectors(_gc, _gb); _gv.subVectors(_gt, _gb);
+  if (stable) alignGripFrame(F, Hd, _gv, gripFrame.fore); else alignBone(F, _gu, _gv);
+  if (dt > 0) {
+    gripFrame.dir.copy(_gd); gripFrame.pole.copy(_gp);
+    A.getWorldQuaternion(gripFrame.arm); F.getWorldQuaternion(gripFrame.fore); gripFrame.valid = true;
+  }
   // hand orientation: measured grip rotation relative to the socket, slerped by the blend weight
   heroGreat.socket.getWorldQuaternion(_gq); _gq.multiply(GRIP.q);
   Hd.parent.getWorldQuaternion(_gq2); _gq2.invert().multiply(_gq);
@@ -2022,7 +2080,10 @@ const GS_HOLD_F = 20, GS_HOLD_TAIL = 30, GS_DRAG_W = 12;
 let gsDragW = 0;
 const GS_DRAG_ON = qs.get('gsdrag') !== '0';   // ?gsdrag=0: v2.29 ready carry while moving (A/B)   // weight of gs_drag in this frame's hero pose (tip floor post-pass runs only when > 0)
 function gsHoldW(v) {
-  if (H.weapon < 1 || v.dance || !hero.actions.gs_drag) return 0;
+  // Authored light variants already contain a complete recovery to ready.
+  // A weight-12 static drag pose here overwhelmed that follow-through and
+  // flipped wrists across the quaternion blend hemisphere in mid-recovery.
+  if (H.weapon < 1 || v.dance || heroLightVar() || !hero.actions.gs_drag) return 0;
   const tot = v.total || 0; if (!tot) return 0;
   const k = Math.min(1, Math.max(0, (H.actF - (tot - GS_HOLD_F)) / GS_HOLD_F));
   if (k > 0) loco.gsHoldEnd = H.frame + GS_HOLD_TAIL;
@@ -2115,8 +2176,8 @@ function poseHeroBase(alpha, presentDt) {
   if (carry && hero.actions.gs_drag && GS_DRAG_ON) {
     const tail = Math.min(1, Math.max(0, ((loco.gsHoldEnd || 0) - H.frame) / GS_HOLD_TAIL));
     const m = Math.max(Math.min(1, Math.max(0, (sp - 0.6) / (SIM.WALK_SPEED - 0.6 + 1e-6))), tail * tail * (3 - 2 * tail));
-    pose(hero, 5, 'idle', 1 - wMove, (H.frame / 60) % hero.dur.idle, 'walk', wMove * (1 - wRun), loco.phase * hero.dur.walk,
-      'run', wMove * wRun, loco.phase * hero.dur.run, 'gs_carry', carry * (1 - m), 0, 'gs_drag', carry * m, 0);
+    pose(hero, 4, 'idle', 1 - wMove, (H.frame / 60) % hero.dur.idle, 'walk', wMove * (1 - wRun), loco.phase * hero.dur.walk,
+      'run', wMove * wRun, loco.phase * hero.dur.run, 'gs_carry_move', carry, Math.min(0.999, m));
     gsDragW = carry * m;
   } else {
     pose(hero, carry ? 4 : 3, 'idle', 1 - wMove, (H.frame / 60) % hero.dur.idle,
@@ -2563,6 +2624,7 @@ document.addEventListener('pointerlockchange', onLockLost);
 // toward the respawned hero, and mouse look stays dead because the end screen released pointer lock.
 function resetPresentation() {
   loop.clearDilation(); loop.accumulator = 0;
+  gripFrame.valid = false; GRIP.w = 0;
   prev.hx = H.x; prev.hz = H.z; prev.hy = H.y; prev.hyaw = H.yaw; prev.pdx = H.plantDX; prev.pdz = H.plantDZ;
   const B = sim.brain; prev.bx = B.x; prev.by = B.y; prev.bz = B.z; prev.byaw = B.yaw;
   loco.lastX = H.x; loco.lastZ = H.z; loco.phase = 0;
@@ -2726,6 +2788,30 @@ window.__ember = {
       verb: sim.brain.verb, f: sim.brain.f, state: sim.brain.state, stance: sim.brain.stance, y: +sim.brain.y.toFixed(2) };
   },
   programs() { return { start: progStart, now: renderer.info.programs.length }; },
+  // QA (v2.33): skinned edge strain of the hero in the CURRENT engine pose (all IK / inertia layers applied).
+  // pairs = flat [a0, b0, a1, b1, ...] vertex indices; returns the fraction of pairs stretched more than thr.
+  get __hero() { return hero; },
+  dbgStrain(pairs, thr = 0.3) {
+    let sk = null; hero.model.traverse((o) => { if (!sk && o.isSkinnedMesh) sk = o; });
+    if (!sk) return null;
+    hero.model.updateMatrixWorld(true); sk.skeleton.update();
+    const pos = sk.geometry.attributes.position, a = new THREE.Vector3(), b = new THREE.Vector3(), a0 = new THREE.Vector3(), b0 = new THREE.Vector3();
+    // glTF skinning ignores the mesh node transform: world = sum(w * jointWorld * IBM) * p, with p in metres.
+    // getVertexPosition returns that through the attached-mode bindMatrixInverse (= mesh world^-1, which holds the
+    // armature's 0.01 scale), so map it back to world with sk.matrixWorld. k = the actor root's uniform world scale
+    // (scale of the Hips skin matrix, 1 at bind), divided out so only skinning strain remains.
+    const hi = sk.skeleton.bones.findIndex((x) => x.name === 'Hips');
+    const Ms = new THREE.Matrix4().multiplyMatrices(sk.skeleton.bones[hi].matrixWorld, sk.skeleton.boneInverses[hi]);
+    const k = new THREE.Vector3().setFromMatrixScale(Ms).x;
+    let over = 0, max = 0;
+    for (let i = 0; i < pairs.length; i += 2) {
+      a0.fromBufferAttribute(pos, pairs[i]); b0.fromBufferAttribute(pos, pairs[i + 1]);
+      const L0 = a0.distanceTo(b0); if (L0 < 1e-9) continue;
+      sk.getVertexPosition(pairs[i], a).applyMatrix4(sk.matrixWorld); sk.getVertexPosition(pairs[i + 1], b).applyMatrix4(sk.matrixWorld);
+      const s = a.distanceTo(b) / (k * L0) - 1; if (s > thr) over++; if (s > max) max = s;
+    }
+    return { frac: over / (pairs.length / 2), max: +max.toFixed(3), n: pairs.length / 2, k: +k.toFixed(4) };
+  },
   // QA (v2.19): finish the current boss through its own damage path so LOOT / road map flow can be reviewed fast
   qaKillBoss() {
     if (sim.state === GameState.STAGE2 && sim.warden) { sim.warden.hp = 1; sim.warden.onHeroHit(H, { name: 'HEAVY', dmg: 999, posture: 0 }); return 'warden'; }
