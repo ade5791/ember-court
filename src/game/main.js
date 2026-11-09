@@ -33,7 +33,7 @@ import { RoadMap } from '../ui/RoadMap.js';
 import { RoadStage } from '../world/RoadStage.js';
 import { makeRoadEnvironment, setRoadLook, roadSunDir, ROAD_LOOK } from '../render/RoadLook.js';
 import { ROAD, ROAD_AMBUSH, roadX, makeRoadDoc } from '../shared/road.js';
-import { HERO_DODGE, HERO_FINISHER_F, HERO_FINISHER_CLIP, STEP_DIR, STEP_CLIP, HERO_CHARGE, GREATSWORD, scalePhases, HERO_SNATCH, HERO_TRIGGER, HERO_RIFT, WEAPONS, HERO_SWEEP, GREAT_NO_EVADE, setAttackSteer, GS_COIL, HERO_GREAT_X, greatPhases } from './HeroSim.js';
+import { HERO_DODGE, HERO_FINISHER_F, HERO_FINISHER_CLIP, STEP_DIR, STEP_CLIP, HERO_CHARGE, GREATSWORD, scalePhases, HERO_SNATCH, HERO_TRIGGER, HERO_RIFT, WEAPONS, HERO_SWEEP, GREAT_NO_EVADE, setAttackSteer, GS_COIL, HERO_GREAT_X, greatPhases, HERO_FLASH, setFlow } from './HeroSim.js';
 import { STYLE_RANKS, STYLE_TITLES } from './StyleMeter.js';
 const SNATCH_SPAN = HERO_SNATCH.STARTUP + HERO_SNATCH.TRAVEL_MAX + HERO_SNATCH.RECOVER;
 import { buildQuickstep, quickstepClipTime } from '../shared/quickstep.js';
@@ -50,6 +50,7 @@ import { loadWeaponMeshes, fitWeapon, dressRig } from './WeaponMeshes.js';
 const ROOT = new URL('../../', import.meta.url).href;      // site root (works under a GitHub Pages sub-path)
 const qs = new URLSearchParams(location.search);
 if (qs.get('steer') === '0') setAttackSteer(false);   // v2.29 attack aim + move-cancel (on by default)
+if (qs.get('flow') === '0') setFlow(false);           // v2.34 flash step + looser attack steer (on by default)
 const quality = resolveQuality(qs.get('q') || (matchMedia('(pointer: coarse)').matches ? 'medium' : 'high'));
 const seed = Number(qs.get('seed') || SIM.SEED_DEFAULT) >>> 0;
 const reducedMotion = qs.get('rm') === '1' || matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -1591,6 +1592,8 @@ function dmcLayer(dt) {
   const gy = colliders.terrainY(H.z);
   // snatch start: a red flare at the hero, afterimage streak every 3 sim frames through the travel window
   if (H.snatches !== dmc.snatch) { dmc.snatch = H.snatches; _dp.set(H.x, gy + 1.0, H.z); fx.flare(_dp, 0.7, DMC.RED); }
+  // v2.34 flash step: warm afterimage streak every 2 sim frames through the dash (presentation only)
+  if (!reducedMotion && H.flashF > HERO_FLASH.STARTUP && (H.flashF % 2) === 0 && dmc.flashGhostF !== sim.frame) { dmc.flashGhostF = sim.frame; fx.afterimage(HERO_ID, 0xffb050, 0.6); }
   if (H.state === HERO_STATE.SNATCH) {
     const tf = H.snatchF - HERO_SNATCH.STARTUP;
     if (!reducedMotion && tf >= 0 && tf <= HERO_SNATCH.TRAVEL_MAX && (tf % 3) === 0 && dmc.ghostF !== sim.frame) { dmc.ghostF = sim.frame; fx.afterimage(HERO_ID, DMC.RED, 0.7); }
@@ -2093,6 +2096,14 @@ function poseHeroBase(alpha, presentDt) {
   const st = H.state; gsDragW = 0;
   if (st === HERO_STATE.ACTION) {
     const v = H.verbs[H.verb], hw = gsHoldW(v); gsDragW = hw;
+    if (H.flashF >= 0) {
+      // v2.34 flash step: lunge footwork through the dash (same read as the snatch pull), strike starts on arrival
+      const ln = hero.actions.lunge_m ? 'lunge_m' : hero.actions.lunge_h ? 'lunge_h' : null;
+      const u = Math.min(1, (H.flashF + alpha) / (HERO_FLASH.STARTUP + HERO_FLASH.TRAVEL_MAX));
+      if (ln) pose(hero, 1, ln, 1, u * (hero.actions[ln].getClip().duration - 0.01));
+      else pose(hero, 1, 'dodge', 1, u * hero.dur.dodge * 0.8);
+      return;
+    }
     if (v.sweep || (v.dance && AT_OK[v.foot] !== undefined)) {
       // v2.22 sweep / v2.27 dance step: the layered clip at the sim frame, 1:1 (the sim walks the same root curve,
       // feet stay planted)
@@ -2773,6 +2784,7 @@ if (recMode) setTimeout(() => { if (sim.state === GameState.TITLE) { sim.start()
 
 window.__ember = {
   ready: true, seed, quality: quality.name, loadMs, credit, bot: useBot,
+  flashStep() { return { on: HERO_FLASH.on, flashes: H.flashes, flashF: H.flashF, actF: H.actF, st: H.state, duel: sim.duelists.map((d) => [+d.x.toFixed(2), +d.z.toFixed(2), d.hp, d.alive]), hp: H.hp, stamina: H.stamina }; },
   heroActs() { return hero.on.map((a) => [a.getClip().name, +a.getEffectiveWeight().toFixed(2), +a.time.toFixed(2)]).concat([['deflectF', H.deflectF], ['block', H.blocking], ['cine', cam.cineKind || '']]); },
   dbgOcc() { const o = cam.occluder.position, r = (v) => +v.toFixed(2);
     return { o: [r(o.x), r(o.y), r(o.z)], cam: [r(camera.position.x), r(camera.position.y), r(camera.position.z)], hero: [r(H.x), r(H.y), r(H.z)],

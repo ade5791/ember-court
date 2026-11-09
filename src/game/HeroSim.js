@@ -162,6 +162,16 @@ export const GREAT_NO_EVADE = true;
 //  Off with ?steer=0 (setAttackSteer(false)); the 10-press combo strings are unaffected (a buffered press wins).
 export const ATTACK_STEER = { on: true, STICK: 0.35, AIM_RATE: 0.55, AIM_MAX: 0.70, MOVE_AFTER: 6, MOVE_AFTER_GREAT: 14 };
 export function setAttackSteer(on) { ATTACK_STEER.on = !!on; }
+// v2.34 FLOW (feel pass: "attacks feel stiff, not agile"). One-handed blades only (two-handers stay planted).
+//  FLASH STEP: an attack pressed at a foe ahead that is out of reach (reach + MIN_EXTRA .. RANGE) dashes in along
+//    the lunge clip (afterimages in main.js) and lands the strike on arrival. Works as an opener and inside a combo
+//    chain, so a string flows from foe to foe. Same frame data for the strike itself; the dash adds STAMINA.
+//  Steering: wider / faster aim during startup, earlier move-cancel out of recovery.
+//  ?flow=0 (setFlow(false)) restores v2.33 exactly.
+export const HERO_FLASH = { on: true, MIN_EXTRA: 0.9, RANGE: 6.5, CONE: 0.5, STARTUP: 2, TRAVEL_MAX: 12, SPEED: 0.42, STAMINA: 6, STOP_K: 0.7 };
+const STEER_V233 = { AIM_RATE: 0.55, AIM_MAX: 0.70, MOVE_AFTER: 6 }, STEER_FLOW = { AIM_RATE: 0.9, AIM_MAX: 1.25, MOVE_AFTER: 3 };
+export function setFlow(on) { HERO_FLASH.on = !!on; Object.assign(ATTACK_STEER, on ? STEER_FLOW : STEER_V233); }
+setFlow(true);
 export const STEP_CLIP = Object.freeze(['dodge', 'dodge_F', 'dodge_B', 'dodge_L', 'dodge_R']);
 export const HERO_FINISHER_F = 96;          // matches the boss finisher length (WyvernBrain FINISHER_F)
 // Finisher presentation: Sword Judgment (clip 102). Blade lands on clip frame 62, the boss takes the blow on sim
@@ -292,6 +302,7 @@ export class HeroSim {
     if (this.lockW > 0) { this.weapon = this.lockW; this.wp = WEAPONS[this.lockW]; this.verbs = this.verbsGreat; }   // v2.24 signature two-hander
     // DMC layer
     this.snatchF = -1; this.snatchT = null; this.snatchCd = 0; this.snatchX = 0; this.snatchZ = 0; this.snatches = 0;
+    this.flashF = -1; this.flashT = null; this.flashes = 0; this.flashStop = 0;
     this.gauge = 0; this.triggerF = 0; this.triggers = 0; this.burstF = -1; this.burstHit = false;
     this.riftF = -1; this.rifts = 0; this.riftCuts = 0; this.riftHits = 0;
   }
@@ -436,6 +447,8 @@ export class HeroSim {
     this.charging = name === 'HEAVY'; this.chargeF = 0; this.chargeLvl = 0;
     const ay = this._assistYaw(targets); if (ay !== null) this.yaw = ay;
     this.footYaw0 = this.yaw; this.aimAcc = 0; this.aimFree = ay === null;
+    this.flashF = -1; this.flashT = null;
+    if (HERO_FLASH.on && !this.wp && !v.sweep && !v.leap) this._tryFlash(v, targets);
     if (v.sweep) { this.sweeps++; this._event('sweep'); }
     if (v.leap) {
       // leap length: full travel in the open, shortened so the chop lands at reach on the nearest foe ahead
@@ -445,6 +458,30 @@ export class HeroSim {
         near = Math.min(near, d - (t.radius || 0) - this.radius); }
       this.leapDist = Math.max(0, Math.min(v.leap.travel, near - v.reach * 0.75)); this.leaps++; this._event('leap');
     }
+    return true;
+  }
+
+  // v2.34 flash step: pick the nearest foe in front (stick direction if pushed, else facing) that is beyond strike
+  // reach but inside HERO_FLASH.RANGE; the verb waits at frame 0 while the hero dashes to it (ACTION case).
+  _tryFlash(v, targets) {
+    const F = HERO_FLASH; if (!targets) return false;
+    const fx = this.facingX(), fz = this.facingZ();
+    let best = null, bd = F.RANGE;
+    const near = (v.reach || 1.35) + F.MIN_EXTRA;
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i]; if (!t || !t.targetable) continue;
+      const dx = t.x - this.x, dz = t.z - this.z, d = Math.hypot(dx, dz), edge = d - (t.radius || 0);
+      if (edge < near) return false;            // a foe is already close: strike it, never dash away from it
+      if (edge >= bd || d < 1e-3) continue;
+      if ((dx * fx + dz * fz) / d < F.CONE) continue;
+      bd = edge; best = t;
+    }
+    if (!best || this.stamina < F.STAMINA) return false;
+    this.stamina = Math.max(0, this.stamina - F.STAMINA);
+    this.flashF = 0; this.flashT = best; this.flashes++; this.aimFree = false;
+    this.flashStop = (best.radius || 0) + this.radius + (v.reach || 1.35) * F.STOP_K;
+    this.yaw = Math.atan2(-(best.x - this.x), -(best.z - this.z)); this.footYaw0 = this.yaw;
+    this._event('flash');
     return true;
   }
 
@@ -591,6 +628,19 @@ export class HeroSim {
 
       case HERO_STATE.ACTION: {
         const v = this.verbs[this.verb];
+        // v2.34 flash step: dash to the foe, then the strike starts at frame 0 on arrival (frame data unchanged)
+        if (this.flashF >= 0) {
+          const F = HERO_FLASH, t = this.flashT; this.flashF++;
+          if ((cmd.dodge || cmd.roll) && !(this.wp && GREAT_NO_EVADE)) { this.flashF = -1; this.flashT = null; this.state = HERO_STATE.LOCO; this._startDodge(cmd, targets, cmd.roll); break; }
+          let done = !t || !t.targetable || this.flashF > F.STARTUP + F.TRAVEL_MAX;
+          if (!done && this.flashF > F.STARTUP) {
+            const dx = t.x - this.x, dz = t.z - this.z, d = Math.hypot(dx, dz), left = d - this.flashStop;
+            if (left <= 0.02) done = true;
+            else { const s = Math.min(F.SPEED, left); mx = dx / d * s; mz = dz / d * s; this.yaw = Math.atan2(-dx, -dz); if (left <= F.SPEED) done = true; }
+          } else if (!done && t) this.yaw = Math.atan2(-(t.x - this.x), -(t.z - this.z));
+          if (done) { this.flashF = -1; this.flashT = null; this.footYaw0 = this.yaw; this.actF = 0; this._event('flash_land'); }
+          break;
+        }
         // charged heavy: hold at the top of the wind-up while the button is held (tracks the target, no lunge)
         if (this.charging) {
           const holdAt = v.startup - HERO_CHARGE.HOLD_F;
@@ -728,7 +778,7 @@ export class HeroSim {
     // footwork clips (sweep / rift plant): never step INTO a body already in contact (the boss would shove the
     // planted hero back out and the feet would skate). The contact signal is the body push itself (this frame's,
     // or last frame's if the pusher updates after us); the normal is held 8 frames so the step cannot alternate.
-    const planted = this.state === HERO_STATE.ACTION && this.verbs[this.verb] && this.verbs[this.verb].foot || (this.state === HERO_STATE.RIFT && !!this.wp);
+    const planted = this.state === HERO_STATE.ACTION && this.flashF < 0 && this.verbs[this.verb] && this.verbs[this.verb].foot || (this.state === HERO_STATE.RIFT && !!this.wp);
     const cmx = mx, cmz = mz;   // the authored root-curve step, before the contact guard / body push / walls
     if (planted) {
       const px = this.pushX || (this._lpF > 0 ? this._lpx : 0), pz = this.pushZ || (this._lpF > 0 ? this._lpz : 0), pl = Math.hypot(px, pz);
