@@ -46,6 +46,7 @@ import { GAUNTLET } from '../shared/constants.js';
 import { G_STATE } from '../boss/GauntletBrain.js';
 import { makeRetargeter } from './Retarget.js';
 import { loadWeaponMeshes, fitWeapon, dressRig } from './WeaponMeshes.js';
+import { Choreo } from './Choreo.js';
 
 const ROOT = new URL('../../', import.meta.url).href;      // site root (works under a GitHub Pages sub-path)
 const qs = new URLSearchParams(location.search);
@@ -1276,7 +1277,7 @@ const botDmc = recMode || qs.get('dmc') === '1';
 const botSweep = qs.get('sweep') === '1';   // v2.22 QA: the bot opens every third swing with a sweep (great sword only)
 if (useBot) {
   const prevT = sim.onTelegraph, prevD = sim.onDuelistTelegraph;
-  sim.onTelegraph = (v, art, lead) => { prevT(v, art, lead); const ok = botRng.float() < 0.85 || DANCE;   // dance takes: every parry lands
+  sim.onTelegraph = (v, art, lead) => { prevT(v, art, lead); if (choreo) choreo.onTelegraph(lead); const ok = botRng.float() < 0.85 || DANCE;   // dance takes: every parry lands
     if (art === ART.NORMAL) { bot.at = sim.frame + lead - (ok ? 3 : 7); bot.kind = 1; } else { bot.at = sim.frame + lead - (ok ? 5 : 11); bot.kind = art === ART.BLUE ? 3 : 2; } };
   // red warden charge: the bot dodges it (kind 2 = sidestep), everything else it deflects
   sim.onDuelistTelegraph = (d, v) => { prevD(d, v); const ok = botRng.float() < 0.85 || DANCE;   // dance takes: every parry lands
@@ -1419,11 +1420,13 @@ function comboPress(c) {
 }
 const VERB_IDX = { LIGHT_1: 1, LIGHT_2: 2, LIGHT_3: 3, HEAVY: 4, SWEEP: 5, SWEEP_REV: 6, D_L1: 7, D_L2: 8, D_L3: 9, D_L4: 10, D_L5: 11, D_H1: 12, D_H2: 13, WAVE: 14, LEAP: 15 };
 let qaPress = null;
+let choreo = null;   // film v14 scripted-fight player (recording only, built by __ember.choreo)
 function fillCommand() {
   const c = sim.cmd;
   c.mx = 0; c.mz = 0; c.speed = 0; c.attack = false; c.heavy = false; c.heavyHeld = false; c.dodge = false; c.roll = false; c.blockHeld = false; c.blockPress = false;
   c.snatch = false; c.trigger = false; c.sweep = false;
   if (qaPress) { c[qaPress] = true; qaPress = null; return; }   // QA one-shot press (__ember.press), deterministic review states
+  if (choreo && choreo.steps) { if (choreo.active) choreo.fill(c); return; }   // scripted take: the beat sheet owns the command
   if (useBot) { botCommand(c); return; }
   input.moveIntent(camYaw, _move);
   const mag = input.moveMagnitude;
@@ -2570,6 +2573,7 @@ function update(realDt, alpha, presentDt, noRender = false) {
   wasFinisher = fin;
   letterbox(Math.max(cam.cineActive ? cam.cineLb : 0, reducedMotion ? 0 : dmc.riftLb * 0.6));
   cam.update(presentDt);
+  if (choreo && choreo.shot) choreo.applyCam(camera, presentDt, hero.root.position, boss.root.position, cam.cineActive);
   camera.getWorldDirection(_dir); camYaw = Math.atan2(-_dir.x, -_dir.z);
   placeFill();
   fx.update(presentDt);
@@ -3067,6 +3071,15 @@ window.__ember = {
       out.push([f, +(f ? p.distanceTo(q) * 60 : 0).toFixed(2), +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)]); q.copy(p); }
     hero.root.position.copy(r0); return out;
   },
+  // film v14: play a written fight. sheet = { steps: [...] } (see src/game/Choreo.js). Boss arena only.
+  choreo(sheet) {
+    if (!choreo) choreo = new Choreo({ H, sim, HS: HERO_STATE, BS: BRAIN_STATE, BossVerb, RUN: SIM.RUN_SPEED, WALK: SIM.WALK_SPEED, STAM: SIM.STAMINA_MAX,
+      bossR: BOSS.BODY_RADIUS, DODGE_CANCEL: HERO_DODGE.cancelFrom, ty: (z) => colliders.terrainY(z), clip: () => hero.pc, cine: () => cam.cineActive, clear: (x, y, z) => colliders.clearance(x, y, z), hitI: () => colliders.hit.index, coll: () => { const C = colliders, o = []; for (let i = 0; i < C.count; i++) o.push([i, C.kind[i], +C.cx[i].toFixed(1), +C.cz[i].toFixed(1), +C.hx[i].toFixed(2), +C.hz[i].toFixed(2), +C.cy[i].toFixed(1), +C.hy[i].toFixed(1)]); return o; }, ...(() => { const E = Object.entries(bossBones).filter(([, o]) => o && o.matrixWorld), v = E.map(() => new THREE.Vector3());
+        return { occN: E.map(([k]) => k), occR: E.map(([k]) => /spine/i.test(k) ? 1.5 : /neck|head|pelvis|hip/i.test(k) ? 0.8 : 0.5),
+          occ: () => { for (let i = 0; i < E.length; i++) v[i].setFromMatrixPosition(E[i][1].matrixWorld); return v; } }; })() });
+    sim.pickup.active = false; return choreo.load(sheet);
+  },
+  choreoReport() { return choreo ? choreo.report() : null; },
   forceBossVerb(name) { const v = BossVerb[name]; if (v === undefined) return false; sim.brain.forceNext = v; return true; },
   advance(n = 1) { for (let i = 0; i < n; i++) { loop.advance(1 / 60); } return { state: GAME_STATE_NAMES[sim.state], frame: sim.frame, cine: CINE_NAMES[cam.cineKind],
     // recorder beat log: rifts, triggers, finishers, perfect deflects, hero state, time scale

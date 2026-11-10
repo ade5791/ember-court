@@ -381,6 +381,8 @@ export class HeroSim {
   // equip a two-hander by id; refuses anything not better than what is held (drops only upgrade)
   equip(w) {
     if (!(w > this.weapon) || !WEAPONS[w] || (this.lockW >= 0 && w !== this.lockW)) return false;
+    // v2.35: a one-hand dance verb has no two-hand frame data - finish the swing first, the pickup waits a few frames
+    if (this.state === HERO_STATE.ACTION && !this.verbsGreat[this.verb]) return false;
     this.weapon = w; this.wp = WEAPONS[w]; this.verbs = this.verbsGreat; this._event('equip'); return true;
   }
 
