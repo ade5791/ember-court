@@ -1,7 +1,7 @@
 // Choreo.js - scripted-fight player (film v14). A beat sheet drives the hero command, cues the boss and picks the
 // camera shot. The sim still resolves every press, so a take is a played fight, not keyframes. Recording only
 // (?rec=1 + __ember.choreo(sheet)); never constructed in normal play.
-const KEY = { A: 'attack', B: 'heavy', S: 'sweep' };
+const KEY = { A: 'attack', B: 'heavy', S: 'sweep', J: 'jump', D: 'dodge' };
 const DIRS = { F: [1, 0], B: [-1, 0], L: [0, -1], R: [0, 1], FR: [0.7, 0.7], FL: [0.7, -0.7], BR: [-0.7, 0.7], BL: [-0.7, -0.7] };
 const D2R = Math.PI / 180;
 const AVOID = [0, 14, -14, 28, -28, 42, -42, 58, -58, 75, -75, 95, -95, 120, -120], LIFT = [0, 1.6, 3.0];
@@ -58,10 +58,11 @@ export class Choreo {
   // Per-action log: verb, clip actually playing, combo depth, root path length (rule: no planted swings).
   _track() {
     const { H, sim, HS } = this.api, a = this.act;
-    if (a) { a.travel += Math.hypot(H.x - a.px, H.z - a.pz); a.px = H.x; a.pz = H.z; if (H.flashF >= 0) a.flash = 1; }
+    // v2.37: travel is 3D so an air swing (which moves in height, not along the ground) is measured too
+    if (a) { a.travel += Math.hypot(H.x - a.px, H.z - a.pz, (H.y || 0) - a.py); a.px = H.x; a.pz = H.z; a.py = H.y || 0; if (H.flashF >= 0) a.flash = 1; }
     const live = H.state === HS.ACTION;
-    if (a && (!live || H.actionId !== a.id)) { a.end = sim.frame; a.travel = +a.travel.toFixed(3); delete a.px; delete a.pz; this.act = null; }
-    if (live && !this.act) { this.act = { id: H.actionId, f: sim.frame, verb: H.verb, clip: '', n: H.comboN, travel: 0, px: H.x, pz: H.z, flash: 0 }; this.acts.push(this.act); }
+    if (a && (!live || H.actionId !== a.id)) { a.end = sim.frame; a.travel = +a.travel.toFixed(3); delete a.px; delete a.pz; delete a.py; this.act = null; }
+    if (live && !this.act) { this.act = { id: H.actionId, f: sim.frame, verb: H.verb, clip: '', n: H.comboN, travel: 0, px: H.x, pz: H.z, py: H.y || 0, flash: 0 }; this.acts.push(this.act); }
     if (this.act && !this.act.clip && H.flashF < 0) this.act.clip = this.api.clip() || '';
   }
   _dir(k) {   // unit stick vector for a direction relative to the hero -> boss line (R matches the bot's dance R)
@@ -113,12 +114,14 @@ export class Choreo {
     if (n > 0 && H.actionId !== this.aid && H.state === HS.ACTION) { this.aid = H.actionId; this.n++; return 0; }
     if (n === 0) {
       if (H.actionId !== this.aid && H.state === HS.ACTION) { this.aid = H.actionId; this.n = 1; return 0; }
+      // v2.37: a string may open with J (jump); the next key is then pressed in the air (air string)
+      if (keys[0] === 'J' && H.state === HS.AIR) { this.aid = H.actionId; this.n = 1; return 0; }
       if (H.state === HS.LOCO || H.state === HS.DODGE || H.state === HS.ACTION) c[KEY[keys[0]]] = true;
       return 0;
     }
     const live = H.state === HS.ACTION && H.actionId === this.aid;
     if (n < keys.length) {
-      if (!live) { if (H.state === HS.LOCO) { this._fail('chain dropped before key ' + n); c[KEY[keys[n]]] = true; } return 0; }
+      if (!live) { if (H.state === HS.AIR) { if (H.y > (s.airY || 0.5)) c[KEY[keys[n]]] = true; return 0; } if (H.state === HS.LOCO) { this._fail('chain dropped before key ' + n); c[KEY[keys[n]]] = true; } return 0; }
       if (H.flashF < 0 && H.actF >= (s.at || 4) && !H.queued) c[KEY[keys[n]]] = true;
       return 0;
     }

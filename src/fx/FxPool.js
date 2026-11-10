@@ -594,12 +594,14 @@ export class FxPool {
     this.rifts = []; this.riftNext = 0;
     const g = new THREE.PlaneGeometry(1, 1); this._riftGeo = g;
     const mat = (i) => new THREE.ShaderMaterial({ transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
-      uniforms: { uC: { value: new THREE.Color(0.6, 0.9, 1.0) }, uA: { value: 0 }, uRot: { value: 0 }, uOpen: { value: 0 }, uW: { value: 1 }, uHot: { value: 1 }, uCap: { value: 1e6 } },
+      uniforms: { uC: { value: new THREE.Color(0.6, 0.9, 1.0) }, uA: { value: 0 }, uRot: { value: 0 }, uOpen: { value: 0 }, uW: { value: 1 }, uHot: { value: 1 }, uCap: { value: 1e6 }, uBend: { value: 0 }, uThick: { value: 1 } },
       vertexShader: 'uniform float uRot, uOpen; varying vec2 vUv; void main(){ vUv = uv - 0.5; vec4 mv = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);' +
         ' vec3 s = vec3(length(modelMatrix[0].xyz), length(modelMatrix[1].xyz), 1.0); vec2 q = position.xy * s.xy; q.x *= uOpen;' +
         ' float c = cos(uRot), n = sin(uRot); mv.xy += vec2(c * q.x - n * q.y, n * q.x + c * q.y); gl_Position = projectionMatrix * mv; }',
-      fragmentShader: 'uniform vec3 uC; uniform float uA, uW, uHot, uCap; varying vec2 vUv; void main(){' +
-        ' float ax = abs(vUv.x) * 2.0; float taper = 1.0 - ax * ax; float y = abs(vUv.y) * 2.0 / max(0.05, uW * taper);' +
+      // v2.37 crescent: uBend bows the line into an arc (offset peaks mid-span, zero at the tips); uThick rescales
+      // the thickness when the quad is taller. uBend 0 + uThick 1 is the straight cut, unchanged.
+      fragmentShader: 'uniform vec3 uC; uniform float uA, uW, uHot, uCap, uBend, uThick; varying vec2 vUv; void main(){' +
+        ' float ax = abs(vUv.x) * 2.0; float taper = 1.0 - ax * ax; float y = abs(vUv.y - uBend * 0.28 * taper) * 2.0 * uThick / max(0.05, uW * taper);' +
         ' float core = exp(-y * y * 30.0); float edge = exp(-y * 3.2) * 0.45; float k = (core * 2.4 + edge) * taper; if (k < 0.004) discard;' +
         ' vec3 col = mix(uC, vec3(1.0), clamp(core, 0.0, 1.0) * uHot) * k * uA * mix(1.0, 0.55, step(uHot, 0.99));' +
         ' col *= min(1.0, uCap / max(1e-4, max(col.r, max(col.g, col.b))));' +
@@ -616,7 +618,18 @@ export class FxPool {
     r.t = -delay - 1e-4; r.delay = delay; r.len = this.reducedMotion ? len * 0.8 : len; r.life = this.reducedMotion ? life * 0.7 : life;
     r.g.position.copy(pos); r.g.visible = false; r.m.uniforms.uC.value.setHex(color); r.m.uniforms.uHot.value = this.hotCore === undefined ? 1 : this.hotCore; r.m.uniforms.uRot.value = rot; r.m.uniforms.uA.value = 0;
     r.m.uniforms.uCap.value = this.lightCap === undefined ? 1e6 : this.lightCap;
+    r.m.uniforms.uBend.value = 0; r.m.uniforms.uThick.value = 1; r.wide = 1; r.hold = 0; r.gen = (r.gen || 0) + 1;
     r.live = true;
+    return r;
+  }
+  // v2.37 crescent: a bowed cut from the same 16-slot pool. rot = screen angle of the chord; the bow points along
+  // rot + 90 deg. bend 0..1 = how deep the arc is, thick = thickness relative to a straight cut of the same length.
+  // Returns the slot (with .gen) so a travelling crescent can be moved: set slot.g.position and slot.hold each frame.
+  crescent(pos, len = 2.6, rot = 0, color = 0xff6a2a, delay = 0, life = 0.3, bend = 1, thick = 2.2) {
+    const r = this.riftSlash(pos, len, rot, color, delay, life);
+    if (!r) return null;
+    r.wide = 6; r.m.uniforms.uBend.value = bend; r.m.uniforms.uThick.value = r.wide / Math.max(0.5, thick);
+    return r;
   }
   clearRifts() { for (const r of this.rifts) { r.live = false; r.t = -1; r.g.visible = false; } }
   _updateRifts(dt) {
@@ -624,6 +637,7 @@ export class FxPool {
     for (const r of this.rifts) {
       if (!r.live) continue;
       r.t += dt;
+      if (r.hold > 0) { r.hold -= dt; if (r.t > 0.05) r.t = 0.05; }   // held open at full brightness while it travels
       if (r.t < 0) continue;
       const u = r.t / r.life;
       if (u >= 1) { r.live = false; r.g.visible = false; continue; }
@@ -632,7 +646,7 @@ export class FxPool {
       U.uOpen.value = this.reducedMotion ? open : open * (1 + 0.08 * Math.max(0, 1 - u * 3));
       U.uW.value = Math.max(0.15, 1 - u * 0.85);
       U.uA.value = (u < 0.15 ? 3.0 : 3.0 * (1 - (u - 0.15) / 0.85)) * (this.reducedMotion ? 0.55 : 1);
-      r.g.scale.set(r.len, 0.09 * r.len, 1);
+      r.g.scale.set(r.len, 0.09 * r.len * (r.wide || 1), 1);
     }
     this.stats.rifts = n;
   }

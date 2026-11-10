@@ -7,8 +7,72 @@ import { SIM } from '../shared/constants.js';
 import { Outcome } from '../shared/enums.js';
 import { footStep } from '../shared/attackFoot.js';
 
-export const HERO_STATE = Object.freeze({ LOCO: 0, ACTION: 1, DODGE: 2, HITSTUN: 3, DEAD: 4, FINISHER: 5, SNATCH: 6, RIFT: 7 });
-export const HERO_STATE_NAMES = Object.freeze(['LOCO', 'ACTION', 'DODGE', 'HITSTUN', 'DEAD', 'FINISHER', 'SNATCH', 'RIFT']);
+export const HERO_STATE = Object.freeze({ LOCO: 0, ACTION: 1, DODGE: 2, HITSTUN: 3, DEAD: 4, FINISHER: 5, SNATCH: 6, RIFT: 7, AIR: 8 });
+export const HERO_STATE_NAMES = Object.freeze(['LOCO', 'ACTION', 'DODGE', 'HITSTUN', 'DEAD', 'FINISHER', 'SNATCH', 'RIFT', 'AIR']);
+// v2.36 JUMP (one-handed blades only; two-handers stay planted apart from their LEAP).
+// One jump clock (jumpF) drives the height for the AIR state and for the air attacks, so an air attack never
+// resets or extends the arc. TAKEOFF frames are planted (no travel, y = 0), then AIR frames of a parabola peaking
+// at HEIGHT. Horizontal speed is the ground speed at take-off, steered by the stick at DRIFT of ground accel.
+// No i-frames: a jump clears an attack only through the boss's own per-attack height rule (WyvernBrain CLEAR_Y).
+// Air attacks: J_LIGHT (rising cut on the arc, chains into J_HEAVY) and J_HEAVY (hang, then a plunge that lands
+// its hit on the ground). Feet only travel while airborne; landing frames are planted.
+export const HERO_JUMP = Object.freeze({ STAMINA: 10, TAKEOFF: 4, AIR: 32, HEIGHT: 1.25, DRIFT: 0.5, ATTACK_FROM: 3, LAND: 5,
+  MIN_SPEED: 1.2, MAX_SPEED: 5.2 });
+export const HERO_AIR = Object.freeze({
+  J_LIGHT: Object.freeze({ clip: 'j_light', startup: 7, active: 6, total: 24, chain: [12, 23], dodgeFrom: 99, stamina: 8, lunge: 0,
+    dmg: 13, posture: 12, reach: 1.5, next: 'J_LIGHT2', air: Object.freeze({ kind: 'arc' }) }),
+  // v2.37 air string (ref #17): J_LIGHT -> J_LIGHT2 (spin) -> J_LIGHT3 (chop); each one hangs the jump clock (HERO_AIR_STRING)
+  J_LIGHT2: Object.freeze({ clip: 'j_light2', startup: 6, active: 5, total: 20, chain: [10, 19], dodgeFrom: 99, stamina: 8, lunge: 0,
+    dmg: 11, posture: 10, reach: 1.55, arc: -0.17, next: 'J_LIGHT3', air: Object.freeze({ kind: 'arc' }) }),
+  J_LIGHT3: Object.freeze({ clip: 'j_light3', startup: 7, active: 6, total: 24, chain: [12, 23], dodgeFrom: 99, stamina: 8, lunge: 0,
+    dmg: 15, posture: 14, reach: 1.5, air: Object.freeze({ kind: 'arc' }) }),
+  // v2.37 RISER (launcher): Jump pressed during a ground dance swing. A rising cut that starts its own jump arc
+  // (planted take-off, hit on the way up), then the air string continues from J_LIGHT2.
+  RISER: Object.freeze({ clip: 'riser', startup: 8, active: 6, total: 26, chain: [13, 25], dodgeFrom: 99, stamina: 12, lunge: 0,
+    dmg: 16, posture: 18, reach: 1.55, next: 'J_LIGHT2', rise: true, air: Object.freeze({ kind: 'arc' }) }),
+  // v2.37 (QA sheet t5): hang 6 + an 8-frame drop read as a long hover and a teleport to the floor; the hang is now
+  // 4 frames and the fall 12, so the descent has in-betweens. Recovery and cancel windows moved 2 frames with it.
+  J_HEAVY: Object.freeze({ clip: 'j_heavy', startup: 16, active: 6, total: 48, chain: [32, 47], dodgeFrom: 30, stamina: 20, lunge: 0,
+    dmg: 30, posture: 34, reach: 1.7, heavy: true, air: Object.freeze({ kind: 'plunge', hang: 4, travel: 1.8 }) }),
+});
+// v2.36 step-in attacks (one-handed blades only), opened by attacking out of a guarded quickstep:
+// JUMP_IN (forward step): a short leap that lands a chop - reuses the LEAP arc code (planted take-off, travel only
+//   while airborne, hit on the first ACTIVE frame).
+// STEP_CUT (left / right step): a spinning cut that keeps orbiting the foe in the step direction during STARTUP
+//   (orbit radians around the target, facing it), wide arc contact like a sweep.
+export const HERO_STEPIN = Object.freeze({
+  JUMP_IN: Object.freeze({ clip: 'jump_in', startup: 20, active: 5, total: 46, chain: [29, 45], dodgeFrom: 30, stamina: 14, lunge: 0,
+    dmg: 22, posture: 24, reach: 1.55, leap: Object.freeze({ takeoff: 5, air: 15, height: 0.8, travel: 2.6 }) }),
+  STEP_CUT: Object.freeze({ clip: 'step_cut', startup: 15, active: 7, total: 42, chain: [26, 41], dodgeFrom: 27, stamina: 14, lunge: 0,
+    dmg: 18, posture: 20, reach: 1.5, arc: -0.17, orbit: Object.freeze({ ang: 0.85, from: 3 }) }),
+  // v2.37 BACK_CUT (back step): a short snap, then a crescent travels forward from the blade (the WAVE line code),
+  // so retreating keeps the pressure on at range (ref #17: backflip, then a ranged crescent).
+  BACK_CUT: Object.freeze({ clip: 'back_cut', startup: 14, active: 4, total: 40, chain: [26, 39], dodgeFrom: 26, stamina: 16, lunge: 0.35,
+    dmg: 10, posture: 10, reach: 1.5, wave: Object.freeze({ speed: 0.36, range: 6.5, half: 0.8, dmg: 16, posture: 14, stop: true }) }),   // 0.42 m/frame crossed the gap in 2 frames
+});
+// v2.37 air string: every air light started on the arc freezes the jump clock for HANG frames (at most MAX per jump),
+// so three cuts and a plunge fit in one jump (about 0.85 s airborne). ?air=0 restores v2.36.
+// v2.37b: SLOW = the jump clock ticks once every SLOW hang frames (the string keeps rising to the apex instead of
+// freezing), RISE_K = the launcher arc is this much higher than a plain jump (QA t9: the plunge started at 0.2 m)
+export const HERO_AIR_STRING = Object.freeze({ HANG: 9, MAX: 3, DRIFT: 0.3, SLOW: 3, RISE_K: 1.3 });
+// v2.36 perfect step: a quickstep / roll whose i-frames swallow a hit refunds REFUND stamina and opens the step-in
+// attack at once (cancel from OPEN_AT instead of HERO_DODGE.cancelFrom) for WINDOW frames.
+export const HERO_PERFECT = Object.freeze({ REFUND: 18, WINDOW: 24, OPEN_AT: 4, GAUGE: 6 });
+// v2.36 chain travel (one-handed dance strings): a chained swing whose target is out of reach adds a hop toward it on
+// top of the footwork root curve. The hop only runs inside HOP (fraction of STARTUP, the unweighted part of the step)
+// and closes at most MAX metres, at least nothing when the foe is already in reach.
+export const HERO_CHAIN_HOP = Object.freeze({ on: true, MAX: 1.2, FROM: 0.2, TO: 0.8, KEEP: 0.85 });
+function airVerb(s, k) {
+  const rec = s.total - s.startup - s.active;
+  const phases = [
+    { phase: 'STARTUP', specF: s.startup, clipF: [0, s.startup], start: 0 },
+    { phase: 'ACTIVE', specF: s.active, clipF: [s.startup, s.startup + s.active], start: s.startup },
+    { phase: 'RECOVERY', specF: rec, clipF: [s.startup + s.active, s.total], start: s.startup + s.active },
+  ];
+  return { ...s, name: k, phases, chainTo: null };
+}
+// J_LIGHT only chains into the plunge (a second light in the air is not a move)
+const XR_JLIGHT = Object.freeze([null, 'J_HEAVY']);
 // v2.21 RIFT ("Ember Rift"): Judgment-Cut-End adapted from the Jessica13007 reference. Only while Ember Trigger burns
 // with at least MIN_LEFT frames left: press Trigger again. The hero plants and sheathes (STARTUP, invulnerable),
 // CUTS space-cuts land on every targetable foe within RANGE (any direction, one actionId per cut), then the
@@ -79,6 +143,8 @@ function coilVerb(v, k) {
   o.total = f; o.startup = c.startup; o.chain = v.chain ? [v.chain[0] + d, v.chain[1] + d] : null; o.dodgeFrom = v.dodgeFrom + d;
   return o;
 }
+// v2.39 great sword light footwork root curves (one per verb; the a/b/c arc takes share it)
+export const GREAT_FOOT = Object.freeze({ LIGHT_1: 'gl_1a', LIGHT_2: 'gl_2a', LIGHT_3: 'gl_3a' });
 function greatXVerb(k) {
   const s = HERO_GREAT_X[k], rec = s.total - s.startup - s.active;
   const phases = [
@@ -117,6 +183,35 @@ function danceVerb(k) {
   const c0 = Math.max(startup + active + COMBO.CHAIN_LEAD, d.settle - HERO_DANCE.LINK_LEAD);
   return { ...d, name: k, clip: d.foot, phases, total, startup, active, chain: [c0, total - 1], chainTo: null,
     dodgeFrom: startup + active + 4, lunge: 0, dance: true };
+}
+// v2.38 QUICK string (feel pass: "light attack with no movement is stiff"). Pressing light with the stick released
+// opens a different one-hand string: the same planted MotionBricks footwork steps re-ordered into a pivoting pattern
+// (big pivot, counter-pivot, cross, step in, lunge) carrying NEW authored arcs (motion/mb/hero.dance.attacks.quick.json,
+// presentation clip = q). The chain opens LINK earlier than the dance set so the cadence is quicker. Moving + light
+// keeps the dance string. ?quick=0 restores v2.37.
+// v2.38b: the quick string has its OWN MotionBricks footwork (motion/mb/hero.quick.json via tools/mb/run_quick_foot.ps1,
+// layered by tools/mb/run_dance_quick.ps1): slip-turn +45 deg, counter-spin -63, drop step, hop-in lunge, spin-out -92.
+// The hips turn two to three times further per strike than the dance set and the arc direction follows the turn.
+// peak = lead-foot plant + 2 (tools/mb/foot_beats.py), root travel from src/shared/attackFoot.js (q_l*).
+export const HERO_QUICK = Object.freeze({
+  Q_L1: { foot: 'q_l1', q: 'q_l1', peak: 26, settle: 38, frames: 51, stamina: 11, dmg: 14, posture: 12, reach: 1.35 },  // slip-turn: snap draw R->L
+  Q_L2: { foot: 'q_l2', q: 'q_l2', peak: 32, settle: 42, frames: 53, stamina: 11, dmg: 14, posture: 13, reach: 1.4 },   // counter-spin: L->R spin cut
+  Q_L3: { foot: 'q_l3', q: 'q_l3', peak: 31, settle: 44, frames: 53, stamina: 12, dmg: 15, posture: 14, reach: 1.4 },   // drop step: low draw
+  Q_L4: { foot: 'q_l4', q: 'q_l4', peak: 30, settle: 40, frames: 51, stamina: 12, dmg: 15, posture: 14, reach: 1.6 },   // hop-in lunge: thrust
+  Q_L5: { foot: 'q_l5', q: 'q_l5', peak: 42, settle: 54, frames: 63, stamina: 15, dmg: 20, posture: 18, reach: 1.5 },   // spin-out: rising finisher
+  LINK: 10, STICK: 0.2,
+});
+const QUICK_ROUTE = Object.freeze({ Q_L1: ['Q_L2', 'D_H2'], Q_L2: ['Q_L3', 'D_H1'], Q_L3: ['Q_L4', 'D_H2'], Q_L4: ['Q_L5', 'D_H1'], Q_L5: ['Q_L1', 'D_H2'] });
+function quickVerb(k) {
+  const d = HERO_QUICK[k], startup = d.peak - HERO_DANCE.PRE, active = HERO_DANCE.ACTIVE, total = d.frames;
+  const phases = [
+    { phase: 'STARTUP', specF: startup, clipF: [0, startup], start: 0 },
+    { phase: 'ACTIVE', specF: active, clipF: [startup, startup + active], start: startup },
+    { phase: 'RECOVERY', specF: total - startup - active, clipF: [startup + active, total], start: startup + active },
+  ];
+  const c0 = Math.max(startup + active + 2, d.settle - HERO_DANCE.LINK_LEAD - HERO_QUICK.LINK);
+  return { ...d, name: k, clip: d.foot, phases, total, startup, active, chain: [c0, total - 1], chainTo: null,
+    dodgeFrom: startup + active + 4, lunge: 0, dance: true, quick: true };
 }
 function sweepVerb(k) {
   const s = HERO_SWEEP[k], rec = s.total - s.startup - s.active;
@@ -234,7 +329,7 @@ function wrap(a) { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math
 
 // Command filled each fixed step by the game (input layer or bot). Reused, never reallocated.
 export function makeHeroCommand() {
-  return { mx: 0, mz: 0, speed: 0, attack: false, heavy: false, heavyHeld: false, dodge: false, roll: false, blockHeld: false, blockPress: false, snatch: false, trigger: false, sweep: false };
+  return { mx: 0, mz: 0, speed: 0, attack: false, heavy: false, heavyHeld: false, dodge: false, roll: false, blockHeld: false, blockPress: false, snatch: false, trigger: false, sweep: false, jump: false };
 }
 
 export class HeroSim {
@@ -261,10 +356,18 @@ export class HeroSim {
     for (const k in this.verbsStd) this.verbsGreat[k] = coilVerb(scaleVerb(this.verbsStd[k], GREATSWORD.SWING), k);
     this.verbsGreat.SWEEP = sweepVerb('SWEEP'); this.verbsGreat.SWEEP_REV = sweepVerb('SWEEP_REV');
     this.verbsGreat.WAVE = greatXVerb('WAVE'); this.verbsGreat.LEAP = greatXVerb('LEAP');
+    this.setGreatFoot(true);
     this.wave = { live: false, x: 0, z: 0, dx: 0, dz: -1, d: 0, aid: 0, hitN: 0, ids: new Int32Array(8) };
     this._waveV = { name: 'WAVE_LINE', dmg: 0, posture: 0, reach: 0, charge: 0, great: true, wave: true };
     for (const k in HERO_DANCE) if (k.startsWith('D_')) this.verbsStd[k] = danceVerb(k);   // one-handed only
+    for (const k in HERO_QUICK) if (k.startsWith('Q_')) this.verbsStd[k] = quickVerb(k);   // v2.38 standing string
+    this.quickOn = true; this.quicks = 0;
     this.danceOn = true;         // v2.27 dance routes for one-handed blades (main.js ?dance=0 restores v2.26)
+    // v2.36 air attacks and step-in attacks (one-handed only; verbsGreat never gets them)
+    for (const k in HERO_AIR) this.verbsStd[k] = airVerb(HERO_AIR[k], k);
+    for (const k in HERO_STEPIN) this.verbsStd[k] = airVerb(HERO_STEPIN[k], k);
+    this.jumpOn = true; this.stepInOn = true;   // ?jump=0 / ?stepin=0 restore v2.35 behaviour
+    this.airStrOn = true; this.backCutOn = true;   // v2.37 ?air=0 / ?bcut=0 restore v2.36 behaviour
     for (const set of [this.verbsStd, this.verbsGreat]) for (const k in set) {
       const v = set[k]; v.comboChain = v.chain || [v.startup + v.active + COMBO.CHAIN_LEAD, v.total - 1];
     }
@@ -305,6 +408,72 @@ export class HeroSim {
     this.flashF = -1; this.flashT = null; this.flashes = 0; this.flashStop = 0;
     this.gauge = 0; this.triggerF = 0; this.triggers = 0; this.burstF = -1; this.burstHit = false;
     this.riftF = -1; this.rifts = 0; this.riftCuts = 0; this.riftHits = 0;
+    // v2.36 jump / air / step-in / perfect step / chain hop
+    this.jumpF = -1; this.jvx = 0; this.jvz = 0; this.jumps = 0; this.lands = 0; this.airAtks = 0; this.plunges = 0;
+    this.plungeY0 = 0; this.plungeDist = 0; this.orbitT = null; this.orbitSign = 1; this.stepIns = 0;
+    this.perfectStepF = 0; this.perfectSteps = 0; this.dodgePerfect = false;
+    this.hopDist = 0; this.hopX = 0; this.hopZ = 0; this.chainHops = 0; this.hopTotal = 0;
+    this._amx = 0; this._amz = 0;
+    this.hangF = 0; this.airN = 0; this.risers = 0; this.backCuts = 0;   // v2.37 air string / launcher / crescent
+  }
+  _inArc() { return this.jumpF >= 0 && this.jumpF < HERO_JUMP.TAKEOFF + HERO_JUMP.AIR; }
+
+  // v2.36 jump: one-handed blades only. Take-off direction = stick (speed carried, clamped), else straight up.
+  _startJump(cmd) {
+    if (this.wp || !this.jumpOn) return false;
+    if (!this._spend(HERO_JUMP.STAMINA)) return false;
+    const J = HERO_JUMP, l = Math.hypot(cmd.mx, cmd.mz);
+    let sp = 0, dx = this.facingX(), dz = this.facingZ();
+    if (l > 0.1) {
+      dx = cmd.mx / l; dz = cmd.mz / l;
+      sp = Math.max(J.MIN_SPEED, Math.min(J.MAX_SPEED, Math.max(this.speed, cmd.speed || 0)));
+      this.yaw = Math.atan2(-dx, -dz);
+    }
+    this.jvx = dx * sp / 60; this.jvz = dz * sp / 60;
+    this.state = HERO_STATE.AIR; this.jumpF = 0; this.jumpK = 1; this.actF = 0; this.blocking = false; this.queued = null; this.charging = false;
+    this.jumps++; this._event('jump'); this.hangF = 0; this.airN = 0;
+    return true;
+  }
+  // advance the jump clock one frame: sets y / airborne and this._amx/_amz. 0 take-off, 1 airborne, 2 just landed.
+  _airTick(cmd, steer) {
+    const J = HERO_JUMP;
+    // v2.37 air string hang: the clock (and the height) holds while an air cut starts; drift is damped
+    if (this.hangF > 0 && this.jumpF >= J.TAKEOFF + J.AIR * 0.3 && this.jumpF <= J.TAKEOFF + J.AIR * 0.7) {
+      this.hangF--; this.airborne = true; this._amx = this.jvx * HERO_AIR_STRING.DRIFT; this._amz = this.jvz * HERO_AIR_STRING.DRIFT; if (this.hangF % HERO_AIR_STRING.SLOW !== 0) return 1;
+    }
+    this.jumpF++;
+    const f = this.jumpF - J.TAKEOFF;
+    this._amx = 0; this._amz = 0;
+    if (f <= 0) { this.y = 0; this.airborne = false; return 0; }
+    if (f >= J.AIR) { this.y = 0; this.airborne = false; this.jvx = 0; this.jvz = 0; return 2; }
+    if (steer) {
+      const l = Math.hypot(cmd.mx, cmd.mz);
+      if (l > 0.1) {
+        const top = Math.min(J.MAX_SPEED, Math.max(J.MIN_SPEED, cmd.speed || J.MAX_SPEED)) / 60, a = SIM.ACCEL * J.DRIFT / 3600;
+        const wx = cmd.mx / l * top - this.jvx, wz = cmd.mz / l * top - this.jvz, wl = Math.hypot(wx, wz);
+        if (wl > 1e-6) { const k = Math.min(1, a / wl); this.jvx += wx * k; this.jvz += wz * k; }
+      }
+    }
+    const u = f / J.AIR; this.y = 4 * J.HEIGHT * (this.jumpK || 1) * u * (1 - u); this.airborne = true;
+    this._amx = this.jvx; this._amz = this.jvz;
+    return 1;
+  }
+  // step-in verb for the last guarded quickstep (forward: jump-in chop; left / right: spinning cut)
+  _stepInVerb() {
+    if (this.wp || !this.stepInOn) return null;
+    if (this.stepKind === STEP_DIR.F) return 'JUMP_IN';
+    if (this.stepKind === STEP_DIR.L || this.stepKind === STEP_DIR.R) return 'STEP_CUT';
+    if (this.stepKind === STEP_DIR.B && this.backCutOn) return 'BACK_CUT';
+    return null;
+  }
+  // combo successors for verbs that are not in the character route tables
+  _xRoute(name) {
+    const R = this._route();
+    if (name === 'J_LIGHT') return XR_JLIGHT;
+    if (name === 'J_HEAVY') return R.LOCO;
+    if (name === 'JUMP_IN' || name === 'STEP_CUT' || name === 'BACK_CUT') return R[R.LOCO[0]] || R.LOCO;
+    if (QUICK_ROUTE[name]) return QUICK_ROUTE[name];
+    return null;
   }
 
   // Ember Rift: needs a burning trigger with MIN_LEFT frames left; free cancel from LOCO, late ACTION recovery or DODGE.
@@ -363,6 +532,13 @@ export class HeroSim {
     return true;
   }
 
+  // v2.39 great sword light string walks its own weighted MotionBricks footwork (motion/mb/hero.great.attacks.json,
+  // gl_1a..gl_3c = gf_1..gf_3 lower body + the v2.32 two-handed arcs). Travel and turn come from the root curve
+  // (src/shared/attackFoot.js gl_*a), so the old flat lunge slide is gone. main.js ?gfoot=0 restores v2.38.
+  setGreatFoot(on) {
+    this.greatFootOn = !!on;
+    for (const k in GREAT_FOOT) { const v = this.verbsGreat[k]; if (!v) continue; if (on) v.foot = GREAT_FOOT[k]; else delete v.foot; }
+  }
   equipGreatsword() { return this.equip(WEAPON.GREAT); }
   // v2.27 combo route for the blade in hand: two-handers keep the great route; one-handed blades dance, each
   // character with its own phrasing. comboOn=false / danceOn=false fall back to the classic three-light chain.
@@ -372,6 +548,12 @@ export class HeroSim {
     return this.charId === 'vesper' ? COMBO_ROUTE.vesper : COMBO_ROUTE.dance;
   }
   _opener() { return this.comboOn ? this._route().LOCO[0] : 'LIGHT_1'; }
+  // v2.38: a light press with the stick released opens the QUICK string (one-handed dance blades only)
+  _standOpener(cmd) {
+    if (this.quickOn && this.comboOn && this.danceOn && !this.wp && this.verbs.Q_L1 && cmd
+      && Math.hypot(cmd.mx || 0, cmd.mz || 0) < HERO_QUICK.STICK) { this.quicks++; return 'Q_L1'; }
+    return this._opener();
+  }
   // v2.24: pick a CHARACTERS entry. Locked characters keep their signature weapon (drops never replace it).
   setCharacter(id) {
     const C = CHARACTERS[id] || CHARACTERS.hero;
@@ -449,8 +631,53 @@ export class HeroSim {
     this.charging = name === 'HEAVY'; this.chargeF = 0; this.chargeLvl = 0;
     const ay = this._assistYaw(targets); if (ay !== null) this.yaw = ay;
     this.footYaw0 = this.yaw; this.aimAcc = 0; this.aimFree = ay === null;
-    this.flashF = -1; this.flashT = null;
-    if (HERO_FLASH.on && !this.wp && !v.sweep && !v.leap) this._tryFlash(v, targets);
+    this.flashF = -1; this.flashT = null; this.hopDist = 0; this.orbitT = null;
+    if (HERO_FLASH.on && !this.wp && !v.sweep && !v.leap && !v.air && !v.orbit && !v.wave) this._tryFlash(v, targets);
+    if (v.air) {
+      this.airAtks++;
+      if (v.air.kind === 'plunge') {
+        // plunge: hang at the current height, then drop onto the nearest foe ahead (or along facing)
+        this.plungeY0 = this.y; this.jumpF = -1; this.plunges++;
+        let near = Infinity; const fx = this.facingX(), fz = this.facingZ();
+        for (let i = 0; i < (targets ? targets.length : 0); i++) { const t = targets[i]; if (!t || !t.targetable) continue;
+          const dx = t.x - this.x, dz = t.z - this.z, d = Math.hypot(dx, dz); if (d > 0.3 && (dx * fx + dz * fz) / d < 0.5) continue;
+          near = Math.min(near, d - (t.radius || 0) - this.radius); }
+        this.plungeDist = Math.max(0, Math.min(v.air.travel, near - v.reach * 0.75));
+        this._event('plunge');
+      } else {
+        if (v.rise) {
+          // v2.37 launcher: its own jump arc from the ground (planted take-off, no carried speed)
+          this.jumpF = 0; this.jumpK = HERO_AIR_STRING.RISE_K; this.jvx = 0; this.jvz = 0; this.hangF = 0; this.airN = 0; this.jumps++; this.risers++; this._event('riser');
+        } else {
+          this._event('air_light');
+          if (this.airStrOn && this.airN < HERO_AIR_STRING.MAX) this.hangF = Math.max(HERO_AIR_STRING.HANG, v.chain[0]);
+        }
+        this.airN++;
+      }
+    }
+    if (name === 'BACK_CUT') { this.stepIns++; this.backCuts++; this._event('back_cut'); }
+    if (v.orbit) {
+      const t = this._nearest(targets || NO_TARGETS, HERO_DODGE.guardRange);
+      if (t) {
+        this.orbitT = t; const px = this.x - t.x, pz = this.z - t.z, rx = Math.cos(this.yaw), rz = -Math.sin(this.yaw);
+        const want = this.stepKind === STEP_DIR.L ? -1 : 1;
+        this.orbitSign = ((-pz) * rx + px * rz) * want >= 0 ? 1 : -1;
+      }
+    }
+    if (name === 'JUMP_IN' || name === 'STEP_CUT') { this.stepIns++; this._event(name === 'JUMP_IN' ? 'jump_in' : 'step_cut'); }
+    // v2.36 chain hop: a chained dance swing whose foe is out of reach hops in during the unweighted part of startup
+    if (chained && v.dance && !this.wp && HERO_CHAIN_HOP.on && this.hopOn !== false && this.flashF < 0 && targets) {
+      const fx = this.facingX(), fz = this.facingZ(); let best = null, be = Infinity;
+      for (let i = 0; i < targets.length; i++) { const t = targets[i]; if (!t || !t.targetable) continue;
+        const dx = t.x - this.x, dz = t.z - this.z, d = Math.hypot(dx, dz); if (d < 1e-3 || (dx * fx + dz * fz) / d < 0.5) continue;
+        const e = d - (t.radius || 0) - this.radius; if (e < be) { be = e; best = t; } }
+      const want = best ? be - v.reach * HERO_CHAIN_HOP.KEEP : 0;
+      if (best && want > 0.05) {
+        const dx = best.x - this.x, dz = best.z - this.z, d = Math.hypot(dx, dz);
+        this.hopDist = Math.min(HERO_CHAIN_HOP.MAX, want); this.hopX = dx / d; this.hopZ = dz / d;
+        this.chainHops++; this.hopTotal += this.hopDist;
+      }
+    }
     if (v.sweep) { this.sweeps++; this._event('sweep'); }
     if (v.leap) {
       // leap length: full travel in the open, shortened so the chop lands at reach on the nearest foe ahead
@@ -599,6 +826,27 @@ export class HeroSim {
         break;
       }
 
+      case HERO_STATE.AIR: {
+        // v2.36 jump: planted take-off, steerable parabola, planted landing. Air attacks start from ATTACK_FROM
+        // frames after take-off; a light press on the landing frames cancels into the ground opener.
+        this.actF++;
+        const J = HERO_JUMP, ph = this._airTick(cmd, true); mx = this._amx; mz = this._amz;
+        const f = this.jumpF - J.TAKEOFF;
+        if (ph === 1) {
+          const l = Math.hypot(cmd.mx, cmd.mz);
+          if (l > 0.1) { const d = wrap(Math.atan2(-cmd.mx, -cmd.mz) - this.yaw); this.yaw = wrap(this.yaw + Math.max(-TURN * 0.5, Math.min(TURN * 0.5, d))); }
+          if (f >= J.ATTACK_FROM && f < J.AIR - 2) {
+            if (cmd.heavy && this._startVerb('J_HEAVY', targets)) break;
+            if (cmd.attack && this._startVerb('J_LIGHT', targets)) break;
+          }
+        } else if (ph === 2) {
+          if (f === J.AIR) { this.lands++; this._event('land'); }
+          if (cmd.attack && this._startVerb(this._opener(), targets)) { this.jumpF = -1; break; }
+          if (f >= J.AIR + J.LAND) { this.state = HERO_STATE.LOCO; this.jumpF = -1; this.actF = 0; this.speed = 0; }
+        }
+        break;
+      }
+
       case HERO_STATE.DEAD: this.actF++; this.speed = 0; break;
 
       case HERO_STATE.FINISHER:
@@ -621,10 +869,16 @@ export class HeroSim {
           mx = this.stepDirX * s; mz = this.stepDirZ * s;
           if (this.stepKind === STEP_DIR.NONE) this.yaw = wrap(this.yaw + Math.max(-TURN, Math.min(TURN, wrap(Math.atan2(-this.stepDirX, -this.stepDirZ) - this.yaw))));
         }
-        if (this.dodgeF >= D.cancelFrom && (cmd.attack || cmd.heavy || (cmd.sweep && this.wp))) {
-          this.dodgeF = -1; this.state = HERO_STATE.LOCO;
-          this._startVerb(cmd.heavy ? 'HEAVY' : cmd.attack ? this._opener() : 'SWEEP', targets);
-        } else if (this.dodgeF >= D.total) { this.dodgeF = -1; this.state = HERO_STATE.LOCO; this.actF = 0; }
+        // v2.36: a perfect step (i-frames swallowed a hit) opens the cancel at OPEN_AT instead of cancelFrom
+        const cFrom = this.dodgePerfect ? HERO_PERFECT.OPEN_AT : D.cancelFrom;
+        if (this.dodgeF >= cFrom && (cmd.attack || cmd.heavy || (cmd.sweep && this.wp))) {
+          const si = cmd.attack && !cmd.heavy ? this._stepInVerb() : null;
+          this.dodgeF = -1; this.state = HERO_STATE.LOCO; this.dodgePerfect = false;
+          if (!(si && this._startVerb(si, targets)))
+            this._startVerb(cmd.heavy ? 'HEAVY' : cmd.attack ? this._opener() : 'SWEEP', targets);
+        } else if (this.dodgeF >= cFrom && cmd.jump && this._startJump(cmd)) {
+          this.dodgeF = -1; this.dodgePerfect = false;
+        } else if (this.dodgeF >= D.total) { this.dodgeF = -1; this.state = HERO_STATE.LOCO; this.actF = 0; this.dodgePerfect = false; }
         break;
       }
 
@@ -668,7 +922,34 @@ export class HeroSim {
         }
         // lunge during startup->active, scaled down when a target is already inside reach
         const lungeF = v.startup + v.active;
-        if (v.leap) {
+        if (v.air && v.air.kind === 'arc') {
+          // J_LIGHT rides the jump clock (no steering while cutting); after the arc ends the recovery is planted
+          if (this.jumpF >= 0) { const ph = this._airTick(cmd, false); mx = this._amx; mz = this._amz; if (ph === 2 && this.jumpF === HERO_JUMP.TAKEOFF + HERO_JUMP.AIR) { this.lands++; this._event('land'); } }
+          else { this.y = 0; this.airborne = false; }
+        } else if (v.air && v.air.kind === 'plunge') {
+          // J_HEAVY: hang, then a straight drop that lands on the first ACTIVE frame (hit on the ground)
+          const A = v.air;
+          if (this.actF <= A.hang) { this.y = this.plungeY0; this.airborne = this.y > 0; }
+          else if (this.actF <= v.startup) {
+            const n = v.startup - A.hang, u = (this.actF - A.hang) / n;
+            // t7: 1 - u^2 held the height and fell in the last 3 frames (no dive on screen); u^1.4 commits earlier
+            this.y = this.plungeY0 * (1 - Math.pow(u, 1.4)); this.airborne = this.actF < v.startup;
+            const s = this.plungeDist / n; mx = this.facingX() * s; mz = this.facingZ() * s;
+            if (this.actF === v.startup) { this.lands++; this._event('plunge_land'); }
+          } else { this.y = 0; this.airborne = false; }
+        } else if (v.orbit) {
+          // STEP_CUT: keep circling the foe in the step direction during startup, always facing it
+          const t = this.orbitT, O = v.orbit;
+          if (t && t.targetable && this.actF > O.from && this.actF <= v.startup) {
+            const n = v.startup - O.from, da = O.ang / n * this.orbitSign;
+            const px = this.x - t.x, pz = this.z - t.z, c = Math.cos(da), s = Math.sin(da);
+            // spiral in: close the radius to strike range over the remaining startup frames (the sidestep ends ~3 m out)
+            const r = Math.hypot(px, pz) || 1, rr = (t.radius || 0) + this.radius + v.reach * 0.7;
+            const left = v.startup - this.actF + 1, kk = r > rr ? 1 - (r - rr) / left / r : 1;
+            mx = (px * c - pz * s) * kk - px; mz = (px * s + pz * c) * kk - pz;
+            this.yaw = Math.atan2(-(t.x - (this.x + mx)), -(t.z - (this.z + mz)));
+          }
+        } else if (v.leap) {
           // v2.30 leap wheel: planted take-off, ballistic arc ending on the first ACTIVE frame, planted landing
           const L = v.leap, a0 = v.startup - L.air, u = (this.actF - a0) / L.air;
           if (this.actF > a0 && this.actF <= v.startup) {
@@ -686,15 +967,27 @@ export class HeroSim {
           const k = (near < v.reach * 0.8 ? 0.25 : 1) * (this.verb === 'HEAVY' ? 1 + HERO_CHARGE.LUNGE * this.chargeLvl : 1);
           mx = this.facingX() * v.lunge * k / lungeF; mz = this.facingZ() * v.lunge * k / lungeF;
         }
+        // v2.36 chain hop on top of the footwork root curve, only inside the unweighted window of startup
+        if (this.hopDist > 0) {
+          const H = HERO_CHAIN_HOP, a = Math.max(1, Math.floor(v.startup * H.FROM)), b = Math.max(a + 1, Math.ceil(v.startup * H.TO));
+          if (this.actF > a && this.actF <= b) { const s = this.hopDist / (b - a); mx += this.hopX * s; mz += this.hopZ * s; this.y = 0.12 * Math.sin(Math.PI * (this.actF - a) / (b - a)); this.airborne = true; }
+          else if (this.actF > b) { this.y = 0; this.airborne = false; }
+        }
         // contact: ACTIVE window, reach + target radius, inside a 70 degree half-cone, once per (actionId, target)
         const ph = this.phase();
         if (ph === 'ACTIVE') this._resolveSwing(v, targets);
         if (v.wave && this.actF === v.startup + v.active) this._launchWave(v);
         // buffered follow-ups
-        if (this.comboOn) {
-          const r = this._route()[this.verb], room = this.comboN < COMBO.MAX;
-          if (r && room && cmd.attack) { this.queued = r[0]; this.queuedBtn = 0; }
-          if (r && room && cmd.heavy) { this.queued = r[1]; this.queuedBtn = 1; }
+        // v2.36 air light: a jump press is ignored, a heavy queues the plunge (works with or without comboOn)
+        if (v.air && v.air.kind === 'arc') {
+          if (cmd.attack && v.next && this.airStrOn && this.comboN < COMBO.MAX) { this.queued = v.next; this.queuedBtn = 0; }   // v2.37 air string
+          if (cmd.heavy) { this.queued = 'J_HEAVY'; this.queuedBtn = 1; }
+        } else if (this.comboOn) {
+          // v2.37 launcher: Jump during a one-handed dance swing queues the rising cut
+          if (cmd.jump && v.dance && !this.wp && this.jumpOn && this.airStrOn && this.comboN < COMBO.MAX) { this.queued = 'RISER'; this.queuedBtn = 0; }
+          const r = this._route()[this.verb] || this._xRoute(this.verb), room = this.comboN < COMBO.MAX;
+          if (r && room && cmd.attack && r[0]) { this.queued = r[0]; this.queuedBtn = 0; }
+          if (r && room && cmd.heavy && r[1]) { this.queued = r[1]; this.queuedBtn = 1; }
           if (room && cmd.sweep && this.wp) { const q = v.sweep ? (v.chainTo || null) : 'SWEEP'; if (q) { this.queued = q; this.queuedBtn = 2; } }
         } else {
           if (cmd.attack && v.chainTo) this.queued = v.chainTo;
@@ -709,11 +1002,18 @@ export class HeroSim {
         if (evade && this.actF >= v.dodgeFrom) { const r = this.queued === 'ROLL'; this.state = HERO_STATE.LOCO; this._startDodge(cmd, targets, r); break; }
         const cw = this.comboOn ? v.comboChain : v.chain;
         if (this.queued && !evade && cw && this.actF >= cw[0] && this.actF <= cw[1]) {
-          const q = this.queued; this.state = HERO_STATE.LOCO; if (!this._startVerb(q, targets, this.comboOn, this.queuedBtn)) this.state = HERO_STATE.LOCO;
+          let q = this.queued;
+          // v2.37: an air cut queued after the arc has ended becomes the ground opener (the string carries on, grounded)
+          if (HERO_AIR[q] && HERO_AIR[q].air.kind === 'arc' && !HERO_AIR[q].rise && !this._inArc()) { q = this._opener(); this.y = 0; this.airborne = false; this.jumpF = -1; }
+          this.state = HERO_STATE.LOCO; if (!this._startVerb(q, targets, this.comboOn, this.queuedBtn)) this.state = HERO_STATE.LOCO;
           break;
         }
+        // v2.36 air light finished while still on the arc: fall back into the jump (the clock keeps running)
+        if (v.air && v.air.kind === 'arc' && this.actF >= v.total && this.jumpF >= 0 && this.jumpF < HERO_JUMP.TAKEOFF + HERO_JUMP.AIR + HERO_JUMP.LAND) {
+          this.state = HERO_STATE.AIR; this.actF = 0; this.queued = null; break;
+        }
         // v2.29 move cancel: a stick push in late recovery (no buffered follow-up) walks straight out of the swing
-        if (ST.on && !this.queued && !this.charging && stl > ST.STICK
+        if (ST.on && !this.queued && !this.charging && stl > ST.STICK && !(v.air && this.airborne)
           && this.actF >= v.startup + v.active + (this.wp ? ST.MOVE_AFTER_GREAT : ST.MOVE_AFTER) && this.actF < v.total) {
           this.state = HERO_STATE.LOCO; this.actF = 0; this.chargeLvl = 0;
           this.speed = Math.max(this.speed, SIM.WALK_SPEED * (this.wp ? this.wp.MOVE : 1));
@@ -721,7 +1021,7 @@ export class HeroSim {
           break;
         }
         if (this.actF >= v.total) {
-          this.state = HERO_STATE.LOCO; this.actF = 0; this.chargeLvl = 0;
+          this.state = HERO_STATE.LOCO; this.actF = 0; this.chargeLvl = 0; this.jumpF = -1;
           if (this.comboOn && this.queued && !evade) this._startVerb(this.queued, targets, true, this.queuedBtn);
           else if (this.queued === 'HEAVY' || this.queued === 'SWEEP') this._startVerb(this.queued, targets);
           this.queued = null;
@@ -732,8 +1032,11 @@ export class HeroSim {
       default: {   // LOCO
         this.actF++;
         if ((cmd.dodge || cmd.roll) && this._startDodge(cmd, targets, cmd.roll)) break;
+        if (cmd.jump && this._startJump(cmd)) break;
+        // v2.36 perfect step window: a light press right after a perfect step still gets the step-in attack
+        if (this.perfectStepF > 0 && cmd.attack && !cmd.heavy) { const si = this._stepInVerb(); if (si && this._startVerb(si, targets)) { this.perfectStepF = 0; break; } }
         if (cmd.heavy && this._startVerb('HEAVY', targets)) break;
-        if (cmd.attack && this._startVerb(this._opener(), targets)) break;
+        if (cmd.attack && this._startVerb(this._standOpener(cmd), targets)) break;
         if (cmd.sweep && this.wp && this._startVerb('SWEEP', targets)) break;
         this.blocking = cmd.blockHeld;
         const gk = this.wp ? this.wp.MOVE : 1;   // heavy blade: slower top speed and turns
@@ -762,7 +1065,12 @@ export class HeroSim {
     }
 
     // v2.30: the leap height only lives inside a LEAP action (a hit or any state change lands the hero at once)
-    if (this.y !== 0 && !(this.state === HERO_STATE.ACTION && this.verbs[this.verb] && this.verbs[this.verb].leap)) { this.y = 0; this.airborne = false; }
+    // v2.36: also kept by the AIR state, air attacks and the chain hop; any hit / state change still lands at once
+    const vy = this.state === HERO_STATE.ACTION ? this.verbs[this.verb] : null;
+    const keepY = this.state === HERO_STATE.AIR || (vy && (vy.leap || vy.air || this.hopDist > 0));
+    if (this.y !== 0 && !keepY) { this.y = 0; this.airborne = false; }
+    if (this.state !== HERO_STATE.AIR && !(vy && vy.air)) this.jumpF = -1;
+    if (this.perfectStepF > 0) this.perfectStepF--;
     if (this.wave.live) this._stepWave(targets);
     // stamina regen (slower while blocking, none while acting)
     if (this.state === HERO_STATE.LOCO || this.state === HERO_STATE.HITSTUN) {
@@ -860,9 +1168,10 @@ export class HeroSim {
     const W = this.wave, P = v.wave;
     W.live = true; W.x = this.x + this.facingX() * 0.6; W.z = this.z + this.facingZ() * 0.6; W.dx = this.facingX(); W.dz = this.facingZ();
     // own contact id space (negative): actionId counts player actions (combo strings, swing tracking), not contacts
-    W.d = 0; W.prevD = 0; W.hitN = 0; W.aid = -(++this.waveSeq); W.speed = P.speed; W.range = P.range; W.half = P.half;
+    W.d = 0; W.prevD = 0; W.hitN = 0; W.aid = -(++this.waveSeq); W.speed = P.speed; W.range = P.range; W.half = P.half; W.stop = !!P.stop;
     const g = this._waveV, m = this.wp || { DMG: 1, POSTURE: 1 }, tk = this.triggerF > 0;
     g.dmg = Math.round(P.dmg * m.DMG * (tk ? HERO_TRIGGER.DMG : 1)); g.posture = Math.round(P.posture * m.POSTURE * (tk ? HERO_TRIGGER.POSTURE : 1));
+    g.great = !!this.wp;   // v2.37: the one-handed BACK_CUT crescent is not a great-sword hit
     g.reach = P.range; this.waves++; this._event('wave');
     this._hitN = 0;   // the melee snap and the line are separate contacts (different actionIds)
   }
@@ -879,7 +1188,8 @@ export class HeroSim {
       if (dealt > 0) { this.damageDealt += dealt; this.waveHits++; this.addGauge(dealt * HERO_TRIGGER.HIT_GAIN); }
       if (this.hitSink) this.hitSink(t, dealt, this._waveV);
     }
-    if (W.d >= W.range) W.live = false;
+    // v2.37: the one-handed crescent (stop) ends on the first foe it bites instead of passing through it
+    if (W.d >= W.range || (W.stop && W.hitN > 0)) W.live = false;
   }
 
   // Trigger burst: radial shove that hits every targetable foe in BURST_R once (light damage, heavy posture).
@@ -926,6 +1236,12 @@ export class HeroSim {
       else { this.deflects++; this._event('deflect'); }
     } else if (R.outcome === O.WHIFF_IFRAME && R.effect && R.effect !== 'none') {
       this.phantoms++; this._event(R.effect);
+    }
+    // v2.36 perfect step: i-frames of a quickstep / roll swallowed a hit -> stamina back, step-in opens at once
+    if (R.outcome === O.WHIFF_IFRAME && this.state === HERO_STATE.DODGE && !this.dodgePerfect) {
+      this.dodgePerfect = true; this.perfectSteps++; this.perfectStepF = HERO_PERFECT.WINDOW;
+      this.stamina = Math.min(SIM.STAMINA_MAX, this.stamina + HERO_PERFECT.REFUND); this.addGauge(HERO_PERFECT.GAUGE);
+      if (!R.effect || R.effect === 'none') this._event('perfect_step');
     }
     if (R.effect === 'slip' || R.effect === 'behind') { this.x = R.tx; this.z = R.tz; this.prevX = this.x; this.prevZ = this.z; }
     if (this.contactSink) this.contactSink(R, this);

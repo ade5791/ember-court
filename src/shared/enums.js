@@ -25,11 +25,11 @@ export const FxKind = e(['SPARK', 'BLOOD_DUST', 'PARRY_FLASH', 'EMBER_BURST', 'D
 
 // Input layer (player owns the state, ui touch overlay writes into it by duck-typed sink).
 // ROLL appended (v2.9.2), SNATCH + TRIGGER appended (v2.14 DMC layer): indices stay stable
-export const InputAction = e(['ATTACK', 'HEAVY', 'BLOCK', 'DODGE', 'LOCK', 'PAUSE', 'ROLL', 'SNATCH', 'TRIGGER', 'SWEEP']);
-export const INPUT_ACTION_NAMES = Object.freeze(['attack', 'heavy', 'block', 'dodge', 'lock', 'pause', 'roll', 'snatch', 'trigger', 'sweep']);
-export const INPUT_ACTION_COUNT = 10;   // SWEEP appended v2.22
+export const InputAction = e(['ATTACK', 'HEAVY', 'BLOCK', 'DODGE', 'LOCK', 'PAUSE', 'ROLL', 'SNATCH', 'TRIGGER', 'SWEEP', 'JUMP']);
+export const INPUT_ACTION_NAMES = Object.freeze(['attack', 'heavy', 'block', 'dodge', 'lock', 'pause', 'roll', 'snatch', 'trigger', 'sweep', 'jump']);
+export const INPUT_ACTION_COUNT = 11;   // SWEEP appended v2.22, JUMP appended v2.36
 // Bit flags so a hold from two devices at once is released only when both let go.
 export const InputSource = Object.freeze({ KBM: 1, TOUCH: 2, PAD: 4 });
 export const INPUT_DEVICE_NAMES = Object.freeze({ 1: 'kbm', 2: 'touch', 4: 'pad' });
 // Actions that go through the 10 f combat buffer (newest press wins). LOCK and PAUSE are immediate edges.
-export const BUFFERED_ACTIONS = Object.freeze([0, 1, 2, 3, 6, 7, 8]);
+export const BUFFERED_ACTIONS = Object.freeze([0, 1, 2, 3, 6, 7, 8, 9, 10]);   // v2.36: SWEEP (9) and JUMP (10)

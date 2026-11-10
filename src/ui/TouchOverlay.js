@@ -27,6 +27,7 @@ const BUTTONS = [
   { action: A.SNATCH, key: 'snatch', label: 'Snatch', size: 'm' },
   { action: A.TRIGGER, key: 'trigger', label: 'Ember', size: 'm' },
   { action: A.SWEEP, key: 'sweep', label: 'Sweep', size: 'm' },
+  { action: A.JUMP, key: 'jump', label: 'Jump', size: 'l' },
 ];
 
 const CSS = `
@@ -78,7 +79,9 @@ const CSS = `
 .ec-btn.trigger{right:calc(var(--sar) + 62px);bottom:calc(var(--sab) + 372px);border-color:rgba(255,80,40,.75)}
 .ec-btn.trigger.ready{box-shadow:0 0 14px 2px rgba(255,80,30,.8)}
 .ec-btn.sweep{right:calc(var(--sar) + 160px);bottom:calc(var(--sab) + 440px);border-color:rgba(255,170,90,.7)}
+.ec-btn.jump{right:calc(var(--sar) + 62px);bottom:calc(var(--sab) + 458px);border-color:rgba(150,220,255,.75)}
 @media (orientation:landscape){
+  .ec-btn.jump{right:calc(var(--sar) + 268px);bottom:calc(var(--sab) + 40px)}
   .ec-btn.sweep{right:calc(var(--sar) + 356px);bottom:calc(var(--sab) + 150px)}
   .ec-btn.snatch{right:calc(var(--sar) + 262px);bottom:calc(var(--sab) + 200px)}
   .ec-btn.trigger{right:calc(var(--sar) + 356px);bottom:calc(var(--sab) + 60px)}

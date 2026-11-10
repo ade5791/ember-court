@@ -29,6 +29,18 @@ export const VERBS = Object.freeze({
   [BossVerb.W_LAND]: { name: 'W_LAND', clip: 'land', stance: BossStance.AIR, pre: 0, active: [23, 26], total: 54, shape: 'ring', reach: 3.3 + SIM.CAPSULE_RADIUS, art: ART.NORMAL, dmg: 0, posture: 30 },
   [BossVerb.W_ROAR]: { name: 'W_ROAR', clip: 'hit', stance: -1, pre: 0, active: [20, 20], total: 83, shape: 'push', reach: 3.8, art: ART.NORMAL, dmg: 0, posture: 0, clipRate: 0.6 },
 });
+// v2.36 per-attack jump clearance: a hero whose root is above CLEAR_Y[verb] (m) is not touched by that attack.
+// The hero jump peaks at 1.25 m (HERO_JUMP.HEIGHT): it clears tail sweeps and the landing shockwave for most of
+// the arc and the low lunge only near the top, but never the bite, charge, breath or swoop.
+export const CLEAR_Y = Object.freeze({
+  [BossVerb.W_BITE]: 1.6, [BossVerb.W_LUNGE]: 0.95, [BossVerb.W_CHARGE]: 1.6, [BossVerb.W_TAIL_L]: 0.55, [BossVerb.W_TAIL_R]: 0.55,
+  [BossVerb.W_HAZE]: 2.2, [BossVerb.W_SWOOP]: 2.2, [BossVerb.W_LAND]: 0.4, [BossVerb.W_ROAR]: 1.0,
+});
+// v2.36 wyvern strings: after an attack the boss may chain a follow-up with a different shape (sweep -> bite ->
+// lunge, bite -> tail, lunge -> bite). Length 2 in phase 2, up to 3 in phase 3 (phase 1 only keeps single attacks).
+// The string always ends in a PUNISH-frame hold, so the opening after a string is clear and longer than after a
+// single attack. Chance per link CHANCE[phase]; RANGE m gates a link (no chasing across the arena).
+export const WYVERN_STRING = { on: true, CHANCE: [0, 0, 0.45, 0.7], MAX: [1, 1, 2, 3], RANGE: 4.6, PUNISH: 54, LINK_HOLD: 6 };
 export const RED_VERBS = Object.freeze([BossVerb.W_CHARGE, BossVerb.W_TAIL_L, BossVerb.W_TAIL_R, BossVerb.W_HAZE, BossVerb.W_SKY_HAZE]);
 
 export const PHASES = Object.freeze([
@@ -102,6 +114,7 @@ export class WyvernBrain {
     this.state = BRAIN_STATE.WAIT; this.f = 0; this.waitF = 60;
     this.verb = -1; this.def = null; this.actionId = 0; this.hitDone = false; this.lastVerb = -1; this.lastRed = -1;
     this.airLeft = 0; this.invuln = false; this.chainBite = false;
+    this.strN = 0; this.strNext = -1; this.strings = 0; this.stringLinks = 0; this._lastHero = null;   // v2.36 strings
     this.travelLeft = 0; this.tick = 0; this.simFrame = 0;
     this.swoop = { sx: 0, sz: 0, ex: 0, ez: 0, dx: 0, dz: 0, speed: 14 / 60, startY: HOVER_Y };
     this.pools = []; for (let i = 0; i < POOL_SLOTS; i++) this.pools.push({ x: 0, z: 0, r: 0, left: 0, id: 0 });
@@ -295,7 +308,7 @@ export class WyvernBrain {
     const ticking = d.shape === 'cone';
     if (!ticking && this.hitDone) return;
     if (ticking && ((f - d.active[0]) % TICK_F) !== 0) return;
-    if (h.y > 1.0) return;                                   // hero never airborne in v2, guard anyway
+    if (h.y > (CLEAR_Y[v] !== undefined ? CLEAR_Y[v] : 1.0)) return;   // v2.36 per-attack jump clearance
     const dx = h.x - this.x, dz = h.z - this.z, dist = Math.hypot(dx, dz);
     const fx = this.forwardX(), fz = this.forwardZ();
     const fwd = dx * fx + dz * fz, right = dx * Math.cos(this.yaw) - dz * Math.sin(this.yaw);
@@ -365,6 +378,28 @@ export class WyvernBrain {
     }
     this.state = BRAIN_STATE.HOLD; this.f = 0;
     this.holdF = d.art !== ART.NORMAL ? 36 : 12;
+    // v2.36 strings: decide the next link now (seeded rng), so the hold before it is short and the end hold is long
+    this.strNext = -1;
+    const S = WYVERN_STRING, ph = this.phase | 0, depth = this.strN | 0;
+    if (S.on && depth < (S.MAX[ph] || 1) && this.rng.float() < (S.CHANCE[ph] || 0)) {
+      const nx = this._stringNext(v);
+      if (nx >= 0) { this.strNext = nx; this.holdF = S.LINK_HOLD + (d.art === ART.RED ? 10 : 0); }
+    }
+    if (this.strNext < 0 && depth > 0) { this.holdF = Math.max(this.holdF, S.PUNISH); this.strings = (this.strings | 0) + 1; }
+    if (this.strNext < 0) this.strN = 0;
+  }
+  // next link for a string: a different shape from the attack that just ended (never the same RED verb twice)
+  _stringNext(v) {
+    const h = this._lastHero, B = BossVerb;
+    let side = 1;
+    if (h) { const dx = h.x - this.x, dz = h.z - this.z; side = (dx * Math.cos(this.yaw) - dz * Math.sin(this.yaw)) >= 0 ? 1 : -1; }
+    const tail = side > 0 ? B.W_TAIL_R : B.W_TAIL_L;
+    let nx = -1;
+    if (v === B.W_TAIL_L || v === B.W_TAIL_R) nx = B.W_BITE;
+    else if (v === B.W_BITE) nx = (this.strN | 0) >= 1 && this.phase >= 3 ? B.W_LUNGE : tail;
+    else if (v === B.W_LUNGE) nx = B.W_BITE;
+    if (nx === tail && tail === this.lastRed) nx = B.W_LUNGE;
+    return nx;
   }
 
   _hold(h) {
@@ -372,9 +407,16 @@ export class WyvernBrain {
     const low = this.stance === BossStance.GROUND_LOW;
     this.anim.clip = low ? 'idle_low' : 'idle'; this.anim.time = (this.f % 120) / 60; this.anim.loop = true;
     if (this.f < this.holdF) return;
-    if (this.pendingPhase) { this._startRoar(); return; }
-    // phase 3: tail sweep chains into a bite once the punish window has passed
-    if (this.phase === 3 && (this.lastVerb === BossVerb.W_TAIL_L || this.lastVerb === BossVerb.W_TAIL_R)
+    if (this.pendingPhase) { this.strN = 0; this.strNext = -1; this._startRoar(); return; }
+    this._lastHero = h;
+    // v2.36 string link chosen in _endAction (the hero must still be close: no chasing links)
+    if (WYVERN_STRING.on && this.strNext >= 0) {
+      const nx = this.strNext; this.strNext = -1;
+      if (Math.hypot(h.x - this.x, h.z - this.z) <= WYVERN_STRING.RANGE) { this.strN = (this.strN | 0) + 1; this.stringLinks = (this.stringLinks | 0) + 1; this._startVerb(nx); return; }
+      this.strN = 0;
+    }
+    // phase 3: tail sweep chains into a bite once the punish window has passed (v2.35 behaviour when strings are off)
+    if (!WYVERN_STRING.on && this.phase === 3 && (this.lastVerb === BossVerb.W_TAIL_L || this.lastVerb === BossVerb.W_TAIL_R)
       && Math.hypot(h.x - this.x, h.z - this.z) <= 4.0) { this._startVerb(BossVerb.W_BITE); return; }
     this.state = BRAIN_STATE.WAIT; this.f = 0; this.waitF = this._waitFrames();
   }

@@ -29,11 +29,14 @@ import { TouchOverlay } from '../ui/TouchOverlay.js';
 import { Hud } from '../ui/Hud.js';
 import { Fullscreen } from '../ui/Fullscreen.js';
 import { GameSim, GameState, HERO_STATE, DUEL_STATE, BRAIN_STATE, ART, WAVES, GAME_STATE_NAMES, WARDEN_ID, ROUTE, FLOW_F } from './GameSim.js';
+import { WYVERN_STRING } from '../boss/WyvernBrain.js';
+// v2.36 ?wstr=0 restores single wyvern attacks (no strings); read before any sim is built
+if (new URLSearchParams(location.search).get('wstr') === '0') WYVERN_STRING.on = false;
 import { RoadMap } from '../ui/RoadMap.js';
 import { RoadStage } from '../world/RoadStage.js';
 import { makeRoadEnvironment, setRoadLook, roadSunDir, ROAD_LOOK } from '../render/RoadLook.js';
 import { ROAD, ROAD_AMBUSH, roadX, makeRoadDoc } from '../shared/road.js';
-import { HERO_DODGE, HERO_FINISHER_F, HERO_FINISHER_CLIP, STEP_DIR, STEP_CLIP, HERO_CHARGE, GREATSWORD, scalePhases, HERO_SNATCH, HERO_TRIGGER, HERO_RIFT, WEAPONS, HERO_SWEEP, GREAT_NO_EVADE, setAttackSteer, GS_COIL, HERO_GREAT_X, greatPhases, HERO_FLASH, setFlow } from './HeroSim.js';
+import { HERO_DODGE, HERO_FINISHER_F, HERO_FINISHER_CLIP, STEP_DIR, STEP_CLIP, HERO_CHARGE, GREATSWORD, scalePhases, HERO_SNATCH, HERO_TRIGGER, HERO_RIFT, WEAPONS, HERO_SWEEP, GREAT_NO_EVADE, setAttackSteer, GS_COIL, HERO_GREAT_X, greatPhases, HERO_FLASH, setFlow, HERO_JUMP } from './HeroSim.js';
 import { STYLE_RANKS, STYLE_TITLES } from './StyleMeter.js';
 const SNATCH_SPAN = HERO_SNATCH.STARTUP + HERO_SNATCH.TRAVEL_MAX + HERO_SNATCH.RECOVER;
 import { buildQuickstep, quickstepClipTime } from '../shared/quickstep.js';
@@ -430,6 +433,13 @@ pinHips(heroGltf); pinHips(enemyGltf);
 const hero = { root: new THREE.Group(), pivot: new THREE.Group(), model: charGltf ? charGltf.scene : heroGltf.scene, fallback: 'idle' };
 hero.pivot.rotation.y = Math.PI; hero.root.add(hero.pivot); hero.pivot.add(hero.model); scene.add(hero.root);
 const heroBones = prepModel(hero.model);
+// v2.37: rest (bind) leg pose, captured before any clip is applied. The air body layer blends the legs to it and
+// then tucks, so every air cut shares one jump silhouette instead of the stance of the standing clip it borrows.
+const AIR_LEGS = ['LeftUpLeg', 'LeftLeg', 'RightUpLeg', 'RightLeg'];
+const airLegRest = AIR_LEGS.map((n) => (heroBones[n] ? heroBones[n].quaternion.clone() : null));
+const _alA = new THREE.Vector3(), _alB = new THREE.Vector3();
+const HERO_STATE_NAMES_QA = {};
+const AIR_AXIS_SIGN = 1;   // right hip - left hip = the body's right axis (airProbe checks it against the sim right in idle)
 // baked quickstep clips -> AnimationClips on the hero skeleton. Every track must resolve to a real bone, else the
 // clip is dropped (and the sim falls back to the roll) rather than shipping a silent no-op clip.
 const mbClips = [];
@@ -529,6 +539,16 @@ if (heroDance && heroDance.clips && heroAttacks && heroAttacks.clips) Object.ass
 const VAR_ON = qs.get('var') !== '0';
 const heroDanceVar = VAR_ON && heroDance ? await fetch(ROOT + 'motion/mb/hero.dance.attacks.var.json').then((r) => (r.ok ? r.json() : null)).catch(() => null) : null;
 if (heroDanceVar && heroDanceVar.clips && heroDance) { Object.assign(heroAttacks.clips, heroDanceVar.clips); Object.assign(heroDance.clips, heroDanceVar.clips); }
+// v2.38 QUICK standing string: new authored arcs over the dance footwork (tools/mb/run_dance_quick.ps1)
+const QUICK_ON = qs.get('quick') !== '0';
+const heroDanceQuick = QUICK_ON && heroDance ? await fetch(ROOT + 'motion/mb/hero.dance.attacks.quick.json').then((r) => (r.ok ? r.json() : null)).catch(() => null) : null;
+if (heroDanceQuick && heroDanceQuick.clips && heroDance) { Object.assign(heroAttacks.clips, heroDanceQuick.clips); Object.assign(heroDance.clips, heroDanceQuick.clips); }
+// v2.39 great sword light string on its own weighted MotionBricks footwork (tools/mb/run_great_layer.ps1): gl_1a..gl_3c
+// = gf_1..gf_3 lower body + the v2.32 two-handed arcs. ?gfoot=0 restores v2.38 (arcs over the flat lunge slide).
+const GFOOT_ON = qs.get('gfoot') !== '0';
+const heroGreatFoot = GFOOT_ON && heroAttacks && heroAttacks.clips ? await fetch(ROOT + 'motion/mb/hero.great.attacks.json').then((r) => (r.ok ? r.json() : null)).catch(() => null) : null;
+if (heroGreatFoot && heroGreatFoot.clips) Object.assign(heroAttacks.clips, heroGreatFoot.clips);
+const GREAT_FOOT_CLIPS = heroGreatFoot && heroGreatFoot.clips ? Object.keys(heroGreatFoot.clips) : [];
 const DANCE_CLIPS = heroDance && heroDance.clips ? Object.keys(heroDance.clips) : [];
 if (heroAttacks && heroAttacks.clips) {
   const bn = {}; heroGltf.scene.traverse((o) => { if (o.isBone) bn[o.name] = o; });
@@ -555,7 +575,7 @@ const INERT_ON = qs.get('inert') !== '0';
 const INERT_MODE = qs.get('inert') === 'decay' ? 'decay' : 'spring';
 const INERT_HL = +(qs.get('ihl') || 0.6);
 hero.inert = new Inertializer(hero.model, HERO_CLIPS); hero.inert.enabled = INERT_ON; hero.inert.mode = INERT_MODE; hero.inert.hlScale = INERT_HL;
-if (qs.get('plant') !== '0') hero.inert.setPlant(['at_sweep', 'at_sweep_rev', 'at_rift_plant'].concat(DANCE_CLIPS),
+if (qs.get('plant') !== '0') hero.inert.setPlant(['at_sweep', 'at_sweep_rev', 'at_rift_plant'].concat(DANCE_CLIPS, GREAT_FOOT_CLIPS),
   ['Hips', 'LeftUpLeg', 'LeftLeg', 'LeftFoot', 'LeftToeBase', 'RightUpLeg', 'RightLeg', 'RightFoot', 'RightToeBase']);
 const HERO_SOCKET0 = { position: [-0.3366, 7.6967, -1.1561], quaternion: [0.00031, 0.23882, 0.6183, 0.74878], scale: 100 };
 const HERO_SOCKET = RETARGET ? RETARGET.socket(HERO_SOCKET0) : HERO_SOCKET0;
@@ -893,6 +913,7 @@ if (TRAILER) {
 const TRL_FINFX = TRAILER && qs.get('finfx') ? Math.max(0, +qs.get('finfx')) : 1;
 const TRL_RIMG = +(qs.get('rimg') || 0.55);
 const TRL_HRIM = qs.get('hrim') ? parseInt(qs.get('hrim'), 16) : -1;
+const TRL_GHOST = qs.get('ghost') !== '0';
 if (TRAILER) fx.auraGain = +(qs.get('aura') || 0.5);   // telegraph rings stay readable but stop reading as debug decals
 // v2.26 trailer: flares, rift cuts and blade ribbons keep their own hue in the hot core (no white strikes);
 // uniform only, same programs. ?hot=1 restores the white core for A/B.
@@ -1043,7 +1064,12 @@ function trailerAura(gy) {
     fx.mistRGBA(H.x + bx + Math.cos(a) * r, gy + 0.15, H.z + bz + Math.sin(a) * r, 0.28, _auraC.r, _auraC.g, _auraC.b, on ? 0.2 : 0.12, on ? 2 : 1, on ? 1.3 : 0.8);
   }
   const moving = H.speed > 2.2 || H.state === HERO_STATE.ACTION || H.state === HERO_STATE.DODGE || H.state === HERO_STATE.RIFT;
-  if (moving && (f % 4) === 0) fx.afterimage(HERO_ID, edge, on ? 0.45 : 0.3);
+  // t12: during the launcher string the ghosts stacked on the body and the hero read as see-through; no ghosts
+  // off the ground or inside an air verb
+  const airV = (H.y || 0) > 0.05 || (H.state === HERO_STATE.ACTION && AIR_BODY[H.verb]);
+  // ?ghost=0 (film): no hero ghosts while he attacks; review t12 read the additive ghosts over the body as a
+  // see-through hero. Runs and dodges keep theirs.
+  if (moving && !airV && (TRL_GHOST || H.state !== HERO_STATE.ACTION) && (f % 4) === 0) fx.afterimage(HERO_ID, edge, on ? 0.45 : 0.3);
   if (on && TRL_EMB > 0 && (f % TRL_EMB) === 0) { _a.set(H.x, gy + 1.0, H.z); fx._ember(H.x + Math.sin(f) * 0.4, gy + 0.4, H.z + Math.cos(f) * 0.4, 0, 2.2, 0); }
 }
 // v2.26 trailer boss spectacle: every verb gets a colour-coded read on startup and a big contact beat on its active
@@ -1119,7 +1145,7 @@ sim.onHeroHit = (t, dealt, v) => {
   if (t.isBoss) { bHead.getWorldPosition(_p); _p.lerp(bRoot.position, 0.5); _p.y = Math.max(_p.y, 1.2); }
   else _p.set(t.x, 1.2, t.z);
   if (v.rift) { riftHitFx(t, v); return; }
-  const heavy = v.name === 'HEAVY' || !!v.heavy, ch = v.charge || 0, great = !!v.great;
+  const heavy = v.name === 'HEAVY' || !!v.heavy || (!!v.wave && !v.great), ch = v.charge || 0, great = !!v.great;   // v2.37b: the one-handed crescent lands as a heavy
   fx.burstSparks(_p, _n, (heavy ? 1.0 + 0.9 * ch : 0.6) * (great ? 1.4 : 1));
   if (heavy && !t.isBoss) fx.burstBlood(_p, _n, 0.8 + 0.6 * ch);
   if (ch > 0.5) fx.burstSparks(_p, _n, 0.8);
@@ -1142,7 +1168,7 @@ sim.onHeroHit = (t, dealt, v) => {
   if (!TRAILER) fx.flare(_p, heavy ? 1.3 + 0.8 * ch : great ? 1.0 : 0.7, ch > 0.5 ? 0xffe0a0 : 0xff9040);
   if (TRAILER) trailerHitFx(heavy, ch, great, dealt);
   if (t.isBoss && t.id === GAUNTLET_ID) gview.hit(H.facingX(), H.facingZ(), (heavy ? 1 : 0.5) * (1 + ch));
-  else if (t.isBoss) { bossReact.amp = Math.min(1.6, bossReact.amp * 0.4 + (heavy ? 1 : 0.5) * (1 + ch)); bossReact.t = 0; bossReact.dx = H.facingX(); bossReact.dz = H.facingZ(); bossReact.flash = Math.min(1, 0.5 + 0.5 * ch + (heavy ? 0.3 : 0)); }
+  else if (t.isBoss) { bossReact.amp = Math.min(1.6, bossReact.amp * 0.4 + (heavy ? 1 : 0.5) * (1 + ch) * (v.wave && !great ? 3 : v.air ? 2.2 : 1)); bossReact.t = 0; bossReact.dx = H.facingX(); bossReact.dz = H.facingZ(); bossReact.flash = Math.min(1, 0.5 + 0.5 * ch + (heavy ? 0.3 : 0)); }
 };
 sim.onEquip = (w, src) => {
   setHeroWeapon(w);
@@ -1418,13 +1444,63 @@ function comboPress(c) {
     if (bot.cur === 'L') c.attack = true; else if (bot.cur === 'S' || bot.cur === 'M') c.sweep = true;
   }
 }
-const VERB_IDX = { LIGHT_1: 1, LIGHT_2: 2, LIGHT_3: 3, HEAVY: 4, SWEEP: 5, SWEEP_REV: 6, D_L1: 7, D_L2: 8, D_L3: 9, D_L4: 10, D_L5: 11, D_H1: 12, D_H2: 13, WAVE: 14, LEAP: 15 };
+const VERB_IDX = { LIGHT_1: 1, LIGHT_2: 2, LIGHT_3: 3, HEAVY: 4, SWEEP: 5, SWEEP_REV: 6, D_L1: 7, D_L2: 8, D_L3: 9, D_L4: 10, D_L5: 11, D_H1: 12, D_H2: 13, WAVE: 14, LEAP: 15, J_LIGHT: 16, J_HEAVY: 17, JUMP_IN: 18, STEP_CUT: 19, J_LIGHT2: 20, J_LIGHT3: 21, RISER: 22, BACK_CUT: 23, Q_L1: 24, Q_L2: 25, Q_L3: 26, Q_L4: 27, Q_L5: 28 };
+// v2.36 Vesper has no jump clip: the air verbs reuse existing clips (clip, clip-time window in s) sampled across the verb
+// v2.37: every cut in the air string samples a different clip, so no two cuts in a row share an animation.
+// 4th value = the clip time of the strike itself (measured with tipScanStd: where the blade tip actually travels),
+// pinned to the first active frame. Before this the windows were sampled linearly and the blade came through
+// 8-20 frames after the hit (mh_slam hit at f35 of a 46-frame plunge whose contact is f14).
+// QA sheet t5: mh_slam is a two-hander clip whose tip ends 0.39 m under the floor (the sabre vanished on landing), so
+// the plunge stops at 1.74 s (tip 0.4 m up); dz_l4 comes DOWN from 0.43 s to 0.75 s, so the crescent leaves at 0.64 s.
+const AIR_POSE = { J_LIGHT: ['rising_slash', 0.78, 1.5, 1.1], J_HEAVY: ['mh_slam', 0.8, 1.8, 1.74], JUMP_IN: ['mh_slam', 0.6, 1.8, 1.74], STEP_CUT: ['phantom_spin', 0.0, 1.15, 0.5],
+  RISER: ['rising_slash', 0.72, 1.5, 1.12], J_LIGHT2: ['phantom_spin', 0.2, 1.0, 0.5], J_LIGHT3: ['mh_judgment', 0.72, 1.5, 1.08], BACK_CUT: ['dz_l4', 0.16, 1.0, 0.75] };   // t6: pinned at 0.64 the blade was still coming down 6 frames after the release
+const JUMP_POSE = ['mh_rising', 0.35, 1.25];   // take-off crouch -> rise -> tuck, held through the fall
+// v2.37 air body + air cut crescents (presentation only, ?airbody=0 turns the body layer off). The air verbs borrow
+// standing clips, so off the ground the knees tuck, the trunk commits (pitch, + = back) and the spin cut turns the
+// whole body once inside its cancel window. Each air cut also throws one crescent from the blade (AIR_FX: tilt of
+// the chord against the facing direction on screen, length in metres, bow depth, two = mirrored pair = a ring).
+const AIR_ON = qs.get('airbody') !== '0';
+// v2.37b (ref #17 sheets 02/03): the air string changes the body line on every cut - an upright twisting rise, a
+// laid-out corkscrew toward the foe (cork: one roll about the facing axis inside the cancel window, legs trailing),
+// a diagonal chop with the legs still out, then the tucked plunge. ?cork=0 restores the upright spin.
+const CORK_ON = qs.get('cork') !== '0';
+const AIR_BODY = { RISER: { pitch: 0.34, tuck: 0.95, lead: 1, drive: 1 }, J_LIGHT: { pitch: 0.1, tuck: 0.7, lead: 1 },
+  J_LIGHT2: CORK_ON ? { pitch: -1.35, tuck: 0.1, cork: 1, lay: 1, lead: -1, fix: 1, split: 1 } : { pitch: 0, tuck: 0.9, spin: 1, lead: -1 },
+  // t7: the plunge strode in the air (one knee up); sym = both legs fold back under the body, trunk dives
+  // t12: the second and third air cuts both read as a laid-out plank; the third is now an upright diagonal chop,
+  // lead knee driven up and the rear leg long (ref #17 sheet 02 row 3 tile 5), so the body line changes on every cut
+  J_LIGHT3: { pitch: -0.28, tuck: 0.85, lead: 1, drive: 1 }, J_HEAVY: { pitch: 0, tuck: 1.05, lead: 1, flip: 1, knees: 1 } };   // z11: knelt in the air; now one tucked forward flip into the slam
+// v2.37b back flip (ref #17: flip back out of reach, land, throw the crescent). The one-handed back quickstep tucks
+// and turns once over its travel frames with a small hop. Presentation only: the sim step, its i-frames and its
+// travel are unchanged, and the camera does not follow the hop. ?bflip=0 turns it off.
+const BFLIP_ON = qs.get('bflip') !== '0';
+const _chp = new THREE.Vector3();   // film camera subject: the hero with the air height damped
+const BFLIP = { F0: 2, F1: 27, HOP: 0.95, TUCK: 1.1 };   // a1: lands on the cancel frame, straight into the cut
+const bflip = { u: 0, on: false, h: 0 };
+function bflipPhase(alpha) {
+  bflip.on = BFLIP_ON && H.weapon < 1 && H.state === HERO_STATE.DODGE && H.stepKind === STEP_DIR.B && H.dodgeF >= 0;
+  bflip.u = bflip.on ? Math.min(1, Math.max(0, (H.dodgeF + alpha - BFLIP.F0) / (BFLIP.F1 - BFLIP.F0))) : 0;
+  return (bflip.h = bflip.on ? BFLIP.HOP * Math.sin(Math.PI * bflip.u) : 0);
+}
+// QA sheet t1: a mirrored pair read as a flat lens over the hero and 0.85 m ahead still covered the body from the
+// over-shoulder lens, so every crescent is single and sits 1.35 m toward the target
+// t12: lengths cut by about a fifth; at the closer air lens a 2.9 m arc ran past the frame edge
+const AIR_FX = { RISER: { tilt: 1.1, len: 2.3, bend: 1 }, J_LIGHT: { tilt: -0.35, len: 2.1, bend: 0.9 }, J_LIGHT2: { tilt: -0.08, len: 2.1, bend: 0.8 },
+  J_LIGHT3: { tilt: -0.75, len: 2.3, bend: 1 }, J_HEAVY: { tilt: 0, len: 2.8, bend: 1, slam: 1, lead: 5 }, STEP_CUT: { tilt: 1.0, len: 2.2, bend: 0.7 }, JUMP_IN: { tilt: 0.1, len: 2.5, bend: 1 } };
+const airBody = { t: 0, p: 0, spin: 0, l: 1, ax: 1 };
+function airSpinYaw(alpha) {
+  airBody.spin = 0; airBody.a = alpha || 0;
+  if (!AIR_ON || H.state !== HERO_STATE.ACTION) return 0;
+  const A = AIR_BODY[H.verb]; if (!A || !A.spin) return 0;
+  const u = Math.min(1, (H.actF + alpha) / Math.max(1, H.verbs[H.verb].chain[0]));
+  return (airBody.spin = -2 * Math.PI * A.spin * u * u * (3 - 2 * u));
+}
 let qaPress = null;
 let choreo = null;   // film v14 scripted-fight player (recording only, built by __ember.choreo)
 function fillCommand() {
   const c = sim.cmd;
   c.mx = 0; c.mz = 0; c.speed = 0; c.attack = false; c.heavy = false; c.heavyHeld = false; c.dodge = false; c.roll = false; c.blockHeld = false; c.blockPress = false;
-  c.snatch = false; c.trigger = false; c.sweep = false;
+  c.snatch = false; c.trigger = false; c.sweep = false; c.jump = false;
   if (qaPress) { c[qaPress] = true; qaPress = null; return; }   // QA one-shot press (__ember.press), deterministic review states
   if (choreo && choreo.steps) { if (choreo.active) choreo.fill(c); return; }   // scripted take: the beat sheet owns the command
   if (useBot) { botCommand(c); return; }
@@ -1441,6 +1517,7 @@ function fillCommand() {
   else if (b === A.SNATCH && input.consumeBuffered(A.SNATCH)) c.snatch = true;
   else if (b === A.TRIGGER && input.consumeBuffered(A.TRIGGER)) c.trigger = true;
   else if (b === A.SWEEP && input.consumeBuffered(A.SWEEP)) c.sweep = true;
+  else if (b === A.JUMP && input.consumeBuffered(A.JUMP)) c.jump = true;
   c.blockHeld = input.isHeld(A.BLOCK);
   c.heavyHeld = input.isHeld(A.HEAVY);            // charge: the swing holds at the top of its wind-up while held
   wasBlockHeld = c.blockHeld;
@@ -1482,7 +1559,8 @@ function inkLayer(attacking, dt) {
 // crimson aura motes + afterimage echoes while active, a shockwave burst on activation; rank-up = small warm flare.
 // Edges are taken from sim counters (once per sim frame), so a render-rate change can never double-spawn.
 const DMC = Object.freeze({ RED: 0xff3a20, AURA: 0xff5a2a, EMBER: 0xffb070 });
-const dmc = { snatch: 0, trig: 0, trigF: -1, flash: -999, landF: -1, ghostF: -1, rimK: 0, rift: 0, riftFin: -1, riftLb: 0, wave: 0, waveSeg: 0, leapUp: -1, leapDn: -1 };
+const dmc = { snatch: 0, trig: 0, trigF: -1, flash: -999, landF: -1, ghostF: -1, rimK: 0, rift: 0, riftFin: -1, riftLb: 0, wave: 0, waveSeg: 0, leapUp: -1, leapDn: -1,
+  airFx: -1, airSlam: -1, wv: null, wvGen: -1, wvHits: 0, wvLive: false, wvX: 0, wvZ: 0, wvRot: 0, wvCol: 0xff6a2a };
 const dmcView = {
   trigger: { on: false, gauge: 0, max: HERO_TRIGGER.MAX, cost: HERO_TRIGGER.COST, left: 0 },
   style: { rank: 0, letter: STYLE_RANKS[0], title: STYLE_TITLES[0], frac: 0, flashF: -999 },
@@ -1517,22 +1595,128 @@ function riftHitFx(t, v) {
 // line segment every WAVE_SEG sim frames (<= 8 per wave, inside the 16-slot rift pool).
 const WAVE_COL = { FAN: 0xbff4ff, LINE: 0x8fe6ff };
 const WAVE_SEG = 3;
-const _wv = new THREE.Vector3();
+const WAVE_Y = 1.05;   // one-handed crescent rides at chest height
+const _wv = new THREE.Vector3(), _vd = new THREE.Vector3();
+const _afH = new THREE.Vector3(), _afT = new THREE.Vector3(), _afM = new THREE.Vector3(), _afA = new THREE.Vector3(), _afB = new THREE.Vector3();
+const airTip = { p: new THREE.Vector3(), q: new THREE.Vector3(), f: -9, cont: false };   // blade tip, this sim frame and the last
+const airCres = { id: -1, a: null, ga: -1, b: null, gb: -1, off: new THREE.Vector3() };   // the live air arc pair and its offset from the blade
+// View-plane angle of a world ground direction (what FxPool cuts rotate in); a direction that points along the lens
+// has no screen angle, so it falls back to up-right.
+function viewBow(dx, dz) {
+  _vd.set(dx, 0, dz).transformDirection(camera.matrixWorldInverse);
+  return _vd.x * _vd.x + _vd.y * _vd.y < 0.04 ? 0.5 : Math.atan2(_vd.y, _vd.x);
+}
+// v2.37 air cuts: one crescent per air / step-in cut on its first active frame (<= 3 slots of the 16-slot pool);
+// the plunge lands with an ember ring and a vertical cut. One-handed blades only.
+function airFxLayer(dt) {
+  if (dt <= 0 || H.weapon >= 1 || H.state !== HERO_STATE.ACTION) return;
+  const v = H.verbs[H.verb], A = AIR_FX[H.verb];
+  // lead: the plunge draws its arc while the hero is still falling, not after the landing
+  if (!v || !A) return;
+  const fxh = H.facingX(), fzh = H.facingZ(), gy = colliders.terrainY(H.z), col = TRAILER ? trailerEdge() : 0xff6a2a;
+  const px = H.x + fxh * 1.6, pz = H.z + fzh * 1.6;   // QA sheet t4: at 1.35 m the spin and chop arcs still opened on the shoulder
+  // t12 (review of takes t11/t12): the arcs opened 1.6 m ahead of the hero at an authored angle, so from a side lens
+  // they floated beside him. Each arc now opens ON the blade: centred on its outer half, chord along the tip's own
+  // travel on screen, bowed away from the body. A pinned clip whose tip is still falls back to the authored tilt.
+  heroSword.hilt.getWorldPosition(_afH); heroSword.tip.getWorldPosition(_afT);
+  if (airTip.f !== sim.frame) { airTip.cont = sim.frame - airTip.f <= 2; airTip.q.copy(airTip.p); airTip.p.copy(_afT); airTip.f = sim.frame; }
+  if (H.actF >= v.startup - (A.lead || 0) + (A.slam ? 0 : 1) && dmc.airFx !== H.actionId) {
+    dmc.airFx = H.actionId;
+    let rot = viewBow(fxh, fzh) - Math.PI / 2 + A.tilt; dmc.cresD = 0.5;
+    _afM.copy(_afH).lerp(_afT, 0.7);
+    _afA.copy(airTip.q).project(camera); _afB.copy(airTip.p).project(camera);
+    const sdx = (_afB.x - _afA.x) * camera.aspect, sdy = _afB.y - _afA.y;
+    if (airTip.cont && sdx * sdx + sdy * sdy > 1.5e-4) {
+      rot = Math.atan2(sdy, sdx); dmc.cresD = 1;
+      if (heroBones.Hips) { heroBones.Hips.getWorldPosition(_afA).project(camera); _afB.copy(_afM).project(camera);
+        if (-Math.sin(rot) * (_afB.x - _afA.x) * camera.aspect + Math.cos(rot) * (_afB.y - _afA.y) < 0) rot += Math.PI; }
+    }
+    // the bowed arc peaks 0.15 len from the quad centre: pull the quad back so the peak sits on the blade
+    _afA.setFromMatrixColumn(camera.matrixWorld, 0); _afB.setFromMatrixColumn(camera.matrixWorld, 1);
+    const off = -0.15 * A.len * A.bend;
+    _wv.copy(_afM).addScaledVector(_afA, -Math.sin(rot) * off).addScaledVector(_afB, Math.cos(rot) * off);
+    const c0 = fx.crescent(_wv, A.len, rot, col, 0, A.slam ? 0.24 : 0.18, A.bend, 3.2);   // t12: shorter, thicker, gone before the next cut
+    const c1 = fx.crescent(_wv, A.len * 0.78, rot, TRAILER ? trailerCore(col) : 0xffd9a8, 0.016, 0.14, A.bend, 1.6);
+    airCres.id = H.actionId; airCres.a = c0 || null; airCres.ga = c0 ? c0.gen : -1; airCres.b = c1 || null; airCres.gb = c1 ? c1.gen : -1; airCres.off.copy(_wv).sub(_afM);
+  }
+  // t12b: the hero travels up to 2 m while an arc is alive, so a world-anchored arc was left hanging beside him.
+  // For its first 0.1 s the arc rides the blade; after that (or once the next cut starts) it stays where it is.
+  if (airCres.id === H.actionId) {
+    _afM.copy(_afH).lerp(_afT, 0.7).add(airCres.off);
+    if (airCres.a && airCres.a.gen === airCres.ga && airCres.a.live && airCres.a.t < 0.1) airCres.a.g.position.copy(_afM);
+    if (airCres.b && airCres.b.gen === airCres.gb && airCres.b.live && airCres.b.t < 0.1) airCres.b.g.position.copy(_afM);
+  }
+  // the plunge lands: ember ring + sparks on its first active frame
+  if (A.slam && H.actF >= v.startup && dmc.airSlam !== H.actionId) {
+    dmc.airSlam = H.actionId;
+    // t12: the landing read as one flat ring beside the hero. The ring now opens under the blade tip itself, a
+    // wider slower ring follows it out, and the strike point gets a flare and a larger spark burst.
+    const sx = _afT.x, sz = _afT.z;
+    fx.shockwave(sx, gy + 0.06, sz, 2.2, col, 0.7, 0.4); fx.shockwave(sx, gy + 0.05, sz, 3.6, col, 0.4, 0.62);
+    _wv.set(sx, gy + 0.2, sz); _n.set(0, 1, 0); fx.burstSparks(_wv, _n, 2.0); fx.flare(_wv, 1.3, col);
+    cam.impact('heavy');
+  }
+}
 function greatXLayer(dt) {
   if (dt <= 0) return;
   const W = H.wave;
   if (H.waves !== dmc.wave) {
     dmc.wave = H.waves; const gy = colliders.terrainY(W.z);
     _wv.set(H.x + W.dx * 0.9, gy + 0.35, H.z + W.dz * 0.9);
-    fx.riftSlash(_wv, 3.4, 0.08, WAVE_COL.FAN, 0, 0.3); fx.riftSlash(_wv, 2.4, 0.1, 0xffffff, 0.02, 0.2);
-    fx.shockwave(_wv.x, gy + 0.06, _wv.z, 1.6, WAVE_COL.LINE, 0.5, 0.35);
-    cam.impact('heavy'); dmc.waveSeg = sim.frame;
+    // v2.37: the one-handed BACK_CUT crescent is ember coloured and smaller than the two-hander wave
+    const one = H.weapon < 1; dmc.waveFan = one ? 0xffb078 : WAVE_COL.FAN; dmc.waveLine = one ? 0xff6a2a : WAVE_COL.LINE; dmc.waveK = one ? 0.7 : 1;
+    if (one) {
+      // a standing crescent that leaves the blade and flies: one held slot rides the sim wave, a hot inner arc
+      // marks the release, and a fading copy is dropped every WAVE_SEG frames as its wake
+      const col = TRAILER ? trailerEdge() : 0xff6a2a; dmc.wvCol = col; dmc.wvRot = viewBow(W.dx, W.dz) - Math.PI / 2;
+      // QA sheet t2: it popped in a body-width ahead; it now opens at the blade (0.35 m) and is 3.4 m tall
+      // t7: it still popped in half a body-width ahead at chest height. It now opens ON the sword tip: the offset
+      // from the sim wave line to the tip is kept and fades out over the first 2.5 m of flight. The smaller hot
+      // inner arc read as a second crescent beside the first, so it is gone.
+      heroSword.tip.getWorldPosition(_wv);
+      dmc.wvOx = _wv.x - H.x; dmc.wvOz = _wv.z - H.z; dmc.wvOy = Math.max(-0.5, Math.min(0.9, _wv.y - (gy + WAVE_Y)));
+      _wv.set(H.x + dmc.wvOx, gy + WAVE_Y + dmc.wvOy, H.z + dmc.wvOz); dmc.wvHits = H.waveHits;
+      // QA sheet t4: 3.4 m read as twice the hero; a thrown crescent is about 1.4 hero heights
+      dmc.wv = fx.crescent(_wv, 3.1, dmc.wvRot, col, 0, 0.3, 1, 3.0); dmc.wvGen = dmc.wv ? dmc.wv.gen : -1; fx.flare(_wv, 1.0, col);
+      fx.shockwave(H.x + W.dx * 0.35, gy + 0.06, H.z + W.dz * 0.35, 1.1, col, 0.4, 0.3);
+    } else {
+      fx.riftSlash(_wv, 3.4 * dmc.waveK, 0.08, dmc.waveFan, 0, 0.3); fx.riftSlash(_wv, 2.4 * dmc.waveK, 0.1, 0xffffff, 0.02, 0.2);
+      fx.shockwave(_wv.x, gy + 0.06, _wv.z, 1.6 * dmc.waveK, dmc.waveLine, 0.5, 0.35);
+    }
+    cam.impact(one ? 'light' : 'heavy'); dmc.waveSeg = sim.frame;
   }
-  if (W.live && sim.frame - dmc.waveSeg >= WAVE_SEG) {
-    dmc.waveSeg = sim.frame;
-    const px = W.x + W.dx * W.d, pz = W.z + W.dz * W.d, gy = colliders.terrainY(pz);
-    _wv.set(px, gy + 0.12, pz); fx.riftSlash(_wv, 1.9, 0.02, WAVE_COL.LINE, 0, 0.4);
-    if (!reducedMotion) fx.splash(px, pz, 0.35);
+  if (W.live) {
+    const px = W.x + W.dx * W.d, pz = W.z + W.dz * W.d, gy = colliders.terrainY(pz), one = dmc.waveK < 1;
+    if (one && dmc.wv && dmc.wv.live && dmc.wv.gen === dmc.wvGen) {
+      dmc.wvRot = viewBow(W.dx, W.dz) - Math.PI / 2;
+      const ok = Math.max(0, 1 - W.d / 2.5);   // blade-tip offset fades out as it flies
+      dmc.wv.g.position.set(px + (dmc.wvOx || 0) * ok, gy + WAVE_Y + (dmc.wvOy || 0) * ok, pz + (dmc.wvOz || 0) * ok); dmc.wv.hold = 0.08; dmc.wv.m.uniforms.uRot.value = dmc.wvRot;
+    }
+    // the crescent bites: flare + sparks + a crossed cut on the frame the sim wave first touches a target
+    if (one && H.waveHits !== dmc.wvHits) {
+      dmc.wvHits = H.waveHits; _wv.set(px, gy + WAVE_Y + 0.2, pz);
+      fx.flare(_wv, 1.5, dmc.wvCol); _n.set(0, 1, 0); fx.burstSparks(_wv, _n, 1.3);
+      fx.riftSlash(_wv, 3.2, dmc.wvRot + 0.6, dmc.wvCol, 0, 0.24); fx.shockwave(px, gy + 0.08, pz, 2.6, dmc.wvCol, 0.9, 0.4); cam.impact('heavy'); if (!reducedMotion) post.kick(0.1, dmc.wvCol);
+    }
+    if (sim.frame - dmc.waveSeg >= WAVE_SEG) {
+      dmc.waveSeg = sim.frame;
+      // t6: the wake copies read as three separate arcs, so the one-handed crescent flies alone (splash only)
+      if (!one) { _wv.set(px, gy + 0.12, pz); fx.riftSlash(_wv, 1.9 * (dmc.waveK || 1), 0.02, dmc.waveLine || WAVE_COL.LINE, 0, 0.4); }
+      if (!reducedMotion) fx.splash(px, pz, 0.35);
+    }
+    dmc.wvLive = one; dmc.wvX = px; dmc.wvZ = pz;
+  } else if (dmc.wvLive) {
+    // the crescent lands (or runs out of range): a crossed cut and sparks where it stopped
+    // v2.37: the one-handed crescent stops on the first foe it bites, so the sim line is already dead on the hit
+    // frame and the bite is drawn here (QA sheet t5: bite + landing both fired and the arc hung on the wing for 10 frames)
+    dmc.wvLive = false;
+    const ex = W.x + W.dx * W.d, ez = W.z + W.dz * W.d; _wv.set(ex, colliders.terrainY(ez) + WAVE_Y, ez);
+    if (dmc.wv && dmc.wv.live && dmc.wv.gen === dmc.wvGen) { dmc.wv.g.position.copy(_wv); dmc.wv.hold = 0; dmc.wv.t = Math.max(dmc.wv.t, dmc.wv.life * 0.6); }
+    if (H.waveHits !== dmc.wvHits) {
+      dmc.wvHits = H.waveHits; _wv.y += 0.2;
+      fx.riftSlash(_wv, 2.8, dmc.wvRot + 0.55, dmc.wvCol, 0, 0.16); fx.riftSlash(_wv, 2.8, dmc.wvRot - 0.55, 0xffffff, 0.02, 0.12);
+      fx.flare(_wv, 1.6, dmc.wvCol); _n.set(0, 1, 0); fx.burstSparks(_wv, _n, 1.6); fx.shockwave(ex, _wv.y - WAVE_Y - 0.12, ez, 2.6, dmc.wvCol, 0.9, 0.4); cam.impact('heavy'); if (!reducedMotion) post.kick(0.1, dmc.wvCol);
+    } else fx.flare(_wv, 0.7, dmc.wvCol);
   }
   // leap: dust ring on take-off, ember ring + slam on landing (first ACTIVE frame)
   if (H.state === HERO_STATE.ACTION && H.verb === 'LEAP') {
@@ -1583,7 +1767,7 @@ function riftLayer(dt) {
   if (dmc.riftLb < 0.01) dmc.riftLb = 0;
 }
 function dmcLayer(dt) {
-  riftLayer(dt); greatXLayer(dt);
+  riftLayer(dt); greatXLayer(dt); airFxLayer(dt);
   // HUD view (allocation-free)
   const T = dmcView.trigger, Sm = sim.style, V = dmcView.style;
   T.on = H.triggerF > 0; T.gauge = H.gauge;
@@ -1693,7 +1877,7 @@ function rotWorld(b, axis, ang) {
 const HB = { s1: heroBones.Spine01, s2: heroBones.Spine02, neck: heroBones.neck };
 const BB = { s1: bone('wivern_ Spine1'), s2: bone('wivern_ Spine2'), n1: bone('wivern_ Neck1'), n3: bone('wivern_ Neck3'), n5: bone('wivern_ Neck5'), head: HEAD };
 const heroReact = { amp: 0, t: 9, dx: 0, dz: 0 };
-const bossReact = { amp: 0, t: 9, dx: 0, dz: 1, flash: 0, look: 0, lastClip: '' };
+const bossReact = { amp: 0, t: 9, dx: 0, dz: 1, flash: 0, look: 0, rear: 0, side: 1, lastClip: '' };
 const chargeFx = { wasFull: false, glow: 0 };
 const lean = { sp: 0, yaw: 0, p: 0, r: 0 }; const _ax2 = new THREE.Vector3();
 HB.sp = heroBones.Spine;
@@ -1819,6 +2003,54 @@ function heroLayer(dt) {
     if (Math.abs(lean.p) > 1e-3) { rotWorld(HB.sp, _ax, -lean.p * 0.5); rotWorld(HB.s1, _ax, -lean.p * 0.5); }
     if (Math.abs(lean.r) > 1e-3) { _ax2.set(fx_, 0, fz_); rotWorld(HB.sp, _ax2, lean.r * 0.6); rotWorld(HB.neck, _ax2, -lean.r * 0.4); }
   }
+  // v2.37 air body: off the ground the trunk commits and the knees tuck (lead knee up, rear heel back), eased in
+  // and out with height, so an air cut no longer reads as a standing clip lifted off the floor
+  if (AIR_ON) {
+    const A = H.state === HERO_STATE.ACTION ? AIR_BODY[H.verb] : null, up = Math.min(1, Math.max(0, (H.y || 0) / (A && A.drive ? 0.12 : 0.45)));
+    const k = dt > 0 ? Math.min(1, dt * 16) : 0;
+    const fT = bflip.on ? BFLIP.TUCK * Math.min(1, 2.4 * Math.sin(Math.PI * Math.min(1, bflip.u / 0.9))) : 0;   // t10: tucked by 15% of the flip, held to 85%
+    airBody.t += ((A ? A.tuck * up : fT) - airBody.t) * k; airBody.p += ((A ? A.pitch * up : 0) - airBody.p) * k;
+    airBody.lay = (airBody.lay || 0) + ((A && A.lay ? A.lay * up : 0) - (airBody.lay || 0)) * (A && A.lay ? k : Math.min(1, k * 2));   // t10: the plunge opened laid out flat
+    // the spin cut turns the whole model, so the tuck axis turns with it (else the legs splay sideways mid-spin)
+    // QA sheet t5: the borrowed clips yaw the hips away from the sim facing (the chop stood in a wide A-stance, the
+    // spin strode), so the tuck axis is the body's own right axis: hip joint to hip joint, read from the posed skeleton
+    _ax2.copy(_ax);
+    if (A && heroBones.LeftUpLeg && heroBones.RightUpLeg) {
+      heroBones.LeftUpLeg.getWorldPosition(_alA); heroBones.RightUpLeg.getWorldPosition(_alB);
+      _alB.sub(_alA).multiplyScalar(AIR_AXIS_SIGN); if (_alB.lengthSq() > 1e-6) _ax2.copy(_alB.normalize());
+    } else if (airBody.spin) _ax2.applyAxisAngle(UP, airBody.spin);
+    airBody.ax = _ax2.x * _ax.x + _ax2.z * _ax.z;
+    if (Math.abs(airBody.p) > 0.005) rotWorld(heroBones.Hips, A && A.fix ? _ax : _ax2, airBody.p);
+    // lead leg: each cut names the knee that comes up, so the legs scissor between cuts instead of freezing
+    airBody.l += ((A ? (A.lead || 1) : airBody.l) - airBody.l) * k;
+    airBody.s = (airBody.s || 0) + ((A && A.sym ? 1 : 0) - (airBody.s || 0)) * k;
+    const t = airBody.t;
+    if (t > 0.01 || airBody.lay > 0.01) {
+      const w = Math.max(airBody.lay || 0, Math.min(1, t / 0.5)); let sL = (airBody.l + 1) * 0.5, sR = 1 - sL;
+      sL += (0.12 - sL) * airBody.s; sR += (0.12 - sR) * airBody.s;
+      for (let i = 0; i < 4; i++) { const b = heroBones[AIR_LEGS[i]]; if (b && airLegRest[i]) b.quaternion.slerp(airLegRest[i], w); }
+      const bw = (airBody.b = (airBody.b || 0) + ((bflip.on || (A && A.knees) ? 1 : 0) - (airBody.b || 0)) * Math.min(1, k * 1.5)), nb = 1 - bw;
+      const dv = (airBody.d = (airBody.d || 0) + ((A && A.drive ? 1 : 0) - (airBody.d || 0)) * k);   // a2: the launcher's legs just hung
+      const uL = -0.3 + (1.35 + 0.55 * dv) * sL, uR = -0.3 + (1.35 + 0.55 * dv) * sR, lL = -1.1 - 0.4 * sL + 0.8 * dv * (1 - sL), lR = -1.1 - 0.4 * sR + 0.8 * dv * (1 - sR);
+      rotWorld(heroBones.LeftUpLeg, _ax2, (uL * nb + 2.1 * bw) * t); rotWorld(heroBones.LeftLeg, _ax2, (lL * nb - 2.3 * bw) * t);
+      rotWorld(heroBones.RightUpLeg, _ax2, (uR * nb + 2.1 * bw) * t); rotWorld(heroBones.RightLeg, _ax2, (lR * nb - 2.3 * bw) * t);
+      // t12: the laid-out corkscrew flew with both legs together like a plank; ref #17 scissors them into a V
+      // (lead thigh forward, rear thigh back with the heel folded)
+      const sv = (airBody.v = (airBody.v || 0) + ((A && A.split ? A.split : 0) - (airBody.v || 0)) * k) * (airBody.lay || 0);
+      if (sv > 0.01) { rotWorld(heroBones.LeftUpLeg, _ax2, (1.15 * sL - 0.5) * sv); rotWorld(heroBones.LeftLeg, _ax2, -0.9 * (1 - sL) * sv);
+        rotWorld(heroBones.RightUpLeg, _ax2, (1.15 * sR - 0.5) * sv); rotWorld(heroBones.RightLeg, _ax2, -0.9 * (1 - sR) * sv); }
+      if (bw > 0.02) { const c = bw * Math.min(1, t); rotWorld(HB.sp, _ax2, -0.2 * c); rotWorld(HB.s1, _ax2, -0.4 * c); rotWorld(HB.s2, _ax2, -0.4 * c); }
+    }
+    // corkscrew: one roll about the line to the foe, done by the cancel frame so the next cut starts square
+    if (A && A.cork) { const u = Math.min(1, (H.actF + (airBody.a || 0)) / Math.max(1, H.verbs[H.verb].chain[0]));
+      _alA.set(0, 1, 0).applyAxisAngle(_ax, airBody.p); rotWorld(heroBones.Hips, _alA, 2 * Math.PI * A.cork * u * u * (3 - 2 * u)); }
+    // plunge flip: one forward turn about the hips between the hang and the landing, square again 2 frames before the floor
+    if (A && A.flip) { const vv = H.verbs[H.verb], u = Math.min(1, Math.max(0, (H.actF + (airBody.a || 0) - 1) / Math.max(1, vv.startup - 3)));
+      if (u > 0 && u < 1) { _ax.set(-fz_, 0, fx_); rotWorld(heroBones.Hips, _ax, -2 * Math.PI * A.flip * (0.4 * u + 0.6 * u * u * (3 - 2 * u))); } }
+  }
+  // v2.37b back flip: one backward turn about the hips over the travel frames of the back quickstep
+  if (bflip.on && bflip.u > 0 && bflip.u < 0.85) { const u = Math.min(1, bflip.u / 0.85), sm = u * u * (3 - 2 * u); _ax.set(-fz_, 0, fx_); rotWorld(heroBones.Hips, _ax, 2 * Math.PI * (0.45 * u + 0.55 * sm));
+    }
   // incoming hit recoil: damped spring away from the hit
   heroReact.t += dt;
   if (heroReact.amp > 0.01) {
@@ -1852,13 +2084,41 @@ function bossLayer(dt) {
   if (idle && !B.airborne) { const yawTo = Math.atan2(-(H.x - B.x), -(H.z - B.z)); want = Math.max(-0.55, Math.min(0.55, lerpAngle(0, yawTo - B.yaw, 1))); }
   bossReact.look += (want - bossReact.look) * Math.min(1, dt * 4);
   if (Math.abs(bossReact.look) > 1e-3) { rotWorld(BB.n1, UP, bossReact.look * 0.3); rotWorld(BB.n3, UP, bossReact.look * 0.35); rotWorld(BB.head, UP, bossReact.look * 0.35); }
+  // t13 (bodyprobe on the film15 plunge): the hero lands at the wyvern's feet and its low tracking head sat inside
+  // the crouched hero (head bones 0.09 m apart on the landing hold). On grounded idle beats the neck rears up and
+  // back while the hero is under the head, and the head tips back down to keep its eyes on him. Presentation only.
+  let rearW = 0;
+  if (idle && !B.airborne && HEAD) {
+    HEAD.getWorldPosition(_a);   // this frame's authored pose, read before the look / yield layers move it
+    const hx = H.x - B.x, hz = H.z - B.z;
+    const reach = Math.hypot(_a.x - B.x, _a.z - B.z), hdist = Math.hypot(hx, hz);
+    // the look layer swings the head onto the hero's bearing, so what matters is how close he is to the head's reach
+    const hd = Math.abs(want) < 0.54 ? Math.abs(hdist - reach) : Math.hypot(_a.x - H.x, _a.z - H.z);
+    if (_a.y < colliders.terrainY(H.z) + (H.y || 0) + 2.6) rearW = Math.max(0, Math.min(1, (2.1 - hd) / 0.8));
+    // side: the one that carries the head off the hero ON SCREEN. World clearance alone was not enough: at 0.7 m the
+    // head still sat between the film camera and the crouched hero and hid his face.
+    if (bossReact.rear < 0.02 && rearW > 0) {
+      BB.n1.getWorldPosition(_b); _dir.setFromMatrixColumn(camera.matrixWorld, 0);
+      const lat = (_a.x - H.x) * _dir.x + (_a.z - H.z) * _dir.z;        // head left / right of the hero on screen
+      const mv = (_a.z - _b.z) * _dir.x - (_a.x - _b.x) * _dir.z;       // screen-x travel of the head per +yaw (UP x neck)
+      bossReact.side = ((Math.abs(lat) > 0.1 ? lat : 1) * mv) >= 0 ? 1 : -1;
+    }
+  }
+  bossReact.rear += (rearW - bossReact.rear) * Math.min(1, dt * (rearW > bossReact.rear ? 10 : 6));
+  if (bossReact.rear > 1e-3) {
+    const r = bossReact.rear * bossReact.rear * (3 - 2 * bossReact.rear), sd = bossReact.side;
+    // the neck swings aside (about 1.3 m at the head) and lifts a little; the head turns back to keep its eyes on him
+    rotWorld(BB.n1, UP, 0.34 * r * sd); rotWorld(BB.n3, UP, 0.34 * r * sd); rotWorld(BB.n5, UP, 0.18 * r * sd); rotWorld(BB.head, UP, -0.66 * r * sd);
+    _ax.set(-B.forwardZ(), 0, B.forwardX()); rotWorld(BB.n1, _ax, 0.2 * r); rotWorld(BB.n3, _ax, 0.16 * r);
+  }
   // hit recoil: the neck chain rears away from the blade, spine flinches; emissive flash on the hide
   bossReact.t += dt;
   if (bossReact.amp > 0.01) {
     const s = bossReact.amp * Math.exp(-bossReact.t * 6.5) * Math.cos(bossReact.t * 15);
     _ax.set(bossReact.dz, 0, -bossReact.dx);
-    rotWorld(BB.s2, _ax, 0.06 * s); rotWorld(BB.n1, _ax, 0.10 * s); rotWorld(BB.n3, _ax, 0.10 * s); rotWorld(BB.n5, _ax, 0.08 * s);
-    rotWorld(BB.s1, UP, 0.05 * s * Math.sin(bossReact.t * 9));
+    // t7: at fight distance the 0.05 rad flinch was invisible (QA: "the dragon shows no reaction"), gains x1.7
+    rotWorld(BB.s2, _ax, 0.10 * s); rotWorld(BB.n1, _ax, 0.17 * s); rotWorld(BB.n3, _ax, 0.17 * s); rotWorld(BB.n5, _ax, 0.14 * s);
+    rotWorld(BB.s1, UP, 0.08 * s * Math.sin(bossReact.t * 9));
     if (bossReact.t > 0.9) bossReact.amp = 0;
   }
   bossSecondary(B, dt);
@@ -2078,6 +2338,13 @@ function heroLightVar() {
   if (v && v.dance && !v.heavy && n % 2 === 1) { const c = v.foot + 'b'; return AT_OK[c] !== undefined ? c : null; }
   return null;
 }
+// v2.39: the great-sword light take on the new footwork (gs_l1b -> gl_1b), only while the sim walks that root curve
+function heroGreatFootClip(v) {
+  if (H.weapon < 1 || !v || !v.foot || !GREAT_FOOT_CLIPS.length) return null;
+  const L = GS_LIGHT_VAR[H.verb]; if (!L) return null;
+  const n = VAR_ON ? Math.max(0, (H.varIdx | 0) - 1) : 0, c = 'gl_' + L[n % L.length].slice(4);
+  return AT_OK[c] !== undefined && hero.actions[c] ? c : (AT_OK[v.foot] !== undefined && hero.actions[v.foot] ? v.foot : null);
+}
 const heroGsGuard = () => H.weapon >= 1 && !!hero.actions[GS_GUARD.clip];
 // v2.30 recovery hold: the last GS_HOLD_F frames of a great-sword verb ease the arms into gs_drag (blade low and out
 // to the right), and loco keeps it for GS_HOLD_TAIL frames after the action ends before the ready carry returns.
@@ -2107,10 +2374,28 @@ function poseHeroBase(alpha, presentDt) {
       else pose(hero, 1, 'dodge', 1, u * hero.dur.dodge * 0.8);
       return;
     }
+    if (AIR_POSE[H.verb]) {
+      const P = AIR_POSE[H.verb], c = hero.actions[P[0]] ? P[0] : 'heavy', f = H.actF + alpha, u = Math.min(1, f / v.total);
+      const t0 = Math.min(P[1], hero.dur[c] - 0.01), t1 = Math.min(P[2], hero.dur[c] - 0.001);
+      if (P[3] !== undefined && c === P[0]) {
+        // wind-up eases in to the strike on the first active frame, then the follow-through plays out the recovery
+        // a wave verb (BACK_CUT) throws its crescent on the last active frame, so the blade comes through there
+        const fs = v.wave ? v.startup + v.active : v.startup + 1, th = Math.min(P[3], t1);
+        pose(hero, 1, c, 1, f <= fs ? t0 + (th - t0) * Math.pow(f / fs, 1.4) : th + (t1 - th) * Math.min(1, (f - fs) / Math.max(1, v.total - fs)));
+        return;
+      }
+      pose(hero, 1, c, 1, t0 + (t1 - t0) * u); return;
+    }
+    const gfc = heroGreatFootClip(v);
+    if (gfc) {
+      // v2.39 great sword light: the layered take (weighted step + two-handed arc) at the sim frame, 1:1 with the root curve
+      pose(hero, 1, gfc, 1, Math.min(Math.max(0, H.actF - 1 + alpha) / 60, hero.dur[gfc] - 0.001));
+      return;
+    }
     if (v.sweep || (v.dance && AT_OK[v.foot] !== undefined)) {
       // v2.22 sweep / v2.27 dance step: the layered clip at the sim frame, 1:1 (the sim walks the same root curve,
       // feet stay planted)
-      const c = heroLightVar() || (AT_OK[v.foot] !== undefined ? v.foot : hero.actions[v.clip] ? v.clip : 'heavy');
+      const c = (v.quick && AT_OK[v.q] !== undefined ? v.q : null) || heroLightVar() || (AT_OK[v.foot] !== undefined ? v.foot : hero.actions[v.clip] ? v.clip : 'heavy');
       // root sits at lerp(actF-1, actF, alpha) on the curve, so the clip samples the same instant (else feet skate)
       const ct = Math.min(Math.max(0, H.actF - 1 + alpha) / 60, hero.dur[c] - 0.001);
       if (hw > 0) pose(hero, 2, c, 1, ct, 'gs_drag', hw, 0); else pose(hero, 1, c, 1, ct);
@@ -2161,6 +2446,11 @@ function poseHeroBase(alpha, presentDt) {
       : f < R.FINALE - 8 ? hold
       : Math.min(d - 0.01, hold + (d - hold) * Math.min(1, (f - (R.FINALE - 8)) / (R.TOTAL - (R.FINALE - 8))));
     pose(hero, 1, 'heavy', 1, tc); return;
+  }
+  if (st === HERO_STATE.AIR) {
+    const c = hero.actions[JUMP_POSE[0]] ? JUMP_POSE[0] : 'dodge', n = HERO_JUMP.TAKEOFF + HERO_JUMP.AIR;
+    const u = Math.min(1, (Math.max(0, H.jumpF) + alpha) / n), t0 = Math.min(JUMP_POSE[1], hero.dur[c] - 0.01), t1 = Math.min(JUMP_POSE[2], hero.dur[c] - 0.001);
+    pose(hero, 1, c, 1, t0 + (t1 - t0) * u); return;
   }
   if (st === HERO_STATE.HITSTUN) { pose(hero, 1, 'hit', 1, Math.min(H.actF, 40) / 60); return; }
   if (st === HERO_STATE.DEAD) { pose(hero, 1, 'death', 1, Math.min(H.actF / 60, hero.dur.death - 0.01)); return; }
@@ -2483,6 +2773,7 @@ function update(realDt, alpha, presentDt, noRender = false) {
 
   presentDtNow = presentDt;
   hero.root.position.set(prev.hx + (H.x - prev.hx) * alpha, colliders.terrainY(H.z) + (prev.hy || 0) + ((H.y || 0) - (prev.hy || 0)) * alpha, prev.hz + (H.z - prev.hz) * alpha);
+  hero.root.position.y += bflipPhase(alpha);
   // v2.22 plant deficit (HeroSim.plantDX/DZ): the model sits where the clip's root curve put it, so planted feet
   // never skate when contact / walls bend the sim travel. The camera and gameplay keep the sim position.
   camSimX = hero.root.position.x; camSimZ = hero.root.position.z;
@@ -2498,7 +2789,7 @@ function update(realDt, alpha, presentDt, noRender = false) {
       const pf = heroPlantF();
       if (pf >= 0) k = pf >= PLANT_F ? 1 : Math.max(k, Math.min(1, presentDt * 60 / Math.max(1, PLANT_F - pf)));
       dispYaw += e * k; }
-    hero.root.rotation.y = dispYaw; }
+    hero.root.rotation.y = dispYaw + airSpinYaw(alpha); }
   poseHero(alpha, presentDt);
   for (let i = 0; i < slots.length; i++) if (slots[i].bound) poseDuelist(slots[i], i, alpha);
   if (sim.bossActive) poseBoss(alpha);
@@ -2513,9 +2804,12 @@ function update(realDt, alpha, presentDt, noRender = false) {
     if (TRAILER) {
       // trailer: ribbon only on the outer 45% of the blade (a 2.2 m glaive drew a flat full-length sheet) and tinted
       // by the weapon's own edge colour; the tip motion is kept for screen-aligned contact cuts
-      _a.lerp(_b, 0.7);   // outer 30%: a thin bright arc, not a translucent sheet
+      // outer 30%: a thin bright arc, not a translucent sheet. t7: on the 1 m sabre 30% is a 0.3 m hairline at
+      // fight distance, so a one-handed blade draws its outer half
+      _a.lerp(_b, H.weapon < 1 ? 0.5 : 0.7);
       trlTip.prev.copy(trlTip.cur); trlTip.cur.copy(_b); trlTip.live = trlTip.f === sim.frame - 1 || trlTip.f === sim.frame ? trlTip.live + 1 : 0; trlTip.f = sim.frame;
-      fx.streakSample(HERO_ID, _a, _b, finisher ? INK.FIN : trailerEdge(), 0.16);
+      // t7: in the air the body moves 2 m while the ribbon lingers, which drew long straight lines beside the crescent
+      fx.streakSample(HERO_ID, _a, _b, finisher ? INK.FIN : trailerEdge(), (H.y || 0) > 0.2 ? 0.08 : 0.16);
     } else
     fx.streakSample(HERO_ID, _a, _b, INK_ON ? (finisher ? INK.FIN : INK.JADE) : 0xff1f14, INK_ON ? INK.LINGER : undefined); streak.hero = true; }
   else if (streak.hero) { fx.streakEnd(HERO_ID); streak.hero = false; }
@@ -2526,7 +2820,7 @@ function update(realDt, alpha, presentDt, noRender = false) {
 
   camHero.position.copy(hero.root.position); camHero.position.x = camSimX; camHero.position.z = camSimZ; camHero.yaw = H.yaw;
   // v2.30: the camera follows only 30% of the LEAP height, so the wheel reads as airborne on screen (frame rises with the hero otherwise)
-  camHero.position.y -= ((prev.hy || 0) + ((H.y || 0) - (prev.hy || 0)) * alpha) * 0.7;
+  camHero.position.y -= ((prev.hy || 0) + ((H.y || 0) - (prev.hy || 0)) * alpha) * 0.7; camHero.position.y -= bflip.h;
   chooseCamTarget();
   roadCamLayer();
   // cinematic subject: the wyvern's body-to-head midpoint (tracks the landing, the roar and the fall)
@@ -2573,7 +2867,9 @@ function update(realDt, alpha, presentDt, noRender = false) {
   wasFinisher = fin;
   letterbox(Math.max(cam.cineActive ? cam.cineLb : 0, reducedMotion ? 0 : dmc.riftLb * 0.6));
   cam.update(presentDt);
-  if (choreo && choreo.shot) choreo.applyCam(camera, presentDt, hero.root.position, boss.root.position, cam.cineActive);
+  // t12: a shot may name how much of the air height it follows (air, default 0.45); the close air-string shots ride 0.7
+  if (choreo && choreo.shot) { _chp.copy(hero.root.position); _chp.y -= ((prev.hy || 0) + ((H.y || 0) - (prev.hy || 0)) * alpha) * (1 - (choreo.shot.air !== undefined ? choreo.shot.air : 0.45)) + bflip.h;
+    choreo.applyCam(camera, presentDt, _chp, boss.root.position, cam.cineActive); }
   camera.getWorldDirection(_dir); camYaw = Math.atan2(-_dir.x, -_dir.z);
   placeFill();
   fx.update(presentDt);
@@ -2646,7 +2942,7 @@ function resetPresentation() {
   fx.streakEnd(HERO_ID); streak.hero = false; fx.clearTelegraph(BOSS_ID); fx.clearFire(); wasFinisher = false; finHitShown = false; hud.clearFx(); breathOn = 0; letterbox(0);
   hero.inert.reset(); boss.inert.reset(); for (const s of slots) s.inert.reset(); dispYaw = null; lean.sp = 0; lean.p = 0; lean.r = 0; lean.yaw = H.yaw;
   swing.aid = -1; bossAnim.lag = 0; bossAnim.foot[0] = bossAnim.foot[1] = 1; bossAnim.lastF = -1; bossAnim.lastVerb = -1; bossAnim.yawPrev = sim.brain.yaw;
-  heroReact.amp = 0; bossReact.amp = 0; bossReact.flash = 0; bossReact.look = 0; bossReact.lastClip = ''; chargeFx.glow = 0; chargeFx.wasFull = false;
+  heroReact.amp = 0; bossReact.amp = 0; bossReact.flash = 0; bossReact.look = 0; bossReact.rear = 0; bossReact.lastClip = ''; chargeFx.glow = 0; chargeFx.wasFull = false;
   heroSteel.emissive.setRGB(0, 0, 0); for (const m of bossMats) if (m.emissive) m.emissive.setRGB(0, 0, 0);
   for (let i = 0; i < slots.length; i++) { if (slots[i].actorId >= 0) { fx.streakEnd(slots[i].actorId); fx.clearTelegraph(slots[i].actorId); } streak.d[i] = false; }
   bindSlots(); boss.root.visible = sim.bossActive;
@@ -2720,7 +3016,11 @@ const FLOW = qs.get('flow') === '1';
 if (qs.get('hitstop') !== '1') loop.noDilate = true;
 if (FLOW) { loop.noDilate = true; cam.impact = cam.deflect = cam.triggerPush = cam.phantomStep = () => {}; }   // no shake, no zoom punch
 H.comboOn = qs.get('combo10') !== '0';
+H.jumpOn = qs.get('jump') !== '0'; H.stepInOn = qs.get('stepin') !== '0'; H.hopOn = qs.get('hop') !== '0';   // v2.36
+H.airStrOn = qs.get('air') !== '0'; H.backCutOn = qs.get('bcut') !== '0';   // v2.37 air string + launcher / back-step crescent
 H.danceOn = DANCE_ON && ['dz_l1', 'dz_l2', 'dz_l3', 'dz_l4', 'dz_l5', 'dz_h1', 'dz_h2'].every((c) => AT_OK[c] !== undefined);
+H.quickOn = QUICK_ON && ['q_l1', 'q_l2', 'q_l3', 'q_l4', 'q_l5'].every((c) => AT_OK[c] !== undefined);   // v2.38
+H.setGreatFoot(GFOOT_ON && ['gl_1a', 'gl_2a', 'gl_3a'].every((c) => AT_OK[c] !== undefined));   // v2.39
 // rec showcase only: ?bdmg=0.5 scales damage the wyvern takes so a filmed fight lasts long enough for full strings
 // rec showcase only: ?nopick=1 keeps a one-hand dancer from walking into the ford great sword mid-take
 if (recMode && qs.get('nopick') === '1') { const _sb = sim._startBoss.bind(sim); sim._startBoss = () => { _sb(); sim.pickup.active = false; }; sim.pickup.active = false; }
@@ -2912,7 +3212,8 @@ window.__ember = {
       cam: { shot: cam.shot, trauma: cam.trauma, push: cam.push, phantom: cam.phantom, orbitYaw: cam.orbitYaw, heroYaw: H.yaw, timeScale: loop.timeScale,
         dist: Math.hypot(camera.position.x - H.x, camera.position.z - H.z), occFrames: cam.occFrames, occYaw: cam.occYaw, occOn: cam.occluder.active },
       cine: { kind: CINE_NAMES[cam.cineKind], w: cam.cineW, log: cam.cineLog.slice() }, fx: fx.counts(), postBlur: +(post.blur || 0).toFixed(3), rec: recMode, lunge: Object.keys(lungeOk),
-      step: { kind: H.stepKind, dodgeF: H.dodgeF, clip: hero.on.length ? hero.on[0].getClip().name : '', verb: H.state === HERO_STATE.ACTION ? H.verb : H.state === HERO_STATE.FINISHER ? 'FINISHER' : '', hs: H.state }, programs: { start: progStart, now: renderer.info.programs.length },
+      step: { kind: H.stepKind, dodgeF: H.dodgeF, clip: hero.on.length ? hero.on[0].getClip().name : '', verb: H.state === HERO_STATE.ACTION ? H.verb : H.state === HERO_STATE.FINISHER ? 'FINISHER' : '', hs: H.state },
+      jump: { y: +(H.y || 0).toFixed(3), jumps: H.jumps || 0, jumpF: H.jumpF || 0, hop: +(H.hopDist || 0).toFixed(2), air: H.state === HERO_STATE.AIR }, programs: { start: progStart, now: renderer.info.programs.length },
       weapon: H.weapon, grip: { w: +GRIP.w.toFixed(3), n: GRIP.n, far: GRIP.far, errMeanMm: GRIP.n ? +(GRIP.err / GRIP.n * 1000).toFixed(2) : 0, errMaxMm: +(GRIP.errMax * 1000).toFixed(2), speed: +H.speed.toFixed(3), loco: H.state === HERO_STATE.LOCO, eMm: +((GRIP.e || 0) * 1000).toFixed(1), dbg: GRIP.dbg }, heroXZ: [+H.x.toFixed(2), +H.z.toFixed(2), +H.yaw.toFixed(3)], pickup: { x: sim.pickup.x, z: sim.pickup.z, active: sim.pickup.active, takenF: sim.pickup.takenF, shown: pickupRoot.visible }, drop: { ...sim.drop, shown: dropRoot.visible, carry: sim.carry, claimed: sim.claimed.slice() }, road: { on: roadMap.on, leg: roadMap.leg },
       dropped: loop.droppedSteps, touch: touch.visible, fs: { supported: fullscreen.supported, mode: fullscreen.mode, active: fullscreen.active, requests: fullscreen.requests }, hud: { hp: hud.el.hpI.style.transform, boss: hud.el.boss.style.display } };
   },
@@ -3062,6 +3363,23 @@ window.__ember = {
     const blade = great && heroGreat.tip ? heroGreat : heroSwordStd, vis = heroGreat.socket.visible;
     if (great) heroGreat.socket.visible = true;
     try { return tipScanWith(a, clip, blade); } finally { heroGreat.socket.visible = vis; }
+  },
+  // v2.37 QA: leg read of the hero in this frame (knee flex in rad, feet apart along / across the body, tuck axis vs sim right)
+  airProbe() {
+    const B = heroBones, p = (b) => b.getWorldPosition(new THREE.Vector3());
+    const hl = p(B.LeftUpLeg), hr = p(B.RightUpLeg), kl = p(B.LeftLeg), kr = p(B.RightLeg), fl = p(B.LeftFoot), fr = p(B.RightFoot);
+    const flex = (h, k, f) => +k.clone().sub(h).angleTo(f.clone().sub(k)).toFixed(2);
+    const r = hr.clone().sub(hl).normalize(), fw = new THREE.Vector3(r.z, 0, -r.x).normalize(), d = fl.clone().sub(fr), tip = heroSwordStd.tip.getWorldPosition(new THREE.Vector3());
+    return { f: sim.frame, verb: H.state === HERO_STATE.ACTION ? H.verb : HERO_STATE_NAMES_QA[H.state] || String(H.state), actF: H.actF, y: +(H.y || 0).toFixed(2),
+      kL: flex(hl, kl, fl), kR: flex(hr, kr, fr), across: +Math.abs(d.dot(r)).toFixed(2), along: +d.dot(fw).toFixed(2), ax: +airBody.ax.toFixed(2),
+      footL: +(fl.y - hl.y).toFixed(2), footR: +(fr.y - hr.y).toFixed(2), tipY: +(tip.y - hero.root.position.y).toFixed(2), wave: H.wave.live ? +H.wave.d.toFixed(2) : -1,
+      gy: +colliders.terrainY(H.z).toFixed(2), hipY: +((hl.y + hr.y) * 0.5 - colliders.terrainY(H.z)).toFixed(2), headY: +(B.Head ? p(B.Head).y - colliders.terrainY(H.z) : 0).toFixed(2),
+      footMin: +(Math.min(fl.y, fr.y) - colliders.terrainY(H.z)).toFixed(2), dodgeF: H.dodgeF, st: H.state, tuck: +airBody.t.toFixed(2), flip: +bflip.u.toFixed(2),
+      sh: +(B.Head ? Math.abs(p(B.Head).project(camera).y - (fl.y < fr.y ? fl : fr).clone().project(camera).y) * 0.5 : 0).toFixed(3), cd: +p(B.Hips).distanceTo(camera.position).toFixed(2),
+      sx: +(p(B.Hips).project(camera).x * 0.5 + 0.5).toFixed(4), sy: +(0.5 - p(B.Hips).project(camera).y * 0.5).toFixed(4),
+      // t12: head / lowest foot / blade tip on screen (0 = top edge) and where the last air crescent opened vs the blade
+      hsy: +(B.Head ? 0.5 - p(B.Head).project(camera).y * 0.5 : 0).toFixed(3), fsy: +(0.5 - (fl.y < fr.y ? fl : fr).clone().project(camera).y * 0.5).toFixed(3),
+      tsx: +(tip.clone().project(camera).x * 0.5 + 0.5).toFixed(3), tsy: +(0.5 - tip.clone().project(camera).y * 0.5).toFixed(3), cres: +(dmc.cresD || 0).toFixed(2) };
   },
   tipScanStd(clip) {
     const a = hero.actions[clip]; if (!a) return null;
