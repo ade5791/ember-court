@@ -1878,6 +1878,7 @@ const HB = { s1: heroBones.Spine01, s2: heroBones.Spine02, neck: heroBones.neck 
 const BB = { s1: bone('wivern_ Spine1'), s2: bone('wivern_ Spine2'), n1: bone('wivern_ Neck1'), n3: bone('wivern_ Neck3'), n5: bone('wivern_ Neck5'), head: HEAD };
 const heroReact = { amp: 0, t: 9, dx: 0, dz: 0 };
 const bossReact = { amp: 0, t: 9, dx: 0, dz: 1, flash: 0, look: 0, rear: 0, side: 1, lastClip: '' };
+const SHOVE_ON = qs.get('shove') !== '0', SHOVE_M = 0.22;   // v2.40: metres of body shove per unit of hit amp (light ~0.11, air ~0.24)
 const chargeFx = { wasFull: false, glow: 0 };
 const lean = { sp: 0, yaw: 0, p: 0, r: 0 }; const _ax2 = new THREE.Vector3();
 HB.sp = heroBones.Spine;
@@ -2119,6 +2120,10 @@ function bossLayer(dt) {
     // t7: at fight distance the 0.05 rad flinch was invisible (QA: "the dragon shows no reaction"), gains x1.7
     rotWorld(BB.s2, _ax, 0.10 * s); rotWorld(BB.n1, _ax, 0.17 * s); rotWorld(BB.n3, _ax, 0.17 * s); rotWorld(BB.n5, _ax, 0.14 * s);
     rotWorld(BB.s1, UP, 0.08 * s * Math.sin(bossReact.t * 9));
+    // v2.40 stagger shove (review t12: "the wyvern barely reacts"): the whole body is pushed back along the cut and
+    // settles, so every landed hit moves the boss. Presentation only - sim position, contact and AI are untouched.
+    if (SHOVE_ON) { const sh = SHOVE_M * bossReact.amp * Math.min(1, bossReact.t * 28) * Math.exp(-bossReact.t * 5.5);
+      boss.root.position.x += bossReact.dx * sh; boss.root.position.z += bossReact.dz * sh; }
     if (bossReact.t > 0.9) bossReact.amp = 0;
   }
   bossSecondary(B, dt);
@@ -3414,7 +3419,8 @@ window.__ember = {
   // col 19: carried weapon id (0 sword, 1 great sword, 2 fang, 3 odachi, 4 frostbrand) for film cutting
   H.weapon | 0,
   // col 20 (v2.32): the clip actually playing for the active verb, so a cut can prove no animation repeats
-  H.state === HERO_STATE.ACTION ? (heroLightVar() || (H.weapon >= 1 && GS_SET[H.verb] ? GS_SET[H.verb].clip + ':' + H.verb : (H.verbs[H.verb].foot || H.verbs[H.verb].clip))) : ''] }; },
+  // v2.40: the great-sword footwork take (gl_*) is what plays when the sim walks its root curve; log that, not gs_l*
+  H.state === HERO_STATE.ACTION ? (heroGreatFootClip(H.verbs[H.verb]) || heroLightVar() || (H.weapon >= 1 && GS_SET[H.verb] ? GS_SET[H.verb].clip + ':' + H.verb : (H.verbs[H.verb].foot || H.verbs[H.verb].clip))) : ''] }; },
   begin() { if (sim.state === GameState.TITLE) { input.releaseAll(); sim.start(); resetPresentation(); } return GAME_STATE_NAMES[sim.state]; },
   pump(n) { const p = loop.paused; loop.paused = false; for (let i = 0; i < n; i++) loop.step(); loop.paused = p; update(0, 1, 0); return sim.frame; },
   dispose() {
